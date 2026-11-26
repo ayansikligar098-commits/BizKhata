@@ -709,8 +709,10 @@ export function parseAssistantMessage(
     };
   }
 
-  // --- Agent payment: "Agent Ramesh ko 500 diye". ---
-  if (/agent/.test(q) && /diye|diya|pay|paid|payment|de\s*diye|dena/.test(q)) {
+  // --- Agent payment: "Agent Ramesh ko 500 diye" (a completed payment).
+  // "Kitna dena baaki hai" (how much is owed) is a QUESTION, not a
+  // payment — past-tense verbs only, never the infinitive "dena".
+  if (/agent/.test(q) && /diye|diya|\bpaid\b|\bpayment\b|\bpay\b|de\s*diye/.test(q)) {
     const agentName = findNameIn(q, state.agents.filter((a) => a.profileId === profile.id).map((a) => a.name));
     if (!agentName) {
       const names = state.agents.filter((a) => a.profileId === profile.id).map((a) => a.name);

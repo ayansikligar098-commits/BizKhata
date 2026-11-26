@@ -256,6 +256,16 @@ run('agent payable', 'overpaying agent rejected', () => {
   return !res.ok && state.jobs[0].agentPaidPaise === 15000;
 });
 run('agent payable', 'unknown agent asks, never invents', () => P('Agent Mohan ko 500 rupaye diye').kind === 'draft');
+run('agent payable', '"kitna dena baaki hai?" is a question, not a payment', () => {
+  const { state, p1 } = fixture();
+  const r = P('Ramesh agent ko kitna dena baaki hai?');
+  const a = know.computeKnowledge(state, p1, 'Ramesh agent ko kitna dena baaki hai?', {});
+  return r.kind === 'question' && a !== null && a.text.includes('₹100.00');
+});
+run('agent payable', '"agent payable kitna hai?" is a question, not a payment', () => {
+  const r = P('Agent payable kitna hai?');
+  return r.kind === 'question';
+});
 
 // --- Cash/UPI balances ---
 run('balances', 'cash balance from real txns', () => {
