@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App label. The name lives in domain/Branding.kt (APP_NAME = "BizKhata").
+         Keep this file in sync with Branding.kt. -->
+    <string name="app_name">BizKhata</string>
+</resources>
