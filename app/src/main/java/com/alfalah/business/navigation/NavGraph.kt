@@ -6,7 +6,10 @@ package com.alfalah.business.navigation
  *  have their own page and their own customer list. */
 object Routes {
     const val LANGUAGE = "language"
+    const val AUTH = "auth"
+    const val CATEGORY_PICK = "category_pick"
     const val DASHBOARD = "dashboard"
+    const val SERVICES = "services"
     const val CASH_BOOK = "cash_book"
     const val UPI_BOOK = "upi_book"
     const val MONEY_TRANSFER = "money_transfer"
@@ -21,8 +24,10 @@ object Routes {
     const val DAILY_BUSINESS = "daily_business"
     const val REPORTS = "reports"
     const val DIFFERENCE_FINDER = "difference_finder"
+    const val AUDIT_LOG = "audit_log"
+    const val RECYCLE_BIN = "recycle_bin"
+    const val CUSTOMIZATION = "customization"
     const val SETTINGS = "settings"
-    const val CATEGORY_PICK = "category_pick"
 
     fun service(service: String) = "service/$service"
     fun customerDetail(customerId: Long) = "customer/$customerId"

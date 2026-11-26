@@ -97,6 +97,10 @@ interface KhataDao {
     @Query("SELECT * FROM khata_entries WHERE jobId = :jobId AND state = 'ACTIVE' ORDER BY dateEpochDay DESC")
     fun observeByJob(jobId: Long): Flow<List<KhataEntryEntity>>
 
+    /** Whole-profile ledger (Customer Khata detail: payments across a customer's jobs). */
+    @Query("SELECT * FROM khata_entries WHERE profileId = :profileId AND state = 'ACTIVE' ORDER BY dateEpochDay DESC")
+    fun observeByProfile(profileId: Long): Flow<List<KhataEntryEntity>>
+
     @Insert suspend fun insert(entry: KhataEntryEntity): Long
 }
 
@@ -212,6 +216,13 @@ interface ExpenseDao {
 interface DocumentDao {
     @Query("SELECT * FROM documents WHERE jobId = :jobId AND state = 'ACTIVE' ORDER BY uploadedAtEpochMs DESC")
     fun observeByJob(jobId: Long): Flow<List<DocumentEntity>>
+
+    /** All documents belonging to one customer's jobs (Khata → Documents tab). */
+    @Query(
+        "SELECT d.* FROM documents d JOIN service_jobs j ON d.jobId = j.id " +
+        "WHERE j.customerId = :customerId AND d.state = 'ACTIVE' ORDER BY d.uploadedAtEpochMs DESC"
+    )
+    fun observeByCustomer(customerId: Long): Flow<List<DocumentEntity>>
 
     @Insert suspend fun insert(document: DocumentEntity): Long
 

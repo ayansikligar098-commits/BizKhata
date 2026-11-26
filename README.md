@@ -10,20 +10,43 @@ the same accounting rules.
 
 ## Status (2026-11-26)
 
-- **Phases A–F scaffold: code complete, not yet compiled in Android Studio.**
-  All screens, Room entities/DAOs, repositories, the accounting engine and
-  the unit tests are written. It has NOT been built in Android Studio yet,
-  so a first compile may surface small errors — fix and re-run the tests.
+- **UI REBUILD (2026-11-26): native Android UI rebuilt to match the
+  12-screen reference (navy + purple, reference file
+  `workspace/user/files/44420_4_1a7l.png`).** Dashboard (period pills,
+  Income/Expenses/Profit, Cash/UPI/Due/Payable, service-wise donut),
+  drawer navigation, Cash/UPI Book (filters, opening/closing, running
+  balance, + entry FAB), Money Transfer (Overview/Transactions/Settlement
+  tabs, gradient summary, daily closing), Services grid, per-service job
+  pages (filter pills with real counts, search, status pill, Amount/Paid/
+  Due, status change, agent assignment — PAN never assignable), Customer
+  Khata list + Customer Profile (Ledger/Jobs/Documents tabs), Agent
+  Management + Agent Profile (per-agent ledger), Expenses (category chips,
+  month, search), Machine Maintenance (own screen), Reports (Business/
+  Service-wise/Customer tabs, 7-day bar chart, CSV share), Difference
+  Finder (Cash/UPI/MT/Service tabs, reconciliation card, possible-cause
+  suggestions), Receipt Generator (A4/thermal preview, signature),
+  Audit Log, Recycle Bin, Customization Studio, Settings (list rows),
+  mobile + 4-digit PIN auth (SHA-256 hash only), language picker,
+  business setup — all in the same navy/purple language, Light/Dark/
+  System themes, Canvas charts (no chart dependency), responsive layouts.
+  **Still NOT compiled: this VM has no JDK.** First compile + unit tests
+  must happen in Android Studio (`./gradlew testDebugUnitTest`).
+- **JVM-free verification done (2026-11-26):** `docs/verify-android.py`
+  passes — brace/paren balance on all 40 Kotlin files, every project
+  import resolves to a defined symbol, every `Routes.*` reference exists,
+  every screen the NavHost uses is defined, no demo numbers/names in
+  code, no WebView, no Double money maths; the 8 AccountingEngine test
+  cases pass in a Python mirror. The test file was fixed where it called
+  APIs the engine never had (`isInternalTransfer`, 2-arg `serviceProfit`)
+  — the engine is authoritative, the test now uses `internalTransfer`
+  (delta pair) and the 3-arg `serviceProfit`.
 - **Phase G (testing) is in progress, not passed.** The accounting engine
   unit tests are written; they must be run (`./gradlew testDebugUnitTest`)
   and pass before any release claim.
-- **GitHub: BLOCKED, then new email.** Creating the GitHub account failed —
-  GitHub says the account linked to the owner's Google identity is
-  suspended, so "Continue with Google" signs into the suspended account
-  instead of making a new one. No repo was created. Ayan gave a new
-  email for GitHub only: **alfalah7797@gmail.com** — a browser task is
-  creating the account + repo now; repo URL pending. The code lives in
-  the workspace (`~/workspace/al-falah-app/android/`) until then.
+- **GitHub: live.** Repo https://github.com/ayansikligar098-commits/BizKhata
+  (owner ayansikligar098-commits, ayansikligar098@gmail.com). Android code
+  is pushed via the `custom.github` helper (`push-android`); the website
+  is pushed separately by another agent (`push-website`).
 - **Scope settled 2026-11-26 19:03 IST: Record B DISCARDED.** The original
   ChatGPT chat (43 messages) was found and read — it is CSC-only. Record
   B's retail+school content was ChatGPT's wrong reconstruction. No
@@ -41,9 +64,9 @@ the same accounting rules.
    folder.
 2. Let Gradle sync (Kotlin 2.0.21, Compose 1.7.6, Material 3 1.3.1,
    Room 2.6.1, Navigation Compose, DataStore).
-3. Run on an emulator or a real phone (minSdk 24).
+3. Run on an emulator or a real phone (minSdk 26).
 4. First run: Language (English / Hindi / Hinglish) → pick your business
-   category → Dashboard. Start empty — add real entries.
+   category → mobile + 4-digit PIN → Dashboard. Start empty — add real entries.
 
 ## Architecture
 
@@ -52,15 +75,20 @@ the same accounting rules.
   setup per category), `AccountingEngine` (all money rules, paise as
   `Long`, never `Double`), `AiFeatures` (Gemini free-tier only, off
   without a key), `Branding` (single place for the app name: `BizKhata`).
-- `data/` — Room (`bizkhata.db`, v1): entities, DAOs, `AppDatabase`,
-  `SettingsStore` (DataStore: language, theme, active profile),
-  `Repositories` (transactional: receive payment, add expense, internal
-  transfer, money transfer, pay agent, soft-delete/restore job).
-- `ui/` — one screen per module: Dashboard, Cash Book, UPI Book, Money
-  Transfer, Service Jobs (PAN, Aadhaar, Voter ID, Ayushman, Xerox,
-  Printing, Smart Card, Document Work), Customer Khata, Agents, Expenses
-  + Machine Maintenance, Receipts, Daily Business / Reports, Difference
-  Finder, Settings (language, theme, profiles, Recycle Bin, AI, backup).
+- `data/` — Room (`bizkhata.db`, v2): entities, DAOs, `AppDatabase`,
+  `SettingsStore` (DataStore: language, theme, active profile, PIN hash,
+  disabled modules), `Repositories` (transactional: receive payment, add
+  expense, internal transfer, money transfer, pay agent, soft-delete/
+  restore job, agent assignment with the PAN guard, job status changes,
+  direct Cash/UPI book entries).
+- `ui/` — one screen per module, navy + purple design (see Status):
+  Dashboard (period pills + donut), drawer + bottom nav shell, Cash Book,
+  UPI Book, Money Transfer (3 tabs + daily closing), Services grid,
+  Service Jobs (PAN, Aadhaar, Voter ID, Ayushman, Xerox, Printing, Smart
+  Card, Document Work), Customer Khata + Customer Profile, Agents + Agent
+  Profile, Expenses + Machine Maintenance, Receipt Generator, Reports
+  (bar chart), Difference Finder, Audit Log, Recycle Bin, Customization
+  Studio, Settings, Auth (mobile + PIN), Language, Category Pick.
 - `navigation/` — `Routes`, one route per module.
 
 ## Accounting rules (non-negotiable, enforced in `AccountingEngine`)

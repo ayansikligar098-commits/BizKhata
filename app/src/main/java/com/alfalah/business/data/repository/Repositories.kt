@@ -195,6 +195,64 @@ class BusinessRepository(private val db: AppDatabase) {
 
     suspend fun addAgent(agent: AgentEntity): Long = agents.insert(agent)
 
+    /** Assign an agent + their charges to a job. PAN is NEVER assignable
+     *  to an agent — ayan does PAN himself; the guard lives here, not in
+     *  the UI, so no screen can bypass it. */
+    suspend fun setJobAgent(profileId: Long, job: ServiceJobEntity, agentId: Long, chargesPaise: Long) {
+        require(job.service != ServiceType.PAN) { "PAN work is never assigned to an agent" }
+        require(chargesPaise >= 0) { "Agent charges cannot be negative" }
+        db.runInTransaction {
+            jobs.update(job.copy(agentId = agentId, agentChargesPaise = chargesPaise))
+            audit.insert(
+                AuditLogEntity(
+                    profileId = profileId, entityType = "ServiceJob", entityId = job.id,
+                    action = "EDITED",
+                    oldValue = "agent=${job.agentId} charges=${job.agentChargesPaise}",
+                    newValue = "agent=$agentId charges=$chargesPaise"
+                )
+            )
+        }
+    }
+
+    /** Change a job's status (New → In Progress → … → Delivered/Cancelled). */
+    suspend fun updateJobStatus(profileId: Long, job: ServiceJobEntity, newStatus: com.alfalah.business.domain.JobStatus) {
+        db.runInTransaction {
+            jobs.update(job.copy(status = newStatus, updatedAtEpochMs = System.currentTimeMillis()))
+            audit.insert(
+                AuditLogEntity(
+                    profileId = profileId, entityType = "ServiceJob", entityId = job.id,
+                    action = "EDITED",
+                    oldValue = "status=${job.status}", newValue = "status=$newStatus"
+                )
+            )
+        }
+    }
+
+    /**
+     * A direct Cash/UPI book entry (Cash Book FAB: "Add Income" / "Add
+     * Expense"). Only INCOME or EXPENSE — internal Cash ⇄ UPI transfers
+     * go through [internalTransfer] and are never income/expense.
+     */
+    suspend fun addCashBookEntry(
+        profileId: Long,
+        kind: String,
+        category: String,
+        amountPaise: Long,
+        mode: PaymentMode,
+        dayEpoch: Long,
+        description: String = ""
+    ) {
+        require(kind == "INCOME" || kind == "EXPENSE") { "Cash book entries are income or expense only" }
+        require(amountPaise > 0) { "Amount must be more than zero" }
+        txs.insert(
+            TransactionEntity(
+                profileId = profileId, kind = kind, category = category,
+                amountPaise = amountPaise, mode = mode,
+                dateEpochDay = dayEpoch, description = description
+            )
+        )
+    }
+
     /** Pay an agent. Agent payable is its own ledger — never netted with customer due. */
     suspend fun payAgent(payment: AgentPaymentEntity) {
         db.runInTransaction {
@@ -232,6 +290,13 @@ class BusinessRepository(private val db: AppDatabase) {
     fun searchCustomers(profileId: Long, query: String) = customers.search(profileId, query)
     fun observeJobsByAgent(profileId: Long, agentId: Long) = jobs.observeByAgent(profileId, agentId)
     fun observeAgentPayments(agentId: Long) = agents.observePayments(agentId)
+    fun observeJobsByCustomer(profileId: Long, customerId: Long) = jobs.observeByCustomer(profileId, customerId)
+    fun observeKhataByProfile(profileId: Long) = khata.observeByProfile(profileId)
+    fun observeKhataByJob(jobId: Long) = khata.observeByJob(jobId)
+    fun observeDocumentsByCustomer(customerId: Long) = db.documentDao().observeByCustomer(customerId)
+    suspend fun getCustomer(id: Long) = customers.getById(id)
+    suspend fun getAgent(id: Long) = agents.getById(id)
+    suspend fun getJob(id: Long) = jobs.getById(id)
     fun observeMaintenanceByEquipment(equipmentId: Long) = db.maintenanceDao().observeByEquipment(equipmentId)
     suspend fun lifetimeCost(equipmentId: Long): Long = db.maintenanceDao().lifetimeCost(equipmentId)
     suspend fun addMaintenance(maintenance: com.alfalah.business.data.entity.MaintenanceEntity) =

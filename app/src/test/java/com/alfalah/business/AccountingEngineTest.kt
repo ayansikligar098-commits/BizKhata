@@ -39,15 +39,21 @@ class AccountingEngineTest {
     @Test
     fun cashToUpi1000IsInternalOnly() {
         // ₹1,000 Cash → UPI is an internal movement: not income, not
-        // expense, and net profit is unchanged.
-        assertTrue(AccountingEngine.isInternalTransfer(100_000L))
+        // expense, and net profit is unchanged. The engine models it as
+        // a pair of deltas: cash −₹1,000, UPI +₹1,000 (net zero overall).
+        val deltas = AccountingEngine.internalTransfer(
+            100_000L, com.alfalah.business.domain.PaymentMode.CASH
+        )
+        assertEquals(-100_000L, deltas.first)
+        assertEquals(100_000L, deltas.second)
         assertEquals(0L, AccountingEngine.netProfit(0L, 0L, 0L))
     }
 
     @Test
     fun serviceProfitLinksDirectCostsOnly() {
         // Ink expense linked to Printing gives accurate Printing profit.
-        assertEquals(40_000L, AccountingEngine.serviceProfit(50_000L, 10_000L))
+        // (3-arg form: received − direct expenses − agent charges.)
+        assertEquals(40_000L, AccountingEngine.serviceProfit(50_000L, 10_000L, 0L))
     }
 
     @Test

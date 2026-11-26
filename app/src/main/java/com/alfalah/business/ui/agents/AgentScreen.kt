@@ -2,13 +2,17 @@ package com.alfalah.business.ui.agents
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -19,74 +23,108 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.alfalah.business.data.entity.AgentEntity
 import com.alfalah.business.data.entity.AgentPaymentEntity
 import com.alfalah.business.data.repository.BusinessRepository
-import com.alfalah.business.domain.AccountingEngine
 import com.alfalah.business.domain.AgentType
 import com.alfalah.business.domain.AppLanguage
 import com.alfalah.business.domain.PaymentMode
-import com.alfalah.business.ui.components.BigButton
+import com.alfalah.business.ui.components.AvatarCircle
+import com.alfalah.business.ui.components.BizCard
 import com.alfalah.business.ui.components.EmptyState
-import com.alfalah.business.ui.components.InfoCard
-import com.alfalah.business.ui.components.SectionTitle
+import com.alfalah.business.ui.components.PrimaryButton
+import com.alfalah.business.ui.components.SearchField
+import com.alfalah.business.ui.components.StatCard
 import com.alfalah.business.ui.components.formatRupees
 import com.alfalah.business.ui.components.parseRupeesToPaise
+import com.alfalah.business.ui.theme.BizColors
 import java.time.LocalDate
 import java.time.ZoneOffset
 import kotlinx.coroutines.launch
 
 /**
- * Agent Management — one page per agent (tap an agent to see its jobs).
- * Agent payable is its own ledger, separate from customer receivable.
- * PAN never appears here: ayan makes PAN cards himself.
+ * Agent Management — reference screen 9. Summary (Total Agents / Total
+ * Jobs / Total Charges), search, agent cards (avatar, name, jobs count,
+ * payable). Agent payable is its own ledger, separate from customer
+ * receivable. PAN never appears here: ayan makes PAN cards himself.
  */
 @Composable
 fun AgentScreen(
     profileId: Long,
     repository: BusinessRepository,
-    language: AppLanguage
+    language: AppLanguage,
+    onOpenAgent: (Long) -> Unit
 ) {
     val agents by repository.observeAgents(profileId).collectAsState(initial = emptyList())
+    val allJobs by repository.observeAllJobs(profileId).collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
     var showAdd by remember { mutableStateOf(false) }
     var payAgent by remember { mutableStateOf<AgentEntity?>(null) }
-    var selectedAgent by remember { mutableStateOf<AgentEntity?>(null) }
+    var query by remember { mutableStateOf("") }
     val today = LocalDate.now(ZoneOffset.UTC).toEpochDay()
 
+    val agentJobs = allJobs.filter { it.agentId != null }
+    val totalCharges = agentJobs.sumOf { it.agentChargesPaise }
+    val visible = agents.filter { agent ->
+        query.isBlank() ||
+            agent.name.contains(query, ignoreCase = true) ||
+            agent.mobile.contains(query)
+    }
+
     LazyColumn(
-        modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            SectionTitle("Agents")
-            Text("Agents do Aadhaar name / number / biometric work and licence work that cannot be done from the shop. You bring the customer and print. PAN is done by you — never by an agent.")
-            BigButton("Add Agent") { showAdd = true }
-        }
-        if (agents.isEmpty()) {
-            item { EmptyState("No agents yet. Add your first agent above.") }
-        } else {
-            items(agents) { agent ->
-                InfoCard(
-                    agent.name,
-                    agent.type.label,
-                    subtitle = "Mobile: ${agent.mobile}"
-                )
-                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Button(onClick = { selectedAgent = agent }, modifier = Modifier.fillMaxWidth()) {
-                        Text("View Jobs & Payments")
-                    }
-                    Button(onClick = { payAgent = agent }, modifier = Modifier.fillMaxWidth()) {
-                        Text("Pay Agent")
-                    }
-                }
+            Spacer(Modifier.height(4.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                StatCard("Total Agents", agents.size.toString(), modifier = Modifier.weight(1f))
+                StatCard("Total Jobs", agentJobs.size.toString(), modifier = Modifier.weight(1f))
+                StatCard("Total Charges", formatRupees(totalCharges), modifier = Modifier.weight(1f))
             }
         }
-        selectedAgent?.let { agent ->
-            item { AgentDetail(profileId, repository, agent) }
+        item {
+            SearchField(
+                value = query,
+                onValueChange = { query = it },
+                placeholder = "Search agent by name or mobile..."
+            )
         }
+        item {
+            PrimaryButton("+ Add Agent") { showAdd = true }
+        }
+        item {
+            Text(
+                "Agents do Aadhaar name / number / biometric work and licence work that cannot be done from the shop. You bring the customer and print. PAN is done by you — never by an agent.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (visible.isEmpty()) {
+            item {
+                EmptyState(
+                    if (agents.isEmpty()) "No agents yet. Add your first agent above."
+                    else "No agent matches this search.",
+                    actionLabel = "Add Agent",
+                    onAction = { showAdd = true }
+                )
+            }
+        } else {
+            items(visible) { agent ->
+                AgentCard(
+                    profileId = profileId,
+                    repository = repository,
+                    agent = agent,
+                    onOpen = { onOpenAgent(agent.id) },
+                    onPay = { payAgent = agent }
+                )
+            }
+        }
+        item { Spacer(Modifier.height(16.dp)) }
     }
 
     if (showAdd) {
@@ -115,25 +153,55 @@ fun AgentScreen(
     }
 }
 
+/** One agent card: its own jobs/payments flows, so the payable is always live. */
 @Composable
-private fun AgentDetail(profileId: Long, repository: BusinessRepository, agent: AgentEntity) {
+private fun AgentCard(
+    profileId: Long,
+    repository: BusinessRepository,
+    agent: AgentEntity,
+    onOpen: () -> Unit,
+    onPay: () -> Unit
+) {
     val jobs by repository.observeJobsByAgent(profileId, agent.id).collectAsState(initial = emptyList())
     val payments by repository.observeAgentPayments(agent.id).collectAsState(initial = emptyList())
     val totalCharges = jobs.sumOf { it.agentChargesPaise }
     val totalPaid = payments.sumOf { it.amountPaise }
-    val payable = AccountingEngine.agentPayable(totalCharges, totalPaid)
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        SectionTitle("${agent.name} — Hisab")
-        InfoCard("Total Agent Charges", formatRupees(totalCharges))
-        InfoCard("Amount Paid", formatRupees(totalPaid))
-        InfoCard("Remaining Payable", formatRupees(payable))
-        Text("Jobs: ${jobs.size} • Completed: ${jobs.count { it.status.name == "COMPLETED" }} • Pending: ${jobs.count { it.status.name != "COMPLETED" && it.status.name != "CANCELLED" }}")
-        jobs.forEach { job ->
-            InfoCard(
-                "Job #${job.id} — ${job.workDetails}",
-                "Charges ${formatRupees(job.agentChargesPaise)}",
-                subtitle = "Status: ${job.status} • Service: ${job.service.label}"
-            )
+    val payable = com.alfalah.business.domain.AccountingEngine.agentPayable(totalCharges, totalPaid)
+    BizCard(Modifier.fillMaxWidth(), onClick = onOpen) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AvatarCircle(agent.name)
+            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                Text(agent.name, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "${jobs.size} Jobs • ${agent.type.label} • ${agent.mobile}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Text("Payable", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    formatRupees(payable),
+                    fontWeight = FontWeight.Bold,
+                    color = if (payable > 0) BizColors.ExpenseRed else BizColors.IncomeGreen
+                )
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = onOpen,
+                modifier = Modifier.weight(1f),
+                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = MaterialTheme.colorScheme.onSurface
+                )
+            ) { Text("View Jobs & Payments") }
+            Button(
+                onClick = onPay,
+                modifier = Modifier.weight(1f),
+                colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = BizColors.Purple)
+            ) { Text("Pay Agent") }
         }
     }
 }
@@ -154,13 +222,13 @@ private fun AddAgentDialog(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text("Agent Name") }, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(mobile, { mobile = it }, label = { Text("Mobile Number") }, modifier = Modifier.fillMaxWidth())
-                Text("Agent type: ${type.label} (change with the buttons below)")
-                androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Agent type: ${type.label}")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = { type = AgentType.AADHAAR_NAME_CORRECTION }, modifier = Modifier.weight(1f)) { Text("Aadhaar") }
                     Button(onClick = { type = AgentType.LICENCE }, modifier = Modifier.weight(1f)) { Text("Licence") }
                     Button(onClick = { type = AgentType.OTHER }, modifier = Modifier.weight(1f)) { Text("Other") }
                 }
-                error?.let { Text(it) }
+                error?.let { Text(it, color = BizColors.ExpenseRed) }
             }
         },
         confirmButton = {
@@ -191,7 +259,7 @@ private fun PayAgentDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(amount, { amount = it }, label = { Text("Amount (₹)") }, modifier = Modifier.fillMaxWidth())
-                androidx.compose.foundation.layout.Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = { mode = PaymentMode.CASH }, modifier = Modifier.weight(1f)) {
                         Text(if (mode == PaymentMode.CASH) "✓ Cash" else "Cash")
                     }
@@ -199,7 +267,7 @@ private fun PayAgentDialog(
                         Text(if (mode == PaymentMode.UPI) "✓ UPI" else "UPI")
                     }
                 }
-                error?.let { Text(it) }
+                error?.let { Text(it, color = BizColors.ExpenseRed) }
             }
         },
         confirmButton = {
