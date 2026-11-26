@@ -9,6 +9,7 @@ import { t, LANG_OPTIONS } from '@/lib/i18n';
 import type { Lang, Theme } from '@/lib/types';
 import { SUPPORTED_LANGUAGES, type AiLangCode } from '@/lib/languages';
 import { clearAiServiceKey, getAiServiceEndpoint, hasAiServiceKey, setAiServiceEndpoint, setAiServiceKey } from '@/lib/conversation-ai';
+import { voiceLangKeyFor, voiceSettingsFor } from '@/lib/voice';
 import { todayISO } from '@/lib/types';
 import { BarChart, Btn, Card, Empty, Field, Pager, Stat, formatDate, pageSlice, type Ctx } from './ui';
 import { jobServices } from '@/lib/routes';
@@ -795,6 +796,23 @@ export function SettingsView({ ctx, section }: { ctx: Ctx; section?: string }) {
     setAiKeySaved(hasAiServiceKey());
     setAiEndpointInput(getAiServiceEndpoint());
   }, []);
+  // Voice (UPDATE 18): browser/device speech voices for the voice
+  // picker. Voices depend on the browser + device; the list can
+  // arrive late (voiceschanged), and may be empty on some browsers.
+  const [browserVoices, setBrowserVoices] = React.useState<{ name: string; lang: string }[]>([]);
+  React.useEffect(() => {
+    const load = () => {
+      try {
+        if (!('speechSynthesis' in window)) return;
+        setBrowserVoices(window.speechSynthesis.getVoices().map((v) => ({ name: v.name, lang: v.lang })));
+      } catch { /* voice list unavailable — picker stays hidden */ }
+    };
+    load();
+    try {
+      window.speechSynthesis.addEventListener('voiceschanged', load);
+      return () => window.speechSynthesis.removeEventListener('voiceschanged', load);
+    } catch { return undefined; }
+  }, []);
 
   // Deep link: /settings/<section> scrolls to that card.
   React.useEffect(() => {
@@ -922,6 +940,56 @@ export function SettingsView({ ctx, section }: { ctx: Ctx; section?: string }) {
           {aiKeySaved && !aiEndpointInput.trim() && (
             <p className="field-hint">Key saved ✓ — add the AI chat service address above to switch on cloud replies. Without an address, the assistant keeps answering on-device. (A key entered in an earlier version of the app is carried over automatically; the address was never stored, so it needs adding once.)</p>
           )}
+        </Card></div>
+
+        <div id="settings-voice"><Card title="Voice">
+          <p className="muted" style={{ marginTop: 0 }}>Talk to the AI Assistant with the mic in chat — it understands Hinglish, Gujarati, Hindi and 20 other languages, and speaks its replies aloud. Voice is processed in this browser only: no recording is stored, uploaded or sent anywhere.</p>
+          <Field label="Voice replies (speak AI answers aloud)">
+            <div className="btn-row">
+              {([true, false] as const).map((v) => (
+                <Btn key={String(v)} kind={(profile.voiceReplies ?? false) === v ? 'primary' : 'secondary'} onClick={() => update({ voiceReplies: v }, `Voice replies ${v ? 'on' : 'off'}`)}>
+                  {v ? 'On' : 'Off'}
+                </Btn>
+              ))}
+            </div>
+          </Field>
+          <Field label="Speech rate">
+            <select
+              className="input"
+              value={String(voiceSettingsFor(profile).rate)}
+              onChange={(e) => update({ voiceRate: parseFloat(e.target.value) }, 'Voice speech rate changed')}
+              aria-label="Speech rate"
+            >
+              <option value="0.8">Slow (0.8×)</option>
+              <option value="1">Normal (1×)</option>
+              <option value="1.2">Fast (1.2×)</option>
+            </select>
+          </Field>
+          <Field label="Continuous conversation (keep listening across turns)">
+            <div className="btn-row">
+              {([true, false] as const).map((v) => (
+                <Btn key={String(v)} kind={(profile.voiceContinuous ?? false) === v ? 'primary' : 'secondary'} onClick={() => update({ voiceContinuous: v }, `Continuous conversation ${v ? 'on' : 'off'}`)}>
+                  {v ? 'On' : 'Off'}
+                </Btn>
+              ))}
+            </div>
+          </Field>
+          {browserVoices.length > 0 && (
+            <Field label={`Preferred voice (${(profile.aiLanguage && profile.aiLanguage !== 'auto' ? profile.aiLanguage : 'auto-detect')} — voices come from this browser/device)`}>
+              <select
+                className="input"
+                value={(profile.voiceByLang || {})[voiceLangKeyFor(profile)] || ''}
+                onChange={(e) => update({ voiceByLang: { ...(profile.voiceByLang || {}), [voiceLangKeyFor(profile)]: e.target.value } }, 'Preferred voice changed')}
+                aria-label="Preferred voice"
+              >
+                <option value="">Browser default voice</option>
+                {browserVoices.map((v) => (
+                  <option key={`${v.lang}:${v.name}`} value={v.name}>{v.name} ({v.lang})</option>
+                ))}
+              </select>
+            </Field>
+          )}
+          <p className="field-hint">Voice input needs microphone permission and works best in Chrome. If this browser does not support voice, type your message — text chat always works. The mic is never on without the listening indicator in chat.</p>
         </Card></div>
 
         <Card title={t(lang, 'theme')}>

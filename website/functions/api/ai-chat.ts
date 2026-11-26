@@ -24,12 +24,22 @@
  * upstream only; it never appears in any response this Function sends
  * or in the app UI.
  *
+ * UPDATE 19 model choice (verified 2026-11-27 against Google's own
+ * models page): the previous value is SHUT DOWN (June 1, 2026) and
+ * the 2.5 Flash model is deprecated (routes to the 3.5 Flash-Lite
+ * model from Dec 1, 2026). `gemini-3.8-flash` is the live Stable Flash
+ * model, free-tier. It must match DEFAULT_MODEL in
+ * src/lib/conversation-ai.ts and Android's AI_MODEL — the three
+ * constants must always agree (tests/streaming.test.mjs checks this).
+ * MODELS GET SHUT DOWN: re-check this value against Google's models
+ * page periodically.
+ *
  * If the upstream endpoint does not stream (answers JSON instead),
  * the reply is converted into a single SSE data event followed by
  * [DONE], so the client always sees one uniform stream.
  */
 
-const UPSTREAM_MODEL = 'gemini-2.0-flash';
+export const UPSTREAM_MODEL = 'gemini-3.8-flash';
 
 const ERROR_MSG =
   'The AI service could not be reached. Please check the AI Chat settings and try again.';

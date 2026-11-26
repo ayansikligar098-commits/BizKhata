@@ -37,10 +37,24 @@ const page = await ctx.newPage();
 page.on('pageerror', (e) => console.log('  PAGEERROR:', String(e.message).slice(0, 300)));
 page.on('console', (m) => { if (m.type() === 'error') console.log('  CONSOLE-ERROR:', m.text().slice(0, 300)); });
 
+async function waitForIdle(timeoutMs = 45000) {
+  // UPDATE 17: replies now stream (thinking indicator → progressive
+  // typing). Wait until no thinking indicator and no streaming bot
+  // message remains, instead of a fixed sleep.
+  const t0 = Date.now();
+  for (;;) {
+    const busy = (await page.locator('[data-testid="chat-thinking"]').count()) > 0
+      || (await page.locator('[data-streaming="true"]').count()) > 0;
+    if (!busy) return true;
+    if (Date.now() - t0 > timeoutMs) return false;
+    await sleep(250);
+  }
+}
 async function chatSend(text) {
   await page.getByTestId('chat-input').fill(text);
   await page.getByTestId('chat-send').click();
-  await sleep(900);
+  const idle = await waitForIdle();
+  check('reply finished streaming', idle, idle ? '' : 'streaming did not finish in 45s');
 }
 async function lastBotText() {
   const bots = page.locator('[data-testid="chat-bot-msg"]');

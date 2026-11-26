@@ -16,6 +16,10 @@
  *     HTML escaping / unclosed fence;
  *   - Legacy key migration: old profile key → new key slot, new key
  *     wins, neither → empty, removal is respected, original kept.
+ *   - Model constant (UPDATE 19): client DEFAULT_MODEL and Pages
+ *     Function UPSTREAM_MODEL both equal the agreed live model, all
+ *     three call paths send it, the shut-down model appears nowhere,
+ *     and the value never leaks into UI files.
  * Exits non-zero if ANY check fails. Run with `npm test`.
  */
 import { execSync } from 'node:child_process';
@@ -408,6 +412,56 @@ cases.push(() => run('migration', 'active profile preferred when several profile
   ], 'p2');
   const ai = loadAiFresh(shim);
   return { ok: ai.getAiServiceKey() === 'key-two', detail: '' };
+}));
+
+/* ================= Model constant (UPDATE 19) ================= */
+// The agreed live model (verified 2026-11-27 against Google's own
+// models page, ai.google.dev/gemini-api/docs/models). The previous
+// value was SHUT DOWN (June 1, 2026), so a dead model here fails
+// every cloud call even with a valid key. The client constant and
+// the Pages Function constant must agree, and the value must never
+// appear in any UI file. Models get shut down — re-check this value
+// against Google's models page periodically.
+const AGREED_MODEL = 'gemini-3.8-flash';
+const DEAD_MODEL = 'gemini-2.0-flash';
+function readSource(rel) { return fs.readFileSync(path.join(root, rel), 'utf8'); }
+function allSourceFiles(dir, acc = []) {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) allSourceFiles(p, acc);
+    else if (/\.(ts|tsx|js|css)$/.test(e.name)) acc.push(p);
+  }
+  return acc;
+}
+cases.push(() => run('model', 'client DEFAULT_MODEL equals the agreed live model', () => {
+  const ai = loadAiFresh(makeShim());
+  return { ok: ai.DEFAULT_MODEL === AGREED_MODEL, detail: ` DEFAULT_MODEL=${ai.DEFAULT_MODEL}` };
+}));
+cases.push(() => run('model', 'Pages Function UPSTREAM_MODEL equals the agreed live model', () => {
+  const src = readSource('functions/api/ai-chat.ts');
+  const m = src.match(/UPSTREAM_MODEL\s*=\s*'([^']+)'/);
+  return { ok: m !== null && m[1] === AGREED_MODEL, detail: ` UPSTREAM_MODEL=${m ? m[1] : '?'}` };
+}));
+cases.push(() => run('model', 'all three call paths send a model field', () => {
+  const client = readSource('src/lib/conversation-ai.ts');
+  const fn = readSource('functions/api/ai-chat.ts');
+  const clientUses = (client.match(/model:\s*DEFAULT_MODEL/g) || []).length;
+  const fnUses = (fn.match(/model:\s*UPSTREAM_MODEL/g) || []).length;
+  return { ok: clientUses === 2 && fnUses === 1, detail: ` client=${clientUses} function=${fnUses}` };
+}));
+cases.push(() => run('model', 'dead (shut-down) model appears nowhere in src/ or functions/', () => {
+  const bad = [];
+  for (const f of [...allSourceFiles(path.join(root, 'src')), ...allSourceFiles(path.join(root, 'functions'))]) {
+    if (fs.readFileSync(f, 'utf8').includes(DEAD_MODEL)) bad.push(path.relative(root, f));
+  }
+  return { ok: bad.length === 0, detail: bad.length ? ` found in: ${bad.join(', ')}` : '' };
+}));
+cases.push(() => run('model', 'model value never appears in UI files', () => {
+  const bad = [];
+  for (const rel of ['src/components/chatbot.tsx', 'src/components/views-reports.tsx', 'src/app/globals.css']) {
+    if (readSource(rel).includes(AGREED_MODEL)) bad.push(rel);
+  }
+  return { ok: bad.length === 0, detail: bad.length ? ` found in: ${bad.join(', ')}` : '' };
 }));
 
 /* ================= Run ================= */

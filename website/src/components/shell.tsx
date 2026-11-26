@@ -137,6 +137,17 @@ export function Shell({ children }: { children: React.ReactNode }) {
     setDrawerOpen(false);
   }, [pathname]);
 
+  // Escape closes the drawer (desktop + anywhere it overlays). Listener
+  // is only attached while the drawer is open, and removed on cleanup.
+  React.useEffect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setDrawerOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [drawerOpen]);
+
   if (!app.hydrated || app.authStatus === 'checking') {
     return <LoadingScreen />;
   }
@@ -231,6 +242,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
         <div className="brand">
           <span className="brand-mark">B</span>
           <span><span className="brand-name">BizKhata</span><small>{t(lang, 'tagline')} • v1.0.0</small></span>
+          <button className="drawer-close" aria-label="Close menu" title="Close menu" onClick={() => setDrawerOpen(false)}>✕</button>
         </div>
         <div className="profile-box">
           <div className="pname">{profile.name}</div>
@@ -251,7 +263,15 @@ export function Shell({ children }: { children: React.ReactNode }) {
             <Btn kind="ghost" onClick={() => app.setShowAddBusiness(true)}>+ Add Business</Btn>
           )}
         </div>
-        <nav className="nav">
+        <nav className="nav" onClick={(e) => {
+          // Any menu link closes the drawer — including a link to the
+          // page already open, where there is no pathname change and
+          // the pathname effect alone would leave the drawer stuck
+          // open. Caret taps stopPropagation in their own handler,
+          // so expanding/collapsing a submenu never reaches this
+          // handler and never closes the drawer.
+          if ((e.target as HTMLElement).closest('a')) setDrawerOpen(false);
+        }}>
           {navLink('dashboard')}
           {navLink('daily')}
           {navLink('cash')}
@@ -260,7 +280,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
           <Link href="/services" className={isActive('/services') && cleanPath === '/services' ? 'active' : ''} onClick={() => setServicesOpen(true)}>
             <span className="nav-ico">▦</span>
             {t(lang, 'services')}
-            <span className="nav-caret" role="button" aria-label="Collapse services menu" title="Collapse" onClick={(e) => { e.preventDefault(); setServicesOpen(!servicesOpen); }}>{servicesOpen ? '▾' : '▸'}</span>
+            <span className="nav-caret" role="button" aria-label="Collapse services menu" title="Collapse" onClick={(e) => { e.preventDefault(); e.stopPropagation(); setServicesOpen(!servicesOpen); }}>{servicesOpen ? '▾' : '▸'}</span>
           </Link>
           {servicesOpen && jobServices(profile.services).map((s) => (
             <Link
@@ -282,7 +302,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
           <Link href="/reports" className={isActive('/reports') && cleanPath === '/reports' ? 'active' : ''} onClick={() => setReportsOpen(true)}>
             <span className="nav-ico">↗</span>
             {t(lang, 'reports')}
-            <span className="nav-caret" role="button" aria-label="Collapse reports menu" title="Collapse" onClick={(e) => { e.preventDefault(); setReportsOpen(!reportsOpen); }}>{reportsOpen ? '▾' : '▸'}</span>
+            <span className="nav-caret" role="button" aria-label="Collapse reports menu" title="Collapse" onClick={(e) => { e.preventDefault(); e.stopPropagation(); setReportsOpen(!reportsOpen); }}>{reportsOpen ? '▾' : '▸'}</span>
           </Link>
           {reportsOpen && (
             <>
@@ -303,7 +323,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
           <Link href="/settings" className={isActive('/settings') && cleanPath === '/settings' ? 'active' : ''} onClick={() => setSettingsOpen(true)}>
             <span className="nav-ico">⚙</span>
             {t(lang, 'settings')}
-            <span className="nav-caret" role="button" aria-label="Collapse settings menu" title="Collapse" onClick={(e) => { e.preventDefault(); setSettingsOpen(!settingsOpen); }}>{settingsOpen ? '▾' : '▸'}</span>
+            <span className="nav-caret" role="button" aria-label="Collapse settings menu" title="Collapse" onClick={(e) => { e.preventDefault(); e.stopPropagation(); setSettingsOpen(!settingsOpen); }}>{settingsOpen ? '▾' : '▸'}</span>
           </Link>
           {settingsOpen && SETTINGS_SUBS.map((r) => (
             <Link key={r.section} href={`/settings/${r.section}`} className={`nav-sub${cleanPath === `/settings/${r.section}` ? ' active' : ''}`}>
@@ -317,7 +337,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
       <div className="main-col">
         <header className="topnav">
-          <button className="icon-btn hamburger" aria-label="Open menu" onClick={() => setDrawerOpen(true)}>☰</button>
+          <button className="icon-btn hamburger" aria-label={drawerOpen ? 'Close menu' : 'Open menu'} onClick={() => setDrawerOpen(!drawerOpen)}>☰</button>
           <div className="biz-switch">
             <span className="biz-ico">▦</span>
             <div style={{ minWidth: 0 }}>
@@ -414,7 +434,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
         <Link href="/services" className={cleanPath.startsWith('/services') ? 'active' : ''}><span className="bn-ico">▦</span>Services</Link>
         <Link href="/services/pan-card?new=1" className="bn-fab" aria-label="Add job">+</Link>
         <Link href="/reports" className={cleanPath.startsWith('/reports') ? 'active' : ''}><span className="bn-ico">↗</span>Reports</Link>
-        <button onClick={() => setDrawerOpen(true)}><span className="bn-ico">☰</span>More</button>
+        <button onClick={() => setDrawerOpen(!drawerOpen)} aria-label={drawerOpen ? 'Close menu' : 'Open menu'}><span className="bn-ico">☰</span>More</button>
       </nav>
 
       <ChatWidget />

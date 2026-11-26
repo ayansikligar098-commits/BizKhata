@@ -91,6 +91,9 @@ button { font-family: inherit; }
   z-index: 40;
 }
 .brand { display: flex; align-items: center; gap: 10px; padding: 2px 8px 16px; }
+/* Drawer close (X): hidden on desktop, where the sidebar is permanent.
+   Shown only in overlay mode (<=1024px) — see the media query below. */
+.drawer-close { display: none; }
 .brand-mark {
   width: 40px; height: 40px; border-radius: 11px; flex-shrink: 0;
   background: linear-gradient(135deg, #8b7ff0, var(--purple) 55%, #2dd4bf);
@@ -544,7 +547,17 @@ tbody tr:hover { background: var(--surface-2); }
     transform: translateX(-105%); transition: transform .25s ease;
     box-shadow: var(--shadow-lg);
   }
-  .sidebar.open { transform: translateX(0); }
+  .sidebar.open { transform: translateX(0); z-index: 50; }
+  /* The open drawer must sit above the bottom nav (z-index 45) so its
+     bottom items (e.g. Logout) stay reachable and tappable. */
+  .drawer-close {
+    display: inline-flex; align-items: center; justify-content: center;
+    margin-left: auto; flex-shrink: 0;
+    width: 34px; height: 34px; border-radius: 9px;
+    border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.08);
+    color: #fff; font-size: 16px; line-height: 1; cursor: pointer;
+  }
+  .drawer-close:hover, .drawer-close:active { background: rgba(255,255,255,.18); }
   .drawer-scrim {
     display: block; position: fixed; inset: 0; z-index: 35;
     background: rgba(11, 21, 48, .5); border: none; padding: 0; cursor: pointer;
@@ -629,7 +642,13 @@ tbody tr:hover { background: var(--surface-2); }
 .chat-table th, .chat-table td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; }
 .chat-table th { background: var(--chip); }
 .chat-mic { font-size: 18px; }
-.chat-mic.listening { background: #fdecea; border-color: #d93025; }
+.chat-mic.listening { background: #fdecea; border-color: #d93025; animation: chat-mic-pulse 1.2s ease-in-out infinite; }
+.chat-mic.speaking { background: #e8f0fe; border-color: #1a73e8; }
+.chat-voice-cont.active { background: var(--purple-soft); border-color: var(--purple); }
+.chat-voice-stop { background: #fdecea; border-color: #d93025; font-size: 16px; }
+@keyframes chat-mic-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(217, 48, 37, .35); } 50% { box-shadow: 0 0 0 6px rgba(217, 48, 37, 0); } }
+.chat-spoken-done { background: #fff3b0; border-radius: 3px; }
+[data-theme='dark'] .chat-spoken-done { background: #5c4d00; }
 
 /* ---------- UPDATE 17 — streaming: thinking dots, typing cursor, actions, markdown ---------- */
 .chat-msg.streaming { min-height: 38px; }

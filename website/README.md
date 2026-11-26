@@ -229,6 +229,18 @@ The AI Assistant has two reply paths, and they are not the same thing:
 Live cloud streaming is unverified until the owner tests it on their
 own device with their own key — the VM has no key and cannot verify it.
 
+**Model value (UPDATE 19).** Every cloud call sends a `model` field
+(`DEFAULT_MODEL` in `src/lib/conversation-ai.ts`, `UPSTREAM_MODEL` in
+`functions/api/ai-chat.ts`, both `gemini-3.8-flash` — the live Stable
+Flash model, free tier, verified 2026-11-27 against Google's own
+models page; the previous value was shut down June 1, 2026). The
+model name is internal only and never appears in the UI. Models get
+shut down — re-check this value against Google's models page
+periodically and, if it changes, update it in all three places
+together (the two website constants plus Android's `AI_MODEL`);
+`tests/streaming.test.mjs` fails the suite if the constants drift
+apart or name a dead model.
+
 ## Data & privacy
 
 - **Local-first**: all data is stored in the browser's localStorage on the user's

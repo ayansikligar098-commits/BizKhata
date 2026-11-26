@@ -15,11 +15,45 @@ import { buildSystemPrompt, callConversationAIStream, hasAiServiceKey, type AiCh
 import { langName, respondToMessage } from '@/lib/conversation';
 import { STREAM_UNREACHABLE_MSG, Typewriter } from '@/lib/streaming';
 import { markdownToHtml } from '@/lib/markdown';
+import {
+  INTERRUPT_ACK_HI,
+  VoiceController,
+  cleanSpokenText,
+  handleVoiceTranscript,
+  isSpeechRecognitionSupported,
+  shortenForVoice,
+  voiceErrorMessage,
+  voiceSettingsFor,
+  type SpeechRecognitionLike,
+  type SpeechSynthesisLike,
+  type UtteranceLike,
+  type VoiceErrorKind,
+  type VoiceState,
+} from '@/lib/voice';
 import { type ChatContext, type KnowledgeTable } from '@/lib/knowledge';
 import { loadState } from '@/lib/store';
 import { formatINR } from '@/lib/money';
 import { detectLanguage, voiceLangFor } from '@/lib/languages';
 import { uid } from '@/lib/types';
+
+/** Minimal Web Speech API shapes (not in TS's DOM lib). */
+interface SpeechRecognitionResultAlt { transcript: string; confidence: number; }
+interface SpeechRecognitionResultRow { 0: SpeechRecognitionResultAlt; isFinal: boolean; length: number; }
+interface SpeechRecognitionEventLike {
+  results: { length: number; [index: number]: SpeechRecognitionResultRow };
+  resultIndex: number;
+}
+interface BrowserSpeechRecognition {
+  lang: string;
+  interimResults: boolean;
+  continuous: boolean;
+  onresult: ((e: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((e: { error: string }) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+}
 
 /**
  * BizKhata AI Assistant — "BizKhata AI Assistant", subtitle
@@ -221,15 +255,38 @@ function useChat(onNavigateAway?: () => void) {
   const [activeId, setActiveId] = React.useState('');
   const [input, setInput] = React.useState('');
   const [busy, setBusy] = React.useState(false);
-  const [listening, setListening] = React.useState(false);
-  const [speakOn, setSpeakOn] = React.useState(false);
   const [historyQuery, setHistoryQuery] = React.useState('');
   const [showHistory, setShowHistory] = React.useState(false);
   const msgsRef = React.useRef<HTMLDivElement>(null);
   const convRef = React.useRef<{ conversations: Conversation[]; activeId: string }>({ conversations: [], activeId: '' });
   const draftRef = React.useRef<ActionDraft | null>(null);
   const pendingRef = React.useRef<{ msgId: string; preview: PreviewData } | null>(null);
-  const recogRef = React.useRef<{ stop: () => void } | null>(null);
+  // UPDATE 18 voice state. `listening` is kept as a derived alias so
+  // the existing UI keeps working; the source of truth is voiceState.
+  const [voiceState, setVoiceState] = React.useState<VoiceState>('idle');
+  const [speakOn, setSpeakOnState] = React.useState(false);
+  const [continuous, setContinuousState] = React.useState(false);
+  const [interim, setInterim] = React.useState('');
+  const [speaking, setSpeaking] = React.useState<{ msgId: string; wordIndex: number; totalWords: number } | null>(null);
+  const [voiceSupported, setVoiceSupported] = React.useState(false);
+  const voiceRef = React.useRef<VoiceController | null>(null);
+  const utteranceMapRef = React.useRef(new WeakMap<object, SpeechSynthesisUtterance>());
+  const profileRef = React.useRef(app.profile);
+  profileRef.current = app.profile;
+  // UPDATE 18 — the voice controller's callbacks are bound ONCE (when
+  // the mic is first tapped) and outlive the render that created them.
+  // Any engine call reachable from a voice transcript MUST read the
+  // latest store through this ref — the closure snapshot predates the
+  // entries the user just saved by voice, so a totals question asked
+  // after a voice save would otherwise quote the old (empty) figures.
+  const stateRef = React.useRef(app.state);
+  stateRef.current = app.state;
+  const voiceTurnRef = React.useRef(false);
+  const shortReplyRef = React.useRef(false);
+  const prevTranscriptRef = React.useRef<{ text: string; atMs: number } | null>(null);
+  const spokenTextRef = React.useRef('');
+  const speakingMsgRef = React.useRef<string | null>(null);
+  const listening = voiceState === 'listening';
   // UPDATE 17 streaming state: one generation at a time, cancellable.
   const [streaming, setStreaming] = React.useState(false);
   const streamingRef = React.useRef(false);
@@ -249,6 +306,14 @@ function useChat(onNavigateAway?: () => void) {
     setActiveId(loaded.activeId);
     draftRef.current = null;
     pendingRef.current = null;
+    // Voice preferences are per-profile: pick them up on profile switch.
+    const vs = voiceSettingsFor(app.profile);
+    setSpeakOnState(vs.repliesEnabled);
+    setContinuousState(vs.continuous);
+    voiceRef.current?.setContinuous(vs.continuous);
+    try {
+      setVoiceSupported(isSpeechRecognitionSupported(window as unknown as { SpeechRecognition?: unknown; webkitSpeechRecognition?: unknown }));
+    } catch { setVoiceSupported(false); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profileId]);
 
@@ -263,7 +328,8 @@ function useChat(onNavigateAway?: () => void) {
   }, [conversations, activeId, profileId]);
 
   // Abort any active stream + stop the typewriter when the chat
-  // panel/page unmounts, and never leave a generation running.
+  // panel/page unmounts, and never leave a generation running — or
+  // the microphone on.
   React.useEffect(() => () => {
     genRef.current++;
     streamingRef.current = false;
@@ -272,6 +338,8 @@ function useChat(onNavigateAway?: () => void) {
     abortRef.current = null;
     typewriterRef.current = null;
     streamMsgIdRef.current = null;
+    voiceRef.current?.dispose();
+    voiceRef.current = null;
   }, []);
 
   // Smooth auto-scroll as text grows — only if the user is already
@@ -282,6 +350,21 @@ function useChat(onNavigateAway?: () => void) {
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
     if (nearBottom) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
   }, [messages]);
+
+  // Pin to the latest message on first open and when switching
+  // conversation. Without this, the near-bottom guard above can never
+  // engage after a reload: a long history mounts with scrollTop = 0
+  // (gap to the bottom > 140), so every later reply types out of view
+  // below the fold and the list looks stuck at the top. A fresh mount
+  // has no scroll position to preserve — the user has not scrolled up
+  // yet — so jumping to the bottom here does not violate the guard;
+  // once pinned, the guard above keeps following new text, and a user
+  // who then scrolls up is still left alone.
+  React.useEffect(() => {
+    const el = msgsRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight });
+  }, [activeId]);
 
   function updateActive(fn: (c: Conversation) => Conversation) {
     setConversations((prev) => prev.map((c) => (c.id === activeId ? fn(c) : c)));
@@ -300,14 +383,238 @@ function useChat(onNavigateAway?: () => void) {
     updateActive((c) => ({ ...c, messages: c.messages.map((m) => (m.id === id ? fn(m) : m)) }));
   }
 
-  function speak(text: string) {
-    if (!speakOn || typeof window === 'undefined' || !('speechSynthesis' in window)) return;
-    try {
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text.replace(/[*#]/g, '').slice(0, 400));
-      u.lang = app.profile?.aiLanguage && app.profile.aiLanguage !== 'auto' ? voiceLangFor(app.profile.aiLanguage) : voiceLangFor(detectLanguage(text).code);
-      window.speechSynthesis.speak(u);
-    } catch { /* voice response is best-effort */ }
+  /* ================= UPDATE 18 — voice (Web Speech API) =================
+   * Mic = browser SpeechRecognition, replies = speechSynthesis. The
+   * intelligence is the SAME pipeline as typed chat (send() below →
+   * respondToMessage → preview → confirm); voice only changes how
+   * words go in and out. No recording is stored or uploaded; the
+   * transcript is the only thing that reaches the chat pipeline.
+   */
+
+  const speakOnRef = React.useRef(false);
+  speakOnRef.current = speakOn;
+
+  /** Build (once) the injectable voice controller over the real
+   *  browser recognition + synthesis objects. */
+  function ensureVoiceController(): VoiceController | null {
+    if (typeof window === 'undefined') return null;
+    if (voiceRef.current) return voiceRef.current;
+    const w = window as unknown as {
+      SpeechRecognition?: new () => BrowserSpeechRecognition;
+      webkitSpeechRecognition?: new () => BrowserSpeechRecognition;
+      speechSynthesis?: SpeechSynthesis;
+    };
+    const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
+    const synth = w.speechSynthesis || null;
+    const adaptRecognition = (r: BrowserSpeechRecognition): SpeechRecognitionLike => {
+      const like: SpeechRecognitionLike = {
+        get lang() { return r.lang; },
+        set lang(v: string) { r.lang = v; },
+        get interimResults() { return r.interimResults; },
+        set interimResults(v: boolean) { r.interimResults = v; },
+        get continuous() { return r.continuous; },
+        set continuous(v: boolean) { r.continuous = v; },
+        onresult: null,
+        onerror: null,
+        onend: null,
+        start: () => r.start(),
+        stop: () => { try { r.stop(); } catch { /* already stopped */ } },
+        abort: () => { try { r.abort(); } catch { /* ignore */ } },
+      };
+      r.onresult = (e: SpeechRecognitionEventLike) => {
+        const results: { transcript: string; confidence?: number; isFinal: boolean }[] = [];
+        for (let i = e.resultIndex || 0; i < e.results.length; i++) {
+          const res = e.results[i];
+          const alt = res[0];
+          if (alt) results.push({ transcript: alt.transcript, confidence: typeof alt.confidence === 'number' ? alt.confidence : undefined, isFinal: res.isFinal });
+        }
+        if (results.length > 0) like.onresult?.(results);
+      };
+      r.onerror = (e: { error: string }) => like.onerror?.(e?.error || 'unknown');
+      r.onend = () => like.onend?.();
+      return like;
+    };
+    const adaptUtterance = (u: SpeechSynthesisUtterance): UtteranceLike => {
+      const like: UtteranceLike = {
+        get text() { return u.text; },
+        set text(v: string) { u.text = v; },
+        get lang() { return u.lang; },
+        set lang(v: string) { u.lang = v; },
+        get rate() { return u.rate; },
+        set rate(v: number) { u.rate = v; },
+        get voice() { return u.voice ? { name: u.voice.name, lang: u.voice.lang, default: u.voice.default } : undefined; },
+        set voice(v) {
+          if (!v) { u.voice = null; return; }
+          try {
+            const voices = window.speechSynthesis.getVoices();
+            u.voice = voices.find((x) => x.name === v.name) || null;
+          } catch { u.voice = null; }
+        },
+        onend: null,
+        onerror: null,
+        onboundary: null,
+      };
+      u.onend = () => like.onend?.();
+      u.onerror = (e) => like.onerror?.((e as unknown as { error?: string })?.error || 'error');
+      u.onboundary = (e) => like.onboundary?.(typeof (e as unknown as { charIndex?: number })?.charIndex === 'number' ? (e as unknown as { charIndex: number }).charIndex : 0);
+      return like;
+    };
+    const synthesis: SpeechSynthesisLike | null = synth
+      ? {
+          speak: (u: UtteranceLike) => {
+            const real = utteranceMapRef.current.get(u);
+            if (real) synth.speak(real);
+          },
+          cancel: () => { try { synth.cancel(); } catch { /* ignore */ } },
+          getVoices: () => {
+            try {
+              return synth.getVoices().map((v) => ({ name: v.name, lang: v.lang, default: v.default }));
+            } catch { return []; }
+          },
+          get speaking() { return synth.speaking; },
+        }
+      : null;
+    const ctrl = new VoiceController(
+      {
+        createRecognition: () => {
+          if (!SR) return null;
+          try {
+            return adaptRecognition(new SR());
+          } catch {
+            return null;
+          }
+        },
+        synthesis,
+        createUtterance: (text: string) => {
+          const real = new SpeechSynthesisUtterance(text);
+          const like = adaptUtterance(real);
+          utteranceMapRef.current.set(like, real);
+          return like;
+        },
+        getSettings: () => voiceSettingsFor(profileRef.current),
+      },
+      {
+        onState: (s) => {
+          setVoiceState(s);
+          if (s !== 'listening') setInterim('');
+          if (s !== 'speaking') setSpeaking(null);
+        },
+        onFinalTranscript: (text, confidence) => handleFinalTranscript(text, confidence),
+        onInterimTranscript: (text) => setInterim(text),
+        onError: (kind: VoiceErrorKind) => {
+          setVoiceState('idle');
+          setInterim('');
+          pushMsg({ id: uid('m'), role: 'bot', text: voiceErrorMessage(kind), ts: new Date().toISOString() });
+        },
+        onSpeechEnd: () => {
+          setSpeaking(null);
+          speakingMsgRef.current = null;
+        },
+        onBoundary: (charIndex) => {
+          const spoken = spokenTextRef.current;
+          const msgId = speakingMsgRef.current;
+          if (!spoken || !msgId) return;
+          const words = spoken.split(/\s+/).filter(Boolean);
+          const said = spoken.slice(0, Math.max(0, charIndex)).split(/\s+/).filter(Boolean).length;
+          setSpeaking({ msgId, wordIndex: Math.min(said, words.length), totalWords: words.length });
+        },
+      },
+    );
+    ctrl.setContinuous(continuous);
+    voiceRef.current = ctrl;
+    return ctrl;
+  }
+
+  /** Route one final transcript through the voice edge, then through
+   *  the SAME send() pipeline as typed chat. Nothing is ever saved
+   *  from a transcript alone — financial actions still need the
+   *  on-screen preview + Confirm. */
+  function handleFinalTranscript(text: string, confidence: number | null) {
+    setInterim('');
+    const decision = handleVoiceTranscript({ transcript: text, confidence, prev: prevTranscriptRef.current });
+    if (decision.action === 'ignore') return; // duplicate / empty
+    prevTranscriptRef.current = { text, atMs: Date.now() };
+    if (decision.action === 'clarify') {
+      pushMsg({ id: uid('m'), role: 'bot', text: decision.text, ts: new Date().toISOString() });
+      speak(decision.text);
+      return;
+    }
+    if (decision.action === 'interrupt') {
+      voiceRef.current?.interruptSpeech();
+      setSpeaking(null);
+      if (!decision.remainder) {
+        // Only "Bas" — stop, acknowledge briefly, wait for the next
+        // instruction. No engine call, no new question.
+        const ack = INTERRUPT_ACK_HI;
+        pushMsg({ id: uid('m'), role: 'bot', text: ack, ts: new Date().toISOString() });
+        speak(ack);
+        return;
+      }
+      void send(decision.remainder, { fromVoice: true, short: true });
+      return;
+    }
+    void send(decision.text, { fromVoice: true });
+  }
+
+  /** Speak a bot reply aloud — when voice replies are on, or when
+   *  this turn came from the microphone. Speaks the FINAL text (the
+   *  typewriter/stream already finished it), in the reply's language,
+   *  at the profile's speech rate, with the preferred voice. */
+  function speak(text: string, msgId?: string) {
+    if (typeof window === 'undefined') return;
+    if (!speakOnRef.current && !voiceTurnRef.current) return;
+    const ctrl = ensureVoiceController();
+    if (!ctrl) return;
+    const toSpeak = shortReplyRef.current ? shortenForVoice(text) : text;
+    shortReplyRef.current = false;
+    const profile = profileRef.current;
+    const lang = profile?.aiLanguage && profile.aiLanguage !== 'auto'
+      ? voiceLangFor(profile.aiLanguage)
+      : voiceLangFor(detectLanguage(text).code);
+    spokenTextRef.current = cleanSpokenText(toSpeak);
+    speakingMsgRef.current = msgId || null;
+    if (msgId) {
+      const words = spokenTextRef.current.split(/\s+/).filter(Boolean);
+      setSpeaking({ msgId, wordIndex: 0, totalWords: words.length });
+    }
+    ctrl.speak(toSpeak, lang);
+  }
+
+  /** Voice-replies toggle — persisted on the business profile. */
+  function setSpeakOn(v: boolean) {
+    setSpeakOnState(v);
+    speakOnRef.current = v;
+    const pid = profileRef.current?.id;
+    if (!pid) return;
+    app.mutate((s) => {
+      const p = s.profiles.find((x) => x.id === pid);
+      if (p) p.voiceReplies = v;
+    });
+  }
+
+  /** Continuous-conversation toggle — persisted on the profile. */
+  function toggleContinuous() {
+    const next = !continuous;
+    setContinuousState(next);
+    voiceRef.current?.setContinuous(next);
+    const pid = profileRef.current?.id;
+    if (pid) {
+      app.mutate((s) => {
+        const p = s.profiles.find((x) => x.id === pid);
+        if (p) p.voiceContinuous = next;
+      });
+    }
+    if (!next) voiceRef.current?.stopListening();
+  }
+
+  /** Stop the current speech immediately (Stop button / mic tap).
+   *  Listening is left alone — the user can speak the next
+   *  instruction straight away. */
+  function stopVoice() {
+    voiceRef.current?.interruptSpeech();
+    setSpeaking(null);
+    speakingMsgRef.current = null;
+    if (voiceState === 'speaking') setVoiceState('idle');
   }
 
   function newChat() {
@@ -358,8 +665,12 @@ function useChat(onNavigateAway?: () => void) {
     setBusy(true);
     let result: ExecResult | undefined;
     // Execute ONLY through the backend action layer (never direct writes).
+    // Profile id through the ref (see stateRef note above): a voice
+    // "Haan" reaches here from the once-bound controller callbacks, and
+    // the closure snapshot may predate a profile switch.
+    const pid = (profileRef.current || app.profile).id;
     app.mutate((s) => {
-      result = applyAssistantAction(s, app.profile.id, preview.action, preview.idemKey);
+      result = applyAssistantAction(s, pid, preview.action, preview.idemKey);
     });
     const res = result as ExecResult | undefined;
     pendingRef.current = null;
@@ -415,7 +726,7 @@ function useChat(onNavigateAway?: () => void) {
     }
     const lines = previewLinesFor(rebuilt);
     const total = totalFor(rebuilt);
-    const dup = findDuplicateWarning(app.state, app.profile.id, rebuilt);
+    const dup = findDuplicateWarning(stateRef.current, (profileRef.current || app.profile).id, rebuilt);
     const next: PreviewData = { ...preview, action: rebuilt, lines, totalPaise: total, duplicateWarning: dup || undefined, editing: false };
     pendingRef.current = { msgId, preview: next };
     updateMsg(msgId, (m) => ({ ...m, preview: next }));
@@ -435,6 +746,10 @@ function useChat(onNavigateAway?: () => void) {
    *  stop the typewriter, keep exactly the text shown so far, and mark
    *  the message stopped. Safe to call when nothing is streaming. */
   function stopGeneration() {
+    // Stopping a generation also stops any speech of a previous reply.
+    voiceRef.current?.interruptSpeech();
+    setSpeaking(null);
+    speakingMsgRef.current = null;
     if (!streamingRef.current) return;
     genRef.current++;
     streamingRef.current = false;
@@ -503,7 +818,7 @@ function useChat(onNavigateAway?: () => void) {
         typewriterRef.current = null;
         streamMsgIdRef.current = null;
         updateMsg(msgId, (m) => (m.streaming ? { ...m, text: displayed, streaming: false, ts: new Date().toISOString() } : m));
-        speak(displayed);
+        speak(displayed, msgId);
       },
     });
     typewriterRef.current = tw;
@@ -599,11 +914,23 @@ function useChat(onNavigateAway?: () => void) {
     setActiveId(id);
   }
 
-  async function send(text: string) {
+  /**
+   * Send one message through the pipeline. `opts.fromVoice` marks a
+   * turn that came from the microphone: its reply is spoken aloud even
+   * when the voice-replies toggle is off, and `opts.short` (after an
+   * interruption — "Bas, short mein batao") speaks the short version
+   * of the reply. A typed message clears the voice-turn flag, so a
+   * later typed reply is not spoken out of nowhere.
+   */
+  async function send(text: string, opts?: { fromVoice?: boolean; short?: boolean }) {
     const q = text.trim();
     if (!q) return;
-    // Sending while streaming stops the current generation cleanly
-    // first, then sends the new message (never two generations at once).
+    voiceTurnRef.current = !!opts?.fromVoice;
+    shortReplyRef.current = !!opts?.short;
+    // A new message stops any speech in progress (interruption) and
+    // any streaming generation — never two generations at once.
+    if (voiceRef.current?.isSpeaking) voiceRef.current.interruptSpeech();
+    setSpeaking(null);
     if (streamingRef.current) stopGeneration();
     setInput('');
     setBusy(true);
@@ -615,8 +942,12 @@ function useChat(onNavigateAway?: () => void) {
 
   async function respond(q: string) {
     const ctx: ChatContext = (convRef.current.conversations.find((c) => c.id === convRef.current.activeId)?.ctx) || {};
-    const state = app.state;
-    const profile = app.profile;
+    // Latest store/profile through refs (see stateRef note above): this
+    // function is also reached from the once-bound voice callbacks, whose
+    // closure snapshot predates entries saved after the mic was first
+    // tapped. Text chat reads the same refs — identical values.
+    const state = stateRef.current;
+    const profile = profileRef.current || app.profile;
     const setCtx = (patch: ChatContext) => {
       updateActive((c) => ({ ...c, ctx: { ...c.ctx, ...patch } }));
     };
@@ -762,50 +1093,46 @@ function useChat(onNavigateAway?: () => void) {
     }
   }
 
+  /**
+   * Mic button. Three states, always visible:
+   *  - speaking → stop the speech immediately, start listening for
+   *    the new instruction (interruption).
+   *  - listening → stop listening (mic off, nothing left running).
+   *  - idle → start listening. Unsupported browser / denied
+   *    permission surface as a chat message with guidance — text
+   *    chat keeps working either way.
+   */
   function toggleMic() {
     if (typeof window === 'undefined') return;
-    const SR = (window as unknown as { SpeechRecognition?: new () => unknown; webkitSpeechRecognition?: new () => unknown }).SpeechRecognition
-      || (window as unknown as { webkitSpeechRecognition?: new () => unknown }).webkitSpeechRecognition;
-    if (!SR) {
-      pushMsg({ id: uid('m'), role: 'bot', text: 'Is browser mein voice input support nahi hai. Aap type karke likh sakte ho.', ts: new Date().toISOString() });
+    const ctrl = ensureVoiceController();
+    if (!ctrl) {
+      pushMsg({ id: uid('m'), role: 'bot', text: voiceErrorMessage('unsupported'), ts: new Date().toISOString() });
       return;
     }
-    if (listening && recogRef.current) {
-      recogRef.current.stop();
-      setListening(false);
+    if (voiceState === 'speaking' || voiceRef.current?.isSpeaking) {
+      ctrl.interruptSpeech();
+      setSpeaking(null);
+      ctrl.setContinuous(continuous);
+      ctrl.startListening(recognitionLang());
       return;
     }
-    try {
-      const recog = new (SR as new () => {
-        lang: string; interimResults: boolean; continuous: boolean;
-        onresult: ((e: { results: { [i: number]: { [j: number]: { transcript: string; isFinal: boolean } }; length: number } }) => void) | null;
-        onerror: ((e: { error: string }) => void) | null;
-        onend: (() => void) | null;
-        start: () => void; stop: () => void;
-      })();
-      recog.lang = app.profile?.aiLanguage && app.profile.aiLanguage !== 'auto' ? voiceLangFor(app.profile.aiLanguage) : 'en-IN';
-      recog.interimResults = false;
-      recog.continuous = false;
-      recog.onresult = (e) => {
-        const transcript = e.results[e.results.length - 1]?.[0]?.transcript || '';
-        if (transcript.trim()) {
-          setListening(false);
-          void send(transcript.trim());
-        }
-      };
-      recog.onerror = (e) => {
-        setListening(false);
-        if (e.error !== 'aborted') {
-          pushMsg({ id: uid('m'), role: 'bot', text: 'Voice samajh nahi aaya — dobara bolo ya type karke likho.', ts: new Date().toISOString() });
-        }
-      };
-      recog.onend = () => setListening(false);
-      recog.start();
-      recogRef.current = recog;
-      setListening(true);
-    } catch {
-      pushMsg({ id: uid('m'), role: 'bot', text: 'Voice input start nahi hua — type karke likho.', ts: new Date().toISOString() });
+    if (voiceState === 'listening') {
+      ctrl.stopAll();
+      setVoiceState('idle');
+      return;
     }
+    ctrl.setContinuous(continuous);
+    ctrl.startListening(recognitionLang());
+  }
+
+  /** Recognition language: the profile's AI language when set, else
+   *  the language of the current conversation, else en-IN. */
+  function recognitionLang(): string {
+    const profile = profileRef.current;
+    if (profile?.aiLanguage && profile.aiLanguage !== 'auto') return voiceLangFor(profile.aiLanguage);
+    const ctx = convRef.current.conversations.find((c) => c.id === convRef.current.activeId)?.ctx;
+    if (ctx?.lastLanguage) return voiceLangFor(ctx.lastLanguage);
+    return 'en-IN';
   }
 
   return {
@@ -814,6 +1141,7 @@ function useChat(onNavigateAway?: () => void) {
     historyQuery, setHistoryQuery, showHistory, setShowHistory,
     confirmPreview, cancelPreview, applyEdit, updateMsg,
     listening, toggleMic, speakOn, setSpeakOn,
+    voiceState, continuous, toggleContinuous, stopVoice, interim, speaking, voiceSupported,
     streaming, stopGeneration, regenerate, retryFailed,
     profileName: app.profile?.name || '',
   };
@@ -905,6 +1233,36 @@ function ChatBody({ chat }: { chat: ReturnType<typeof useChat> }) {
   const [copiedId, setCopiedId] = React.useState<string | null>(null);
   const lastBot = [...chat.messages].reverse().find((m) => m.role === 'bot');
 
+  /** Render the message being spoken aloud with the words already
+   *  said highlighted (boundary events; degrades to a plain render
+   *  when the browser sends no boundary events). */
+  function renderSpoken(m: ChatMsg) {
+    const sp = chat.speaking;
+    if (!sp) return <span className="chat-md" dangerouslySetInnerHTML={{ __html: markdownToHtml(m.text) }} />;
+    const plain = m.text.replace(/[*#`>|]/g, '');
+    const parts = plain.split(/(\s+)/);
+    let w = 0;
+    return (
+      <span className="chat-spoken" data-testid="chat-speaking">
+        {parts.map((p, i) => {
+          if (/^\s+$/.test(p) || p === '') return <span key={i}>{p}</span>;
+          const idx = w++;
+          return <span key={i} className={idx < sp.wordIndex ? 'chat-spoken-done' : undefined}>{p}</span>;
+        })}
+      </span>
+    );
+  }
+
+  /** Voice status line — the mic is never on secretly: listening /
+   *  speaking / thinking is always shown here, with a Stop control. */
+  function voiceStatus(): string | null {
+    if (chat.voiceState === 'listening') return `🎙️ Sun raha hoon…${chat.interim ? ` “${chat.interim}”` : ''} — dobara tap karo to stop`;
+    if (chat.voiceState === 'speaking') return '🔊 Bol raha hoon… — ⏹ dabakar roko, ya “Bas” bolo';
+    if (chat.voiceState === 'thinking' || (chat.busy && chat.streaming)) return 'Soch raha hoon…';
+    if (chat.continuous && chat.voiceState === 'idle') return 'Continuous voice on — mic tap karo, phir bolte raho';
+    return null;
+  }
+
   async function copyText(id: string, text: string) {
     const done = () => {
       setCopiedId(id);
@@ -945,6 +1303,8 @@ function ChatBody({ chat }: { chat: ReturnType<typeof useChat> }) {
                   <span className="chat-dot" />
                   <span className="chat-thinking-text">BizKhata AI is thinking...</span>
                 </span>
+              ) : m.role === 'bot' && chat.speaking?.msgId === m.id ? (
+                renderSpoken(m)
               ) : (
                 <span className="chat-md" dangerouslySetInnerHTML={{ __html: markdownToHtml(m.text) }} />
               )}
@@ -1019,13 +1379,35 @@ function ChatBody({ chat }: { chat: ReturnType<typeof useChat> }) {
       </div>
       <div className="chat-input-row">
         <button
-          className={`icon-btn chat-mic ${chat.listening ? 'listening' : ''}`}
+          className={`icon-btn chat-mic ${chat.listening ? 'listening' : ''} ${chat.voiceState === 'speaking' ? 'speaking' : ''}`}
           onClick={chat.toggleMic}
-          aria-label={chat.listening ? 'Stop voice input' : 'Voice input'}
-          title="Voice input (Hindi / English / Hinglish)"
+          aria-label={chat.listening ? 'Stop voice input' : chat.voiceState === 'speaking' ? 'Stop speaking and listen' : 'Voice input'}
+          title={chat.voiceSupported ? 'Voice input (Hindi / English / Hinglish) — mic tap karo, bolo, phir suno' : 'Voice input — is browser mein support nahi hai, type karke likho'}
+          data-testid="chat-mic"
         >
           🎙️
         </button>
+        <button
+          className={`icon-btn chat-voice-cont ${chat.continuous ? 'active' : ''}`}
+          onClick={chat.toggleContinuous}
+          aria-label={chat.continuous ? 'Turn off continuous conversation' : 'Turn on continuous conversation'}
+          aria-pressed={chat.continuous}
+          title="Continuous conversation — mic tap karo, phir bina dobara tap kiye bolte raho"
+          data-testid="voice-continuous"
+        >
+          🔁
+        </button>
+        {chat.voiceState === 'speaking' && (
+          <button
+            className="icon-btn chat-voice-stop"
+            onClick={chat.stopVoice}
+            aria-label="Stop speaking"
+            title="Bolna roko"
+            data-testid="voice-stop"
+          >
+            ⏹
+          </button>
+        )}
         <input
           className="input"
           value={chat.input}
@@ -1039,9 +1421,9 @@ function ChatBody({ chat }: { chat: ReturnType<typeof useChat> }) {
           Send
         </button>
       </div>
-      <div className="chat-note">
+      <div className="chat-note" data-testid="voice-status">
         BizKhata AI Assistant • Figures always from your real records — nothing is sent anywhere.
-        {chat.listening ? ' • 🎙️ Sun raha hoon…' : ''}
+        {voiceStatus() ? ` • ${voiceStatus()}` : ''}
         {chat.streaming ? ' • Generating…' : ''}
       </div>
     </>

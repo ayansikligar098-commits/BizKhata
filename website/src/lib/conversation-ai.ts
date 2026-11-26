@@ -58,11 +58,24 @@ const ENDPOINT_STORAGE = 'bizkhata.ai.service.endpoint.v1';
  * `model` field — without it the service rejects the call even with a
  * valid key. This value is internal only: it is sent in the request
  * body, never shown in the UI, never logged, and never stored in the
- * business profile. UPDATE 19: the coordinators may change the model
- * choice (features / quality / latency / cost on the free tier), but
- * a model must always be sent.
+ * business profile.
+ *
+ * UPDATE 19 model choice (verified 2026-11-27 against Google's own
+ * models page, ai.google.dev/gemini-api/docs/models): the previous
+ * value is SHUT DOWN (June 1, 2026 — the page lists it under
+ * "Previous models" as "(Shut down)"), and the 2.5 Flash model is
+ * deprecated (routes to the 3.5 Flash-Lite model from Dec 1, 2026).
+ * `gemini-3.8-flash` is the live Stable Flash model, free-tier, and
+ * works at the OpenAI-compatible endpoint (the model string is passed
+ * through unchanged). It matches Android's AI_MODEL constant — the two
+ * surfaces must always agree. MODELS GET SHUT DOWN: re-check this
+ * value against Google's models page periodically, and update it in
+ * ALL THREE places together (here, streamDirect below, and
+ * UPSTREAM_MODEL in functions/api/ai-chat.ts) — see
+ * tests/streaming.test.mjs 'model' checks, which fail the suite if
+ * the constants drift apart or name a dead model.
  */
-const DEFAULT_MODEL = 'gemini-2.0-flash';
+export const DEFAULT_MODEL = 'gemini-3.8-flash';
 /** Legacy state + profile field from the pre-UPDATE-12 Settings card.
  *  This is the ONLY place the old field name appears: it is read here
  *  purely to migrate a key the owner entered early on (see the header

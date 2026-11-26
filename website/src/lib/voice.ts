@@ -185,7 +185,7 @@ export function cleanSpokenText(text: string, maxChars = 400): string {
 export function shortenForVoice(text: string, maxSentences = 2): string {
   const clean = cleanSpokenText(text, 2000);
   const parts = clean.match(/[^.!?।]+[.!?।]+["')\]]*\s*/g) || [clean];
-  return parts.slice(0, Math.max(1, maxSentences)).join(' ').trim() || clean;
+  return parts.slice(0, Math.max(1, maxSentences)).map((p) => p.trim()).join(' ') || clean;
 }
 
 /** Split a transcript into spoken words (Unicode-safe). */
@@ -416,6 +416,12 @@ export class VoiceController {
   private state: VoiceState = 'idle';
   private continuous = false;
   private listeningWanted = false;
+  /** True while a recognition session is live. In continuous mode the
+   *  session stays live across results — it must NOT be restarted
+   *  after every spoken reply (a second live session throws in
+   *  Chrome). Restart only happens when the session actually ended
+   *  (onend) or was never started. */
+  private recognitionActive = false;
   private speakingNow = false;
   private silenceTimer: ReturnType<typeof setTimeout> | null = null;
   private suppressRestartOnce = false;
@@ -502,6 +508,7 @@ export class VoiceController {
     };
     recog.onend = () => {
       if (this.disposed) return;
+      this.recognitionActive = false;
       // Chrome ends recognition after a pause even in continuous mode —
       // restart visibly so the conversation keeps going.
       if (this.listeningWanted && this.continuous && this.state === 'listening') {
@@ -519,6 +526,7 @@ export class VoiceController {
       this.cb.onError(name === 'NotAllowedError' ? 'denied' : 'unrecognized');
       return false;
     }
+    this.recognitionActive = true;
     this.setState('listening');
     this.armSilenceTimer();
     return true;
@@ -526,6 +534,7 @@ export class VoiceController {
 
   private stopListeningInternal(): void {
     this.listeningWanted = false;
+    this.recognitionActive = false;
     this.clearSilenceTimer();
     const recog = this.recognition;
     this.recognition = null;
@@ -570,11 +579,20 @@ export class VoiceController {
       this.speakingNow = false;
       this.lastSpoken = null;
       if (this.disposed) return;
-      const restart = this.continuous && this.listeningWanted && !this.suppressRestartOnce;
+      // Restart listening only when no recognition session is live:
+      // in continuous mode the session usually survives the reply,
+      // and the state must keep showing "listening" while it does —
+      // the mic is never shown idle while it is actually on.
+      const restart = this.continuous && this.listeningWanted && !this.recognitionActive && !this.suppressRestartOnce;
       this.suppressRestartOnce = false;
-      this.setState(restart ? 'listening' : 'idle');
+      if (restart) {
+        this.setState('listening');
+        this.cb.onSpeechEnd();
+        this.startListening(langBcp47);
+        return;
+      }
+      this.setState(this.recognitionActive && this.listeningWanted ? 'listening' : 'idle');
       this.cb.onSpeechEnd();
-      if (restart) this.startListening(langBcp47);
     };
     u.onend = finish;
     u.onerror = (err) => {
