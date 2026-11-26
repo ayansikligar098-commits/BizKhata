@@ -134,6 +134,12 @@ object BuiltInChatbotResponder {
         val q = question.trim().lowercase(Locale.ENGLISH)
         if (q.isEmpty()) return "Kuch poochiye — jaise \"Aaj ka profit kitna hai?\" ya \"Kaun paise dene wala hai?\""
         if (isGreeting(q)) return greeting(snapshot)
+        // UPDATE 15 — plan / statement guard (backstop; the ViewModel
+        // routes these through ConversationEngine first): a plan is
+        // NEVER answered with a money question.
+        if (isPlanStatement(q)) return planStatementAnswer(q)
+        if (isJoke(q)) return jokeAnswer()
+        if (isBored(q)) return boredAnswer()
         if (isHelp(q)) return helpText()
         if (isMoneyTransfer(q)) return moneyTransferAnswer(snapshot)
         if (isFund(q)) return fundAnswer(snapshot)
@@ -146,29 +152,65 @@ object BuiltInChatbotResponder {
         if (isExpense(q)) return expenseAnswer(snapshot)
         if (isService(q)) return serviceAnswer(snapshot)
         if (isPending(q)) return pendingAnswer(snapshot)
-        return "Samajh nahi aaya. Main ye bata sakta hoon:\n" +
-            "• Aaj ka profit / income / kharcha\n" +
-            "• Cash ya UPI balance\n" +
-            "• Kaun customer paise dene wala hai (due)\n" +
-            "• Agent ko kitna dena hai\n" +
-            "• Money Transfer commission aur fund\n" +
-            "Misal: \"Aaj ka profit kitna hai?\""
+        return "Maaf kijiye, main ye theek se samajh nahi paya. Zara phir se, thoda detail mein batao — jaise \"Aaj Xerox ke 300 cash hue\" ya \"Aaj ka profit kitna hai?\""
     }
 
     private fun isGreeting(q: String) =
         q == "hi" || q == "hello" || q == "hey" || q.startsWith("hi ") ||
             q.startsWith("hello") || q.contains("namaste") || q.contains("namaskar") ||
-            q.contains("salam") || q.contains("good morning") || q.contains("good evening")
+            q.contains("salam") || q.contains("good morning") || q.contains("good evening") ||
+            // UPDATE 14 — "Kaise ho bhai?" is a greeting, not a fund question.
+            q.contains("kaise ho") || q.contains("kaisa hai") || q.contains("how are you") ||
+            q.contains("kya haal") || q.contains("kem cho") || q.contains("aur batao") ||
+            q.contains("kya kar rahe ho")
 
     private fun greeting(snapshot: BusinessSnapshot): String {
-        val base = "Namaste! Main BizKhata Assistant hoon. Aap apne dukaan ke hisab ke baare me pooch sakte hain — " +
-            "aaj ka profit, kis customer ka due hai, agent ko kitna dena hai, ya Money Transfer commission."
-        return if (snapshot.hasAnyData) {
-            "$base\n\nAaj ka profit abhi ${formatPaise(snapshot.todayProfitPaise)} hai."
-        } else {
-            "$base\n\nAbhi koi record nahi hai — pehle Cash Book ya kisi service se entry add karein, phir main hisab bata paunga."
-        }
+        // UPDATE 14/15 — a greeting is answered naturally. It must
+        // NEVER mention business records: normal conversation works
+        // with zero transactions, and "no records" is not a greeting.
+        return "Namaste! Main badhiya hoon — tum batao, aaj shop ka kaam kaisa chal raha hai? " +
+            "Kuch poochna ho, koi entry karni ho, ya bas baatein karni ho — bata do."
     }
+
+    /** A plan / statement ("Mujhe kal PAN Card banane hai") — future
+     *  infinitive, no amount, no question. Acknowledge the plan and
+     *  offer relevant help; NEVER ask for money. */
+    private fun isPlanStatement(q: String): Boolean {
+        val planVerb = q.contains("banane hai") || q.contains("banana hai") ||
+            q.contains("banani hai") || q.contains("karna hai") ||
+            q.contains("karne hai") || q.contains("jaana hai") ||
+            q.contains("shuru karna hai")
+        if (!planVerb) return false
+        if (q.contains("due") || q.contains("baki") || q.contains("udhaar")) return false
+        if (Regex("\\d").containsMatchIn(q)) return false
+        return true
+    }
+
+    private fun planStatementAnswer(q: String): String {
+        val topic = when {
+            q.contains("pan") -> "PAN Card"
+            q.contains("website") -> "Website"
+            q.contains("aadhaar") -> "Aadhaar"
+            q.contains("voter") -> "Voter ID"
+            q.contains("shop") || q.contains("dukaan") -> "dukaan"
+            else -> "kaam"
+        }
+        val whenWord = if (q.contains("kal")) "Kal" else "Aaj"
+        return "Achha! $whenWord $topic ka kaam karna hai. Agar chaho toh main tumhare liye kaam ki checklist bhi bana sakta hoon — bas bol do."
+    }
+
+    private fun isJoke(q: String) =
+        q.contains("joke") && (q.contains("sunao") || q.contains("batao") || q.contains("tell"))
+
+    private fun jokeAnswer(): String =
+        "Ek aadmi doctor ke paas gaya aur bola: \"Doctor sahab, mujhe bhoolne ki bimari hai.\" " +
+            "Doctor: \"Kab se?\" Aadmi: \"Kya kab se?\""
+
+    private fun isBored(q: String) =
+        q.contains("bore") || q.contains("boring") || q.contains("feeling bored")
+
+    private fun boredAnswer(): String =
+        "Toh kuch interesting karte hain! Gaane suno, kuch naya seekh lo — ya batao, main tumhe ek joke sunau ya koi business idea du?"
 
     private fun isHelp(q: String) =
         q.contains("help") || q.contains("madad") ||
@@ -199,7 +241,9 @@ object BuiltInChatbotResponder {
     }
 
     private fun isFund(q: String) =
-        q.contains("fund") || q.contains("bhai")
+        // UPDATE 14 — "bhai" alone is NOT a fund question. "Kaise ho
+        // bhai?" used to land here and get a "no fund record" answer.
+        q.contains("fund")
 
     private fun fundAnswer(snapshot: BusinessSnapshot): String {
         if (snapshot.moneyTransferFundPaise == 0L) {

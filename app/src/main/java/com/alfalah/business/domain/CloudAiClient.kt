@@ -58,17 +58,61 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
     }
 
     private fun callAi(question: String, businessContext: String): String? {
-        val endpoint =
-            "https://generativelanguage.googleapis.com/v1beta/models/" +
-                AiFeatures.AI_MODEL + ":generateContent"
         val prompt = "You are BizKhata AI Assistant, a shop accounting helper. " +
             "Answer in the SAME language and style as the question — it may be Hinglish, English, Hindi, " +
             "Gujarati, Marathi, Bengali, Punjabi, Tamil, Telugu, Kannada, Malayalam, Odia, Assamese, Urdu, " +
             "Nepali or another Indian language, in native script or Roman letters. Reply naturally in that language. " +
             "Use ONLY the facts below. NEVER invent a number, a name or a record. " +
             "If the facts say there is no record, say so plainly. " +
+            "If the question is casual conversation, reply naturally and briefly — never mention business records unless the question asks about them. " +
             "Keep the answer short and simple, in plain words a shopkeeper understands.\n\n" +
             businessContext + "\n\nQuestion: " + question
+        return postPrompt(prompt)
+    }
+
+    /** UPDATE 15 — the MAIN engine for casual / general conversation.
+     *  The local engine understands meaning and handles structured
+     *  work, but open-ended conversation is generated HERE, dynamically,
+     *  from the user's actual words + the conversation history + the
+     *  business context — never from a fixed reply. [context] carries
+     *  the recent conversation (user + assistant turns), the user's
+     *  language and style, and the real ledger facts. Rules for the
+     *  reply: answer in the SAME language and style as the user; be
+     *  natural and varied, never a canned phrase; understand the actual
+     *  intention (greeting, statement, plan, question, request) and
+     *  answer THAT — a plan about tomorrow is acknowledged and helped
+     *  with, never turned into a question about money; figures come
+     *  ONLY from the supplied facts, never invented; the assistant
+     *  never performs a financial action itself — it only proposes one,
+     *  and the app confirms it with the user first; if something is
+     *  not known, say so honestly instead of inventing it. Returns
+     *  null on any failure — the caller then uses the local reply. */
+    suspend fun converse(question: String, context: String): String? {
+        if (apiKey.isBlank()) return null
+        return try {
+            withContext(Dispatchers.IO) {
+                val prompt = "You are BizKhata AI Assistant, a friendly personal and business assistant for a small shopkeeper in India. " +
+                    "The user speaks to you in their own language and style — it may be Hinglish, English, Hindi, Gujarati, Marathi, Bengali, Punjabi, Tamil, Telugu, Kannada, Malayalam, Odia, Assamese, Urdu, Nepali or another Indian language, in native script or Roman letters. " +
+                    "Reply in the SAME language and style as the user's latest message. Be natural, warm and varied — write like a helpful person, never like a form letter, and never repeat the same generic question. " +
+                    "First understand the user's actual intention: a greeting, a statement about their day, a plan for tomorrow, a question, a request, or a business action. Answer THAT intention. " +
+                    "If the user states a plan (for example they will do PAN Card work tomorrow), acknowledge the plan and offer relevant help such as a checklist — NEVER ask how much money was involved. " +
+                    "If the user asks about their business, use ONLY the ledger facts given below — never invent a number, a name or a record; if there is no record, say so plainly and give the real figure (zero when nothing is recorded). " +
+                    "You never perform a financial action yourself: if the user wants an entry, a payment or a change, say what you understood and ask them to confirm — the app handles the actual save. " +
+                    "If you do not know something (live prices, news, weather, or anything outside the facts below), say so honestly in plain words instead of inventing it. " +
+                    "Keep replies short and simple, in plain words a shopkeeper understands.\n\n" +
+                    context + "\n\nLatest message: " + question
+                postPrompt(prompt)
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** One HTTP call with a prompt; returns the reply text or null. */
+    private fun postPrompt(prompt: String): String? {
+        val endpoint =
+            "https://generativelanguage.googleapis.com/v1beta/models/" +
+                AiFeatures.AI_MODEL + ":generateContent"
         val body = "{\"contents\":[{\"parts\":[{\"text\":" + jsonString(prompt) + "}]}]}"
         val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"

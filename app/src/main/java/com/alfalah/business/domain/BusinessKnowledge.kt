@@ -286,7 +286,10 @@ object BusinessKnowledge {
     private fun isDailySummary(q: String) =
         q.contains("dhandha") || q.contains("dhanda") || q.contains("summary") ||
             (q.contains("aaj") && (q.contains("kitna") || q.contains("kaisa"))) ||
-            q.contains("business summary") || q.contains("aaj ka hisab")
+            q.contains("business summary") || q.contains("aaj ka hisab") ||
+            // UPDATE 14 — "Aaj no total hisab batavo" (Roman Gujarati).
+            q.contains("total hisab") ||
+            (q.contains("hisab") && (q.contains("aaj") || q.contains("total")))
 
     private fun isCollection(q: String) =
         q.contains("collection") || q.contains("earning") || q.contains("kamai") ||
@@ -331,11 +334,23 @@ object BusinessKnowledge {
             q.contains("how many")
 
     // --- Answers ----------------------------------------------------------
-    private fun noData(snap: KnowledgeSnapshot): String? =
-        if (!snap.hasAnyData) "Abhi koi record nahi hai — pehle Cash Book ya kisi service se entry add karein, phir main hisab bata paunga." else null
+    // UPDATE 14 — honest zero figures on an empty store: a summary /
+    // profit / collection / expense question on zero records answers
+    // with the REAL figure (₹0), plus a plain note that there are no
+    // records yet. "No records" alone would hide the figure the user
+    // asked for; an invented figure would be worse. The note keeps the
+    // existing "koi record nahi hai" honesty check passing.
+    private fun emptyNote(): String =
+        "Abhi koi record nahi hai — pehle entry add karein, phir main asli hisab bataunga."
 
     private fun dailySummary(snap: KnowledgeSnapshot, range: PeriodRange, period: AiPeriod): KnowledgeAnswer {
-        noData(snap)?.let { return KnowledgeAnswer(it) }
+        if (!snap.hasAnyData) {
+            return KnowledgeAnswer(
+                "${range.label} ka total collection: ${formatPaise(0)} (Cash ${formatPaise(0)} + UPI ${formatPaise(0)})\n" +
+                    "Kharcha: ${formatPaise(0)}\nNet profit: ${formatPaise(0)}\n${emptyNote()}",
+                deepLinkRoute = "daily_business", deepLinkLabel = "Daily Business kholo"
+            )
+        }
         val income = incomeIn(snap, range)
         val cash = income.filter { it.mode == PaymentMode.CASH }.sumOf { it.amountPaise }
         val upi = income.filter { it.mode == PaymentMode.UPI }.sumOf { it.amountPaise }
@@ -373,7 +388,12 @@ object BusinessKnowledge {
     private fun collectionAnswer(
         snap: KnowledgeSnapshot, range: PeriodRange, period: AiPeriod, service: ServiceType?, label: String?
     ): KnowledgeAnswer {
-        noData(snap)?.let { return KnowledgeAnswer(it) }
+        if (!snap.hasAnyData) {
+            return KnowledgeAnswer(
+                "${range.label} total collection: ${formatPaise(0)}.\n${emptyNote()}",
+                deepLinkRoute = "daily_business", deepLinkLabel = "Daily Business kholo"
+            )
+        }
         if (service != null && label != null) {
             val amt = serviceIncome(snap, range, label)
             val mtNote = if (service == ServiceType.MONEY_TRANSFER)
@@ -408,7 +428,13 @@ object BusinessKnowledge {
     private fun profitAnswer(
         snap: KnowledgeSnapshot, range: PeriodRange, period: AiPeriod, service: ServiceType?, label: String?
     ): KnowledgeAnswer {
-        noData(snap)?.let { return KnowledgeAnswer(it) }
+        if (!snap.hasAnyData) {
+            return KnowledgeAnswer(
+                "${range.label} ka profit: ${formatPaise(0)}\n" +
+                    "Calculation: Collection ${formatPaise(0)} − Kharcha ${formatPaise(0)} = ${formatPaise(0)}\n${emptyNote()}",
+                deepLinkRoute = "reports", deepLinkLabel = "Reports kholo"
+            )
+        }
         val profit = periodProfit(snap, range)
         val income = periodCollection(snap, range)
         val expenses = periodExpenses(snap, range)
@@ -464,7 +490,12 @@ object BusinessKnowledge {
     private fun expenseAnswer(
         snap: KnowledgeSnapshot, q: String, range: PeriodRange, service: ServiceType?, label: String?
     ): KnowledgeAnswer {
-        noData(snap)?.let { return KnowledgeAnswer(it) }
+        if (!snap.hasAnyData) {
+            return KnowledgeAnswer(
+                "${range.label} total kharcha: ${formatPaise(0)}.\n${emptyNote()}",
+                deepLinkRoute = "expenses", deepLinkLabel = "Expenses kholo"
+            )
+        }
         val total = periodExpenses(snap, range)
         val byCat = expenseIn(snap, range).groupBy { it.category }
             .mapValues { (_, v) -> v.sumOf { it.amountPaise } }
@@ -819,6 +850,35 @@ object BusinessKnowledge {
             text.trim(), deepLinkRoute = "reports", deepLinkLabel = "Reports kholo",
             hasEstimate = true
         )
+    }
+
+    /** UPDATE 15/16 — tomorrow's work plan, from REAL pending jobs
+     *  (never invented). "Kal mujhe kya kya kaam karna chahiye?" and
+     *  "Kal ke kaam ki checklist banao" both use this: pending jobs
+     *  first, then the generic closing checks. Empty store → an honest
+     *  empty plan, not a made-up task list. */
+    fun tomorrowPlan(snap: KnowledgeSnapshot, today: Long): String {
+        val pending = snap.jobs.filter {
+            it.status == JobStatus.NEW || it.status == JobStatus.IN_PROGRESS ||
+                it.status == JobStatus.SUBMITTED || it.status == JobStatus.PENDING
+        }
+        return buildString {
+            if (pending.isEmpty()) {
+                appendLine("Kal ke liye koi pending job nahi hai.")
+            } else {
+                appendLine("Kal ke pending kaam (${pending.size}):")
+                pending.take(8).forEach { job ->
+                    val customer = snap.customers.firstOrNull { it.id == job.customerId }?.name ?: "Customer"
+                    val due = AccountingEngine.customerDue(job.totalFeesPaise, job.amountReceivedPaise)
+                    val duePart = if (due > 0) ", due ${formatPaise(due)}" else ""
+                    appendLine("• ${job.service.label} — $customer (status: ${job.status}$duePart)")
+                }
+                if (pending.size > 8) appendLine("• …aur ${pending.size - 8} pending kaam.")
+            }
+            appendLine("• Cash closing karo — Cash aur UPI alag-alag.")
+            appendLine("• Money Transfer fund ka balance check karo.")
+            appendLine("• Machine, kagaz aur ink check karo.")
+        }.trim()
     }
 
     private fun formatDay(epochDay: Long): String =

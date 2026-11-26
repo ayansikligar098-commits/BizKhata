@@ -50,7 +50,13 @@ import java.util.Locale
  *    Maithili, Bodo, Manipuri and Santali number words are NOT yet in
  *    the table — digits work for all of them.
  *  - "Kal" (yesterday/tomorrow) stays ambiguous in every language and
- *    is always clarified, never guessed.
+ *    is always clarified, never guessed — for FINANCIAL entries. Plans
+ *    ("Mujhe kal PAN Card banane hai") are not entries and never hit
+ *    this rule (see Conversation.kt, UPDATE 15).
+ *  - UPDATE 14/15 guard: Roman Hinglish markers ("kaise", "bhai",
+ *    "ho", "hoon", "hai", "kar", "rahe") outweigh a lone "ho", which
+ *    must never flip Roman Hinglish to Marathi ("Kaise Ho Bhai" was
+ *    answered in Marathi — the UPDATE 14 screenshot bug).
  */
 enum class AiLanguage(
     val code: String,
@@ -434,7 +440,13 @@ object Multilingual {
         AiLanguage.HINGLISH to setOf(
             "aaj", "kal", "kitna", "kitne", "batao", "hue", "hua", "mila",
             "kharcha", "baki", "dhandha", "hisab", "rupaye", "paise",
-            "kaise", "kya", "nahi", "haan", "dena", "lena", "jama"
+            "kaise", "kya", "nahi", "haan", "dena", "lena", "jama",
+            // UPDATE 14/15 — Hinglish markers (UPDATE 14 screenshot bug):
+            // "kaise", "bhai", "ho", "hoon", "hai", "kar", "rahe" must
+            // outweigh a lone "ho", which must NEVER flip Roman
+            // Hinglish to Marathi ("Kaise Ho Bhai" → Hinglish, not Marathi).
+            "bhai", "ho", "hoon", "hai", "kar", "rahe", "raha", "tum",
+            "kaisa", "kaisi", "acha", "theek", "shukriya", "sab", "mood", "bore"
         ),
         AiLanguage.HINDI to setOf(
             "आज", "कल", "कितना", "बताओ", "हुए", "मिला", "खर्च", "बाकी",
@@ -443,7 +455,9 @@ object Multilingual {
         AiLanguage.GUJARATI to setOf(
             "aaje", "aaj", "ketla", "ketlo", "thaya", "thayo", "malyo",
             "malya", "ane", "che", "kharcho", "baki", "na", "no", "aaje", "આજે",
-            "કેટલા", "થયા", "બાકી", "ખર્ચો", "રૂપિયા", "નાખ", "nakh"
+            "કેટલા", "થયા", "બાકી", "ખર્ચો", "રૂપિયા", "નાખ", "nakh",
+            // UPDATE 14 — "Aaje su chale chhe?" ("what's going on?")
+            "chhe", "su", "kem", "cho", "chale"
         ),
         AiLanguage.MARATHI to setOf(
             "आज", "किती", "कसे", "मला", "तुम्ही", "माझे", "झाले",
@@ -631,9 +645,26 @@ object Multilingual {
         val second = scores.getOrNull(1)
         val mixed = (second != null && second.second >= 2 && second.second * 2 >= (best?.second ?: 0)) || scriptMixed
 
+        // UPDATE 14/15 GUARD — Hinglish markers outweigh a lone "ho".
+        // "ho" is also a yes-word in Marathi/Nepali, so a Roman message
+        // like "Kaise Ho Bhai" used to flip to Marathi on that one
+        // token. Two or more Hinglish markers in a Roman message now
+        // force Hinglish, whatever a single other-language token says.
+        // (Roman messages have no dominant script, so no script winner
+        // can conflict with this branch.)
+        val hinglishMarkers = setOf(
+            "kaise", "bhai", "ho", "hoon", "hai", "kya", "kar", "rahe",
+            "raha", "tum", "batao", "acha", "mood", "bore"
+        )
+        val hinglishMarkerCount = tokens.count { it in hinglishMarkers }
+
         val language: AiLanguage
         val confidence: Double
         when {
+            romanized && hinglishMarkerCount >= 2 -> {
+                language = AiLanguage.HINGLISH
+                confidence = 0.8
+            }
             scriptWinner != null && (best == null || best.second <= 1 || scriptWinner == best.first) -> {
                 language = scriptWinner
                 confidence = 0.9

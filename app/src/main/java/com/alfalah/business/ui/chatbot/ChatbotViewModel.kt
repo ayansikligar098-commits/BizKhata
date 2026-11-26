@@ -17,11 +17,14 @@ import com.alfalah.business.domain.BuiltInChatbotResponder
 import com.alfalah.business.domain.BusinessKnowledge
 import com.alfalah.business.domain.BusinessSnapshot
 import com.alfalah.business.domain.CloudAiClient
+import com.alfalah.business.domain.ConversationEngine
+import com.alfalah.business.domain.ConversationMemory
 import com.alfalah.business.domain.Debtor
 import com.alfalah.business.domain.AgentOwed
 import com.alfalah.business.domain.JobStatus
 import com.alfalah.business.domain.KnowledgeSnapshot
 import com.alfalah.business.domain.LastKnowledge
+import com.alfalah.business.domain.MeaningParser
 import com.alfalah.business.domain.Multilingual
 import com.alfalah.business.domain.MultilingualReplies
 import com.alfalah.business.domain.PaymentMode
@@ -55,7 +58,10 @@ data class ChatMessage(
     val table: List<Triple<String, String, String>> = emptyList(),
     val tableHeaders: Triple<String, String, String>? = null,
     val deepLinkRoute: String? = null,
-    val deepLinkLabel: String? = null
+    val deepLinkLabel: String? = null,
+    /** UPDATE 16 — a real checklist produced by a "checklist banao"
+     *  command (rendered from [text] too; kept structured for the UI). */
+    val checklist: List<String> = emptyList()
 )
 
 /** A financial action awaiting confirmation, rendered as a preview card
@@ -429,6 +435,13 @@ class ChatbotViewModel(
         context = context.copy(lastLanguage = lang)
         if (_aiLanguagePref.value == "AUTO") _voiceLanguageTag.value = lang.bcp47
 
+        // UPDATE 14/15/16 — remember what this message means BEFORE
+        // parsing: CSC centre, last topic, last plan ("kal PAN Card
+        // banane hai" → the next "uski checklist banao" resolves).
+        // Memory never overrides the ledgers.
+        val meaning = ConversationEngine.understand(text, context, lang)
+        context = ConversationMemory.updateContext(context, text, meaning)
+
         // --- 1. A pending financial action: Haan / Nahi / follow-up amount.
         pendingAction?.let { pending ->
             val norm = AiAssistantParser.normalise(text)
@@ -490,6 +503,7 @@ class ChatbotViewModel(
         // --- 4. Parse the message.
         val result = AiAssistantParser.parse(text, context, agents, customers)
         when (result) {
+            is AiAssistantParser.AiParseResult.Conversational -> handleConversational(result, text, lang)
             is AiAssistantParser.AiParseResult.Action -> showPreview(result.action, result.preview)
             is AiAssistantParser.AiParseResult.Clarify -> {
                 if (result.missing == listOf("exact entry")) {
@@ -530,6 +544,96 @@ class ChatbotViewModel(
     }
 
     // ------------------------------------------------------------------
+    // Conversational replies (UPDATE 14/15/16) — the cloud AI is the
+    // MAIN engine for casual / general messages when a service is
+    // configured; the local composer is the engine otherwise. A plan /
+    // statement is never answered with a money question, and a message
+    // the local engine cannot genuinely answer gets an honest plain-
+    // language limitation — never a forced business question.
+    // ------------------------------------------------------------------
+    private suspend fun handleConversational(
+        result: AiAssistantParser.AiParseResult.Conversational,
+        userText: String,
+        lang: AiLanguage
+    ) {
+        val key = settings.aiKey.first()
+        if (key.isNotBlank()) {
+            val cloud = tryCloudConverse(userText)
+            if (cloud != null) {
+                append(
+                    ChatMessage(
+                        text = withRealPlanData(cloud, result.intent),
+                        fromUser = false, isAiSummary = true,
+                        note = "AI jawab",
+                        checklist = result.checklist
+                    )
+                )
+                return
+            }
+            // Cloud failed — fall through to the local reply below.
+        }
+        if (result.needsCloud) {
+            // No usable cloud reply and the local engine could not
+            // genuinely answer: say so honestly, in the user language.
+            val limitation = if (MeaningParser.isLiveInfo(AiAssistantParser.normalise(userText), userText.lowercase())) {
+                ConversationEngine.liveInfoLimitation(lang)
+            } else {
+                ConversationEngine.honestLimitation(lang)
+            }
+            append(ChatMessage(text = limitation, fromUser = false))
+            return
+        }
+        append(
+            ChatMessage(
+                text = withRealPlanData(result.text, result.intent),
+                fromUser = false,
+                checklist = result.checklist,
+                deepLinkRoute = result.deepLinkRoute,
+                deepLinkLabel = result.deepLinkLabel
+            )
+        )
+    }
+
+    /** Cloud conversational reply: the prompt carries the user's
+     *  language + style, the recent conversation, the business context
+     *  and the real ledger facts. Returns null on any failure. */
+    private suspend fun tryCloudConverse(userText: String): String? {
+        val key = settings.aiKey.first()
+        if (key.isBlank()) return null
+        val history = _messages.value.takeLast(10).joinToString("\n") { message ->
+            (if (message.fromUser) "User: " else "Assistant: ") + message.text
+        }
+        val contextText = "The user runs a CSC centre (Xerox, Printing, PAN Card, Aadhaar, Voter ID, Ayushman Card, Money Transfer, Passport Photo, Scanning). " +
+            "Reply in the same language and style as the user's latest message.\n\n" +
+            snapshotFacts(_snapshot.value) + "\nConversation so far:\n$history"
+        return CloudAiClient(key).converse(userText, contextText)
+    }
+
+    /** Append REAL pending-jobs data to tomorrow-plan / checklist
+     *  replies (UPDATE 15/16) — the plan is built from the ledgers,
+     *  never invented. */
+    private fun withRealPlanData(text: String, intent: String): String = when (intent) {
+        "tomorrow_plan" -> text + "\n\n" + BusinessKnowledge.tomorrowPlan(_knowledge.value, today)
+        "checklist" -> {
+            val pending = pendingJobsChecklist()
+            if (pending.isNotEmpty()) text + "\n\nKal ke pending kaam se:\n" + pending.joinToString("\n") { "• $it" }
+            else text
+        }
+        else -> text
+    }
+
+    private fun pendingJobsChecklist(): List<String> {
+        val snap = _knowledge.value
+        return snap.jobs.filter {
+            it.status == JobStatus.NEW || it.status == JobStatus.IN_PROGRESS ||
+                it.status == JobStatus.SUBMITTED || it.status == JobStatus.PENDING
+        }.take(8).map { job ->
+            val customer = snap.customers.firstOrNull { it.id == job.customerId }?.name ?: "Customer"
+            "${job.service.label} — $customer (${job.status})"
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Questions (UPDATE 10): knowledge engine → cloud summary → built-in.
     // ------------------------------------------------------------------
     private suspend fun answerQuestion(text: String) {
@@ -549,7 +653,13 @@ class ChatbotViewModel(
             }
             append(
                 ChatMessage(
-                    text = knowledgeAnswer.text, fromUser = false,
+                    // UPDATE 14/16 — CSC-aware enrichment (expense kinds
+                    // name the usual CSC expense categories). Facts still
+                    // come from the ledgers.
+                    text = ConversationMemory.enrichBusinessAnswer(
+                        knowledgeAnswer.text, context, lastKnowledge?.kind, effectiveLanguage(text)
+                    ),
+                    fromUser = false,
                     table = knowledgeAnswer.table, tableHeaders = knowledgeAnswer.tableHeaders,
                     deepLinkRoute = knowledgeAnswer.deepLinkRoute,
                     deepLinkLabel = knowledgeAnswer.deepLinkLabel,
@@ -932,7 +1042,7 @@ class ChatbotViewModel(
     }
 
     // ------------------------------------------------------------------
-    // Clarifications — complete a partial action from the user's answer.
+    // Clarifications — complete a partial action from the user answer.
     // ------------------------------------------------------------------
     private suspend fun tryCompleteClarification(text: String, clar: ClarificationState): Boolean {
         val norm = AiAssistantParser.normalise(text)

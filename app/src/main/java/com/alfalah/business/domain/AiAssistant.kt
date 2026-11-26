@@ -61,7 +61,18 @@ object AiAssistantParser {
         /** Language the user last wrote in (UPDATE 13) — replies and the
          *  voice recogniser follow it until the user switches language
          *  mid-conversation, which re-detects automatically. */
-        val lastLanguage: AiLanguage = AiLanguage.HINGLISH
+        val lastLanguage: AiLanguage = AiLanguage.HINGLISH,
+        /** UPDATE 14/15/16 — conversation memory (ConversationMemory).
+         *  NEVER overrides the ledgers; it only fills in what the user
+         *  did not repeat. */
+        val runsCscCentre: Boolean = false,
+        val lastTopic: String? = null,
+        val lastIntent: String? = null,
+        /** The user's stated plan ("kal PAN Card banane hai") — topic
+         *  + the day it is for, so follow-ups ("uski checklist banao")
+         *  resolve against it. */
+        val lastPlanTopic: String? = null,
+        val lastPlanDayEpoch: Long? = null
     )
 
     // ------------------------------------------------------------------
@@ -170,6 +181,24 @@ object AiAssistantParser {
 
         /** "How do I …?" — app help, with a deep link to the screen. */
         data class Help(val topic: String) : AiParseResult
+
+        /** UPDATE 14/15/16 — a conversational reply, composed by
+         *  [ConversationEngine] from the message's actual meaning +
+         *  conversation context (casual, statement, plan, general
+         *  question, language switch, checklist). NEVER a financial
+         *  action: normal conversation can never write to the ledgers.
+         *  [needsCloud] means the local engine could not genuinely
+         *  answer — the ViewModel must ask the cloud AI or answer
+         *  honestly, never invent a forced business question.
+         *  [checklist] carries a real checklist (UPDATE 16 do-it). */
+        data class Conversational(
+            val text: String,
+            val intent: String,
+            val deepLinkRoute: String? = null,
+            val deepLinkLabel: String? = null,
+            val checklist: List<String> = emptyList(),
+            val needsCloud: Boolean = false
+        ) : AiParseResult
 
         /** Nothing understood — fall through to knowledge / built-in. */
         object Unknown : AiParseResult
@@ -358,6 +387,33 @@ object AiAssistantParser {
         val detected = Multilingual.detectLanguage(rawText)
         val lang = if (detected.language != AiLanguage.UNKNOWN) detected.language
             else context.lastLanguage
+
+        // --- UPDATE 14/15/16: understand the actual meaning FIRST.
+        //     Casual / statement / plan / general / language-switch /
+        //     checklist messages are answered conversationally HERE,
+        //     before any business-data path — a greeting must never
+        //     reach a "no records" answer, and a plan must never be
+        //     forced into a money question ("Mujhe kal PAN Card banane
+        //     hai" is a plan about tomorrow, not a transaction).
+        //     Financial actions, business-data questions and app help
+        //     fall through to the existing pipeline below, unchanged.
+        val meaning = ConversationEngine.understand(rawText, context, lang)
+        when (meaning.intent) {
+            ConversationIntent.CASUAL, ConversationIntent.STATEMENT,
+            ConversationIntent.PLAN, ConversationIntent.LANGUAGE_REQUEST,
+            ConversationIntent.CHECKLIST, ConversationIntent.QUESTION_GENERAL -> {
+                val reply = ConversationEngine.composeLocal(meaning, context)
+                return AiParseResult.Conversational(
+                    text = reply.text,
+                    intent = reply.intent,
+                    deepLinkRoute = reply.deepLinkRoute,
+                    deepLinkLabel = reply.deepLinkLabel,
+                    checklist = reply.checklist,
+                    needsCloud = reply.needsCloud
+                )
+            }
+            else -> { /* business / help / navigation: existing pipeline */ }
+        }
 
         // --- App help: "kaise …?" / "how to …?" / "kahan …?" -------------
         val help = detectHelp(q)

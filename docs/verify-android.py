@@ -376,6 +376,93 @@ if db_screen.exists():
         if term not in screen_src:
             fails.append(f"DailyBusinessScreen missing: {term}")
 
+# 14. UPDATE 14/15/16 — general + business AI assistant.
+# The two screenshot bugs must stay fixed: (a) "Kaise Ho Bhai" (Hinglish
+# greeting) answered in Marathi about no records; (b) "Mujhe kal PAN
+# Card banane hai" (a plan) answered "PAN Card ke kitne rupaye hue?".
+conv = MAIN / "domain/Conversation.kt"
+if not conv.exists():
+    fails.append("domain/Conversation.kt missing (UPDATE 14 casual/general engine)")
+else:
+    conv_src = conv.read_text()
+    for needle in ["object ConversationEngine", "object MeaningParser",
+                   "object ChecklistBuilder", "object ConversationMemory",
+                   "object ConversationReplies", "object ConversationJokes",
+                   "fun understand", "fun composeLocal", "fun isPlan",
+                   "planVerbs", "fun generalAnswer", "fun honestLimitation",
+                   "fun liveInfoLimitation", "fun tomorrowPlanGeneric"]:
+        if needle not in conv_src:
+            fails.append(f"Conversation.kt missing: {needle}")
+    # The plan guard: a plan/statement must NEVER be answered with a
+    # money question — the forced question must not appear anywhere in
+    # the conversational engine.
+    if "kitne rupaye hue" in conv_src:
+        fails.append("Conversation.kt contains the forced money question 'kitne rupaye hue?' (UPDATE 15)")
+cloud = (MAIN / "domain/CloudAiClient.kt").read_text()
+for needle in ["suspend fun converse", "Latest message: ",
+               "NEVER ask how much money was involved",
+               "You never perform a financial action yourself"]:
+    if needle not in cloud:
+        fails.append(f"CloudAiClient.kt missing conversational-AI piece: {needle!r}")
+vm_src = (MAIN / "ui/chatbot/ChatbotViewModel.kt").read_text()
+for needle in ["handleConversational", "tryCloudConverse",
+               "ConversationMemory.updateContext", "ConversationEngine.understand",
+               "tomorrowPlan", "pendingJobsChecklist",
+               "checklist: List<String>", "Conversation so far:"]:
+    if needle not in vm_src:
+        fails.append(f"ChatbotViewModel.kt missing conversational piece: {needle!r}")
+if "AiParseResult.Conversational" not in vm_src:
+    fails.append("ChatbotViewModel.kt does not handle AiParseResult.Conversational (UPDATE 14)")
+ai_src = (MAIN / "domain/AiAssistant.kt").read_text()
+for needle in ["data class Conversational", "runsCscCentre", "lastPlanTopic",
+               "lastPlanDayEpoch", "ConversationEngine.understand"]:
+    if needle not in ai_src:
+        fails.append(f"AiAssistant.kt missing conversational piece: {needle!r}")
+chatbot_src = (MAIN / "domain/Chatbot.kt").read_text()
+if 'contains("bhai")' in chatbot_src:
+    fails.append("Chatbot.kt still treats 'bhai' as a fund signal (UPDATE 14 screenshot bug)")
+if "isPlanStatement" not in chatbot_src or "planStatementAnswer" not in chatbot_src:
+    fails.append("Chatbot.kt missing plan-statement guard (UPDATE 15)")
+multi_src = (MAIN / "domain/Multilingual.kt").read_text()
+if '"bhai"' not in multi_src:
+    fails.append("Multilingual.kt Hinglish detection keywords lack 'bhai' (UPDATE 14)")
+if "hinglishMarkerCount >= 2" not in multi_src:
+    fails.append("Multilingual.kt missing the Roman-Hinglish guard (UPDATE 14)")
+bk_src = (MAIN / "domain/BusinessKnowledge.kt").read_text()
+if "fun tomorrowPlan" not in bk_src:
+    fails.append("BusinessKnowledge.kt missing tomorrowPlan (UPDATE 15)")
+if "total hisab" not in bk_src:
+    fails.append("BusinessKnowledge.kt summary does not cover 'total hisab' (UPDATE 14)")
+if not (TEST / "ConversationTest.kt").exists():
+    fails.append("ConversationTest.kt missing (UPDATE 14/15/16 acceptance suite)")
+else:
+    conv_test = (TEST / "ConversationTest.kt").read_text()
+    for needle in ["screenshotBug_greetingAnsweredInMarathiAboutNoRecords",
+                   "screenshotBug_planForcedIntoMoneyQuestion",
+                   "update14_hiBhaiKaiseHo", "update14_funnyJoke",
+                   "update14_panCardExplained", "update14_romanGujaratiWhatsGoingOn",
+                   "update14_xeroxCashActionPreview", "update14_profitOnEmptyStoreIsZero",
+                   "update14_cashBookHelpWithStepsAndDeepLink", "update14_boredSuggestSomething",
+                   "update14_speakInGujarati", "update14_totalOnEmptyStoreIsZero",
+                   "update15_planPanCardTomorrow", "update15_busyDayStatement",
+                   "update15_businessIdea", "update15_howToBuildWebsite",
+                   "update15_whatWorkTomorrow", "honestLimitationForLiveInfo",
+                   "greetingVariesWithContext_noFixedReply",
+                   "doIt_navigationExecutes", "doIt_checklistIsProduced",
+                   "doIt_summaryIsRealFromLedgers",
+                   "conversationAccuracySuite_reportsMeasuredAccuracy"]:
+        if needle not in conv_test:
+            fails.append(f"ConversationTest.kt missing: {needle}")
+mirror_src = mirror.read_text()
+for needle in ["u14-screenshot greeting", "u15-plan pan tomorrow",
+               "u16-do-it navigation executes", "def understand", "def compose_local",
+               "def respond", "def tomorrow_plan", "def _checklist_for",
+               "SECTION ACCURACY (UPDATE 14/15/16"]:
+    if needle not in mirror_src:
+        fails.append(f"ai_assistant_mirror.py missing conversational piece: {needle!r}")
+if 'def _no_money_q' not in mirror_src:
+    fails.append("ai_assistant_mirror.py missing the no-money-question guard assertion (UPDATE 15)")
+
 # 9. Python mirror of AccountingEngine — run the unit-test cases
 def customer_due(total, received): return max(total - received, 0)
 def agent_payable(charges, paid): return max(charges - paid, 0)
