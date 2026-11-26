@@ -35,7 +35,7 @@ object AiFeatures {
      *  as shut down, June 1 2026) — calls to it fail, so it must never
      *  come back; 2.5-flash is deprecated and routes to 3.5-flash-lite
      *  from Dec 1 2026; 3.5-flash-lite is the Stable Flash for agentic
-     *  work on the no-cost tier (fast, full quality rather than Lite,
+     *  work on the no-cost tier (fast, high-throughput everyday model,
      *  no shutdown announced). 4-hydrogen (the docs' example model) is a newer
      *  frontier reasoning model — higher latency for short chat
      *  replies, so it was NOT picked for chat. This constant is the
