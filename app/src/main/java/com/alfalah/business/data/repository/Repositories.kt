@@ -304,4 +304,11 @@ class BusinessRepository(private val db: AppDatabase) {
 
     suspend fun addEquipment(equipment: com.alfalah.business.data.entity.EquipmentEntity): Long =
         expenses.insertEquipment(equipment)
+
+    /** Agent charges / payments per agent — used by the chatbot to list
+     *  exactly who is owed what. Charges and payments stay separate. */
+    suspend fun chargesForAgent(profileId: Long, agentId: Long): Long =
+        agents.totalChargesForAgent(profileId, agentId)
+
+    suspend fun paidToAgent(agentId: Long): Long = agents.totalPaidToAgent(agentId)
 }

@@ -29,6 +29,22 @@ the same accounting rules.
   mobile + 4-digit PIN auth (SHA-256 hash only), language picker,
   business setup — all in the same navy/purple language, Light/Dark/
   System themes, Canvas charts (no chart dependency), responsive layouts.
+- **CHATBOT (2026-11-26): native Android AI Assistant is in.** Home: a
+  purple floating chat button (chat icon) fixed bottom-right on the
+  Dashboard + a "Chatbot / AI Assistant" drawer entry, route
+  `Routes.CHATBOT` (`ui/chatbot/ChatbotScreen` + `ChatbotViewModel`).
+  It answers in Hinglish/English/Hindi about the owner's REAL saved
+  Room data — today's profit/income/expense, Cash/UPI balance, who owes
+  money (customer due), agent payables, Money Transfer commission
+  (principal is never profit) and fund from the brother. Built-in
+  responder (`domain/Chatbot.kt`) always works with no key; when the
+  owner adds his own free Gemini key in Settings ("AI Assistant
+  (Gemini)"), `domain/GeminiChatbotClient` (free tier only, model
+  `gemini-2.0-flash`, plain HttpURLConnection, no new dependency)
+  summarises the same real figures — and if Gemini fails it falls back
+  to the built-in answer and says so. No key is ever embedded or
+  shipped; no number is ever invented; empty data gets a plain "Abhi
+  koi record nahi hai". The Reports AI Insight stays in Reports.
   **Still NOT compiled: this VM has no JDK.** First compile + unit tests
   must happen in Android Studio (`./gradlew testDebugUnitTest`).
 - **JVM-free verification done (2026-11-26):** `docs/verify-android.py`
@@ -74,7 +90,10 @@ the same accounting rules.
   `BusinessCategory` ×15, `JobStatus` ×7), `CategorySetup` (ready-made
   setup per category), `AccountingEngine` (all money rules, paise as
   `Long`, never `Double`), `AiFeatures` (Gemini free-tier only, off
-  without a key), `Branding` (single place for the app name: `BizKhata`).
+  without a key), `Chatbot` (business snapshot + built-in responder —
+  every figure from the real ledgers, paise as `Long`),
+  `GeminiChatbotClient` (free-tier Gemini summary of those same facts),
+  `Branding` (single place for the app name: `BizKhata`).
 - `data/` — Room (`bizkhata.db`, v2): entities, DAOs, `AppDatabase`,
   `SettingsStore` (DataStore: language, theme, active profile, PIN hash,
   disabled modules), `Repositories` (transactional: receive payment, add
@@ -88,7 +107,9 @@ the same accounting rules.
   Card, Document Work), Customer Khata + Customer Profile, Agents + Agent
   Profile, Expenses + Machine Maintenance, Receipt Generator, Reports
   (bar chart), Difference Finder, Audit Log, Recycle Bin, Customization
-  Studio, Settings, Auth (mobile + PIN), Language, Category Pick.
+  Studio, Settings, Auth (mobile + PIN), Language, Category Pick,
+  Chatbot / AI Assistant (message bubbles, suggestion chips, loading +
+  Gemini-failure fallback states, key entry in Settings).
 - `navigation/` — `Routes`, one route per module.
 
 ## Accounting rules (non-negotiable, enforced in `AccountingEngine`)
@@ -138,8 +159,10 @@ Still to do (see `DECISIONS.md` for the full list):
   Android file picker wiring is remaining.
 - Auth: Google Sign-In + mobile login (v2 spec §A) — the scaffold runs
   single-owner local-first for now; add auth before multi-device sync.
-- Gemini AI key entry in Settings (AI is off without a key; the app
-  works fully without it — free tier only, never a paid key).
+- Gemini key storage hardening: the owner's free key currently lives in
+  app-private DataStore (never in code/git, removable in Settings);
+  move it to EncryptedSharedPreferences / server-side when the backend
+  is built, so it never sits in plain preferences.
 
 ## Cost
 

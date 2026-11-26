@@ -21,6 +21,16 @@ package com.alfalah.business.domain
  *    never directly from UI code, so the key never reaches the device.
  *  - Every AI answer is labelled as AI-generated and is never written into
  *    financial records automatically.
+ *
+ * IMPLEMENTED (2026-11-26) — the chatbot:
+ *  - Home: purple floating chat button on the Dashboard + "Chatbot / AI
+ *    Assistant" in the drawer, route Routes.CHATBOT.
+ *  - [GeminiChatbotClient] implements [AiAssistant] (free tier only).
+ *  - The built-in responder ([BuiltInChatbotResponder]) answers from the
+ *    real Room ledgers with no key at all; Gemini only summarises those
+ *    same facts when the owner added his key in Settings.
+ *  - The Reports AI Insight stays in Reports as the reports-analysis
+ *    entry point — the chatbot is the ask-anything entry point.
  */
 object AiFeatures {
     /** AI is OFF until the owner adds his own free-tier Gemini key. */

@@ -24,6 +24,7 @@ class SettingsStore(context: Context) {
     private val PIN_HASH = stringPreferencesKey("pin_hash")
     private val MOBILE = stringPreferencesKey("mobile")
     private val DISABLED_MODULES = stringPreferencesKey("disabled_modules")
+    private val GEMINI_API_KEY = stringPreferencesKey("gemini_api_key")
 
     /** Theme mode: LIGHT, DARK or SYSTEM (default SYSTEM — follows the phone). */
     enum class ThemeMode { LIGHT, DARK, SYSTEM }
@@ -103,5 +104,23 @@ class SettingsStore(context: Context) {
             if (enabled) current.remove(key) else current.add(key)
             prefs[DISABLED_MODULES] = current.joinToString(",")
         }
+    }
+
+    // --- Gemini API key (chatbot AI summary, free tier only) ---
+    // The OWNER's own free-tier key, added by him in Settings. No key is
+    // invented, embedded or shipped in the app. Stored in the app-private
+    // DataStore (never in code, never in git); the owner can remove it at
+    // any time, which switches the AI summary off. Without a key the
+    // chatbot still answers from real data with its built-in responder.
+    // (Future hardening: move to EncryptedSharedPreferences / server-side.)
+
+    val geminiApiKey: Flow<String> = store.data.map { it[GEMINI_API_KEY] ?: "" }
+
+    suspend fun setGeminiApiKey(key: String) {
+        store.edit { it[GEMINI_API_KEY] = key.trim() }
+    }
+
+    suspend fun clearGeminiApiKey() {
+        store.edit { it.remove(GEMINI_API_KEY) }
     }
 }

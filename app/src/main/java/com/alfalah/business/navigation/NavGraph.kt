@@ -23,6 +23,7 @@ object Routes {
     const val RECEIPTS = "receipts"
     const val DAILY_BUSINESS = "daily_business"
     const val REPORTS = "reports"
+    const val CHATBOT = "chatbot"          // AI Assistant — FAB on Dashboard + drawer entry
     const val DIFFERENCE_FINDER = "difference_finder"
     const val AUDIT_LOG = "audit_log"
     const val RECYCLE_BIN = "recycle_bin"

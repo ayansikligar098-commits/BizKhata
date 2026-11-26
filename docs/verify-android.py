@@ -106,10 +106,29 @@ for f in kt_files:
 # 8. Every screen file referenced by a route exists in NavHost
 for route in ["CASH_BOOK", "UPI_BOOK", "MONEY_TRANSFER", "SERVICE", "CUSTOMER_DETAIL",
               "KHATA", "AGENTS", "AGENT_DETAIL", "EXPENSES", "MAINTENANCE", "RECEIPTS",
-              "DAILY_BUSINESS", "REPORTS", "DIFFERENCE_FINDER", "AUDIT_LOG", "RECYCLE_BIN",
+              "DAILY_BUSINESS", "REPORTS", "CHATBOT", "DIFFERENCE_FINDER", "AUDIT_LOG", "RECYCLE_BIN",
               "CUSTOMIZATION", "SETTINGS", "LANGUAGE", "AUTH", "CATEGORY_PICK", "DASHBOARD", "SERVICES"]:
     if f"Routes.{route}" not in main_act:
         fails.append(f"MainActivity NavHost missing route Routes.{route}")
+
+# 10. Chatbot wiring — FAB on Dashboard, drawer entry, NavHost, no hardcoded key
+chatbot_screen = MAIN / "ui/chatbot/ChatbotScreen.kt"
+chatbot_vm = MAIN / "ui/chatbot/ChatbotViewModel.kt"
+if not chatbot_screen.exists():
+    fails.append("ChatbotScreen.kt missing (ui/chatbot/)")
+if not chatbot_vm.exists():
+    fails.append("ChatbotViewModel.kt missing (ui/chatbot/)")
+if "FloatingActionButton" not in main_act or "Routes.CHATBOT" not in main_act:
+    fails.append("MainActivity missing chatbot FAB / Routes.CHATBOT wiring")
+if main_act.count("Routes.CHATBOT") < 3:
+    fails.append(f"MainActivity references Routes.CHATBOT only {main_act.count('Routes.CHATBOT')}x (need FAB + drawer + NavHost)")
+for f in kt_files:
+    if 'test' in str(f):
+        continue
+    # Raw text on purpose: strip_code() removes string literals, and a
+    # hardcoded key would hide inside one.
+    if "AIza" in f.read_text():
+        fails.append(f"{f.name}: hardcoded Gemini key prefix found (never ship a key)")
 
 # 9. Python mirror of AccountingEngine — run the unit-test cases
 def customer_due(total, received): return max(total - received, 0)

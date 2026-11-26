@@ -20,6 +20,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Assessment
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
@@ -39,6 +40,7 @@ import androidx.compose.material.icons.filled.Wallet
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalDrawerSheet
@@ -90,6 +92,7 @@ import com.alfalah.business.ui.agents.AgentScreen
 import com.alfalah.business.ui.auth.AuthScreen
 import com.alfalah.business.ui.cashbook.CashBookScreen
 import com.alfalah.business.ui.cashbook.DifferenceFinderScreen
+import com.alfalah.business.ui.chatbot.ChatbotScreen
 import com.alfalah.business.ui.dashboard.DashboardScreen
 import com.alfalah.business.ui.dashboard.DashboardViewModel
 import com.alfalah.business.ui.expenses.ExpensesScreen
@@ -139,7 +142,7 @@ class MainActivity : ComponentActivity() {
             val activeProfileId by settings.activeProfileId.collectAsState(initial = -1L)
             val hasPin by settings.hasPin.collectAsState(initial = false)
             val savedMobile by settings.mobile.collectAsState(initial = "")
-            var unlocked by remember { mutableStateOf(false) }
+            val geminiApiKey by settings.geminiApiKey.collectAsState(initial = "")            var unlocked by remember { mutableStateOf(false) }
 
             // The active profile: the one the user picked, else the first one.
             // Profiles are strictly isolated — every screen gets this id.
@@ -188,6 +191,20 @@ class MainActivity : ComponentActivity() {
                     }
                 ) {
                     Scaffold(
+                        // Chatbot FAB: purple chat button, fixed bottom-right
+                        // on the Dashboard only — the main home of the chatbot.
+                        // Other screens reach it from the drawer / More menu.
+                        floatingActionButton = {
+                            if (!inOnboarding && onDashboard) {
+                                FloatingActionButton(
+                                    onClick = { go(Routes.CHATBOT) },
+                                    containerColor = BizColors.Purple,
+                                    contentColor = Color.White
+                                ) {
+                                    Icon(Icons.Filled.Chat, contentDescription = "Chatbot — BizKhata Assistant")
+                                }
+                            }
+                        },
                         topBar = {
                             if (!inOnboarding) {
                                 TopAppBar(
@@ -459,6 +476,16 @@ class MainActivity : ComponentActivity() {
                                     val profile = activeProfile ?: return@composable
                                     ReportsScreen(profileId = profile.id, repository = app.repository, language = language)
                                 }
+                                composable(Routes.CHATBOT) {
+                                    val profile = activeProfile ?: return@composable
+                                    ChatbotScreen(
+                                        profileId = profile.id,
+                                        repository = app.repository,
+                                        settings = settings,
+                                        language = language,
+                                        onOpenSettings = { nav.navigate(Routes.SETTINGS) }
+                                    )
+                                }
                                 composable(Routes.DIFFERENCE_FINDER) {
                                     val profile = activeProfile ?: return@composable
                                     DifferenceFinderScreen(profileId = profile.id, repository = app.repository, language = language)
@@ -486,7 +513,10 @@ class MainActivity : ComponentActivity() {
                                         onThemeMode = { m -> scope.launch { settings.setThemeMode(m) } },
                                         onProfile = { id -> scope.launch { settings.setActiveProfile(id) } },
                                         onOpen = { route -> nav.navigate(route) },
-                                        onRemovePin = { scope.launch { settings.clearPin() } }
+                                        onRemovePin = { scope.launch { settings.clearPin() } },
+                                        geminiApiKey = geminiApiKey,
+                                        onSaveGeminiKey = { key -> scope.launch { settings.setGeminiApiKey(key) } },
+                                        onClearGeminiKey = { scope.launch { settings.clearGeminiApiKey() } }
                                     )
                                 }
                             }
@@ -629,6 +659,7 @@ private fun DrawerContent(
         ) {
             val entries: List<DrawerEntry> = listOf(
                 DrawerEntry("Dashboard", Icons.Filled.Dashboard, Routes.DASHBOARD),
+                DrawerEntry("Chatbot / AI Assistant", Icons.Filled.Chat, Routes.CHATBOT),
                 DrawerEntry("Daily Dhandha", Icons.Filled.Assessment, Routes.DAILY_BUSINESS),
                 DrawerEntry("Cash Book", Icons.Filled.Wallet, Routes.CASH_BOOK),
                 DrawerEntry("UPI Book", Icons.Filled.SwapHoriz, Routes.UPI_BOOK),

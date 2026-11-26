@@ -26,6 +26,14 @@ except the items marked **confirmed**.
   testing is mandatory before any release claim.
 - **App is for EVERYONE** — multi-business, not single-shop-only. CSC
   is the first/primary category because it is ayan's shop.
+- **Chatbot home (2026-11-26, ayan asked "Chat Bot Kha Pe Hoga")**:
+  purple floating chat button bottom-right on the Dashboard + "Chatbot /
+  AI Assistant" drawer entry + `Routes.CHATBOT`. Built-in responder
+  answers from real Room data with no key; Gemini (free tier only)
+  summarises the same facts only when the owner adds his free key in
+  Settings; Gemini failure falls back to the built-in answer and says
+  so. Never invents numbers; empty data = plain "Abhi koi record nahi
+  hai". Reports AI Insight stays in Reports.
 - **PAN is done by ayan himself — NOT outsourced.** Aadhaar (name
   correction, mobile update, biometric, Aavak Dhakla), Licence and other
   backend work go to external agents.
