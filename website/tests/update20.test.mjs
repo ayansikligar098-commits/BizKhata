@@ -349,6 +349,20 @@ C('11-appchange', 'Add a "Date of Birth" field to the PAN form', 'Field spec sho
 C('11-appchange', 'Mujhe ek naya service add karna hai', 'Add-service spec, asks what service', and(isIntent('app_change'), re(/service/i)));
 C('11-appchange', 'Change the Daily Business page to show weekly totals', 'Modify spec shown', and(isIntent('app_change'), has('Daily Business')));
 C('11-appchange', 'Ek naya module bana do', 'Generic module spec shown', and(isIntent('app_change'), re(/module/i)));
+C('11-appchange', 'Naya service add karo', 'Bare-verb strip: asks for the service name, never a service named "Karo"', and(isIntent('app_change'), hasNone('Karo'), re(/naam kya hai|naam batao|what is the name/i), (r, a) => {
+  const s = dev.buildAppChangeSpec('Naya service add karo', 'hi');
+  if (s.kind !== 'service' || s.name !== 'New Service') return false;
+  const r2 = a.send('Haan, banao');
+  const list = dev.listDevRequests(a.p1.id);
+  return r2.intent === 'accept_offer' && list.length === 1 && list[0].name === 'New Service';
+}));
+C('11-appchange', 'Cash Book mein ek field add karo', 'Location is not the field name: field spec for Cash Book with "New Field" fallback', and(isIntent('app_change'), has('"New Field"'), hasNone('Cash Book'), re(/naam kya hai|naam batao|what is the name/i), (r, a) => {
+  const s = dev.buildAppChangeSpec('Cash Book mein ek field add karo', 'hi');
+  if (s.kind !== 'field' || s.name !== 'New Field') return false;
+  const r2 = a.send('Haan, banao');
+  const list = dev.listDevRequests(a.p1.id);
+  return r2.intent === 'accept_offer' && list.length === 1 && list[0].kind === 'field' && list[0].name === 'New Field';
+}));
 C('11-appchange', 'Aadhaar Mobile Number Update ka module bana do', '"Nahi" after the spec declines it — nothing queued', and((r, a) => {
   const r2 = a.send('Nahi');
   return r2.intent === 'decline_offer' && dev.listDevRequests(a.p1.id).length === 0;

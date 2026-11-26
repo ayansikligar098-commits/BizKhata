@@ -86,31 +86,42 @@ export function isAppChangeRequest(raw: string): boolean {
   return false;
 }
 
+const KIND_LABEL: Record<AppChangeKind, string> = {
+  module: 'Module', service: 'Service', feature: 'Feature',
+  category: 'Category', field: 'Field', report: 'Report',
+};
+
+/** The generic placeholder name used when no real name was given. */
+export function appChangeFallbackName(kind: AppChangeKind): string {
+  return `New ${KIND_LABEL[kind]}`;
+}
+
 /** Extract the name of the thing from the request. */
 export function appChangeNameFor(raw: string, kind: AppChangeKind): string {
-  const KIND_LABEL: Record<AppChangeKind, string> = {
-    module: 'Module', service: 'Service', feature: 'Feature',
-    category: 'Category', field: 'Field', report: 'Report',
-  };
-  const fallback = `New ${KIND_LABEL[kind]}`;
+  const fallback = appChangeFallbackName(kind);
   const titleCase = (t: string) => t.split(/\s+/).map((w) => (/^[A-Z]{2,}$/.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1))).join(' ');
   const stripEdges = (t: string): string => {
     let s = t.trim();
     // Strip leading action/filler words (repeat: "ek naya ...").
+    // The verb words (karo/karna/karne/banao/...) are filler too: a
+    // single pass leaves a bare verb behind ("Naya service add karo"
+    // → "Karo"), so this loops until the text stops changing.
     for (;;) {
-      const next = s.replace(/^(please\s+|kripya\s+|ek\s+|a\s+|an\s+|naya\s+|new\s+|add\s+|create\s+|bana\s*do\s+|banao\s+|banado\s+|mere\s+liye\s+|mujhe\s+)+/i, '').trim();
+      const next = s.replace(/^(please\s+|kripya\s+|ek\s+|a\s+|an\s+|naya\s+|new\s+|add\s+|create\s+|bana\s*do\s+|banao\s+|banado\s+|bana\s+|banane\s+|banayein\s+|banaye\s+|karo\s+|karna\s+|karne\s+|kar\s+|mere\s+liye\s+|mujhe\s+)+/i, '').trim();
       if (next === s) break;
       s = next;
     }
     // Strip trailing filler words (repeat: "... ka", "... naya").
+    // Trailing verbs included, for the same reason: "... add karo" /
+    // "... add karna hai" must not leave "Karo" / "Karna Hai" as a name.
     for (;;) {
-      const next = s.replace(/\s+(ka|ki|ke|mein|me|par|ko|naya|new|ek|a|an)$/i, '').trim();
+      const next = s.replace(/\s+(ka|ki|ke|mein|me|par|ko|naya|new|ek|a|an|karo|karna|karne|kar|banao|banado|bana|banane|banayein|banaye|do|de|dena|chahiye|hai|hain)$/i, '').trim();
       if (next === s) break;
       s = next;
     }
-    // A bare filler word left on its own ("Add a new service" →
-    // before = "new") is not a name.
-    if (/^(please|kripya|ek|a|an|naya|new|add|create|mere liye|mujhe)$/i.test(s)) return '';
+    // A bare filler word / bare verb left on its own ("Add a new
+    // service" → before = "new", "add karo" → "karo") is not a name.
+    if (/^(please|kripya|ek|a|an|naya|new|add|create|karo|kar|karna|karne|banao|bana|banane|do|de|dena|chahiye|hai|hain|mere liye|mujhe)$/i.test(s)) return '';
     return s;
   };
   // Quoted name: "Add a 'GST Number' field" → "GST Number".
@@ -136,14 +147,32 @@ export function appChangeNameFor(raw: string, kind: AppChangeKind): string {
   // Update ka Module bana do" → "Aadhaar Mobile Number Update".
   const m = raw.match(/\b(module|service|feature|categor\w*|field|report|dashboard)\b/i);
   if (m && m.index !== undefined) {
-    const before = stripEdges(raw.slice(0, m.index));
-    // A location ("Cash Book mein ... field") is not a name.
-    if (before && !/\b(mein|me|par|ko)\b/i.test(before)) {
+    const rawBefore = raw.slice(0, m.index);
+    const before = stripEdges(rawBefore);
+    // A location ("Cash Book mein ... field") is not a name. The
+    // guard must read the RAW before-part: stripEdges drops trailing
+    // "mein"/"ek" as filler, so checking the stripped text misses
+    // "Cash Book mein ek ..." entirely and returns "Cash Book" as
+    // the field name.
+    if (before && !/\b(mein|me|par|ko)\b/i.test(rawBefore)) {
       const name = /^(monthly|daily|weekly|yearly)$/i.test(before) ? `${titleCase(before)} ${KIND_LABEL[kind]}` : before;
       return titleCase(name);
     }
-    const after = stripEdges(raw.slice(m.index + m[0].length).replace(/^\s*(bana\s*do|banao|banado|create|add|called\s+|kar|karo|do|de|dena|chahiye|naya|new)\b\s*/i, ''));
-    if (after) return titleCase(after);
+    // Strip ALL leading request verbs, repeatedly: a single replace
+    // leaves "karo" behind ("Naya service add karo" → after "add
+    // karo" → "karo" → a service named "Karo"). Loop until the text
+    // stops changing, then strip edges again.
+    const verb = /^\s*(bana\s*do|banao|banado|bana|banane|banayein|banaye|create|add|called\s+|karo|karna|karne|kar|do|de|dena|chahiye|naya|new|hai|hain)\b\s*/i;
+    let after = raw.slice(m.index + m[0].length);
+    let prevAfter = '';
+    while (after !== prevAfter) {
+      prevAfter = after;
+      after = after.replace(verb, '');
+    }
+    after = stripEdges(after);
+    // A bare verb left over is not a name — fall through to the
+    // generic fallback (and the "what is its name?" ask) instead.
+    if (after && !/^(karo|kar|karna|karne|banao|bana|banane|do|de|dena|chahiye|hai|hain|naya|new|add|create)$/i.test(after)) return titleCase(after);
   }
   const whole = stripEdges(raw);
   if (whole && !/\b(mein|me|par|ko|module|service|feature|categor\w*|field|report|dashboard|bana|banao|banado|create|add|chahiye|naya|new)\b/i.test(whole)) return titleCase(whole);
@@ -230,10 +259,20 @@ export function appChangeSpecText(spec: AppChangeSpec, lang: AiLangCode): string
       ? '\n\nEk zaroori baat: ye BizKhata ke andar aapke kaam ko track karne ka module hoga — ye UIDAI ko application submit nahi karta, aur iski koi official integration nahi hai.'
       : '\n\nOne important thing: this will be a module inside BizKhata to track your own work — it does not submit applications to UIDAI, and there is no official integration.')
     : '';
+  // No real name was given — the name above is only the generic
+  // placeholder ("New Service"), never a verb left over from the
+  // request ("Karo"). Ask for the real name instead of presenting
+  // the placeholder as if it were the name.
+  const kindWord = KIND_LABEL[spec.kind].toLowerCase();
+  const nameAsk = spec.name === appChangeFallbackName(spec.kind)
+    ? (hi
+      ? `\n\nEk baat — is ${kindWord} ka naam kya hai? Naam batao (jaise "Courier"), to main plan usi naam se bana dunga.`
+      : `\n\nOne thing — what is the name of this ${kindWord}? Tell me its name (for example "Courier"), and I will make the plan with that name.`)
+    : '';
   const ask = hi
     ? '\n\nAgar ye plan theek hai to "Haan, banao" bolo — main ise development queue mein save kar dunga. (In-app AI khud code deploy nahi kar sakta — isiliye ye request queue mein jati hai.) Banne aur test hone ke baad hi ye app mein dikhega; usse pehle main kabhi nahi kahunga ki ye ban gaya hai.'
     : '\n\nIf this plan looks right, say "Yes, build it" — I will save it to the development queue. (The in-app AI cannot deploy code itself — that is why the request goes to the queue.) It will appear in the app only after it is built and tested; I will never claim it is ready before that.';
-  return `${head}\n${body}${note}${ask}`;
+  return `${head}\n${body}${note}${nameAsk}${ask}`;
 }
 
 /** The queued confirmation reply — honest: queued, not built. */

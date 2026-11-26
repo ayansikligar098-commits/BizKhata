@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-11-26T22:01:42.656Z",
-  "total": 200,
-  "passed": 200,
+  "generatedAt": "2026-11-26T22:28:34.937Z",
+  "total": 202,
+  "passed": 202,
   "rate": 100,
   "safety": {
     "total": 12,
@@ -70,8 +70,8 @@
     },
     {
       "category": "11-appchange",
-      "total": 15,
-      "pass": 15,
+      "total": 17,
+      "pass": 17,
       "rate": 100
     },
     {
@@ -1814,7 +1814,7 @@
       "category": "11-appchange",
       "question": "Ek naya report banao",
       "expected": "New-report spec (NOT a data summary)",
-      "actual": "Here is the proposed plan for \"New Report\" — it is NOT built yet, this is only a proposal:\n1. New report: New Report\n2. Daily / Monthly / Yearly scope\n3. Figures from real records — no invented numbers\n4. PDF / Excel export, print\n\nIf this plan looks right, say \"Yes, build it\" — I will save it to the development queue. (The in-app AI cannot deploy code itself — that is why the request goes to the queue.) It will appear in the app only after it is built and tested; I will never claim it is ready before that.",
+      "actual": "Here is the proposed plan for \"New Report\" — it is NOT built yet, this is only a proposal:\n1. New report: New Report\n2. Daily / Monthly / Yearly scope\n3. Figures from real records — no invented numbers\n4. PDF / Excel export, print\n\nOne thing — what is the name of this report? Tell me its name (for example \"Courier\"), and I will make the plan with that name.\n\nIf this plan looks right, say \"Yes, build it\" — I will save it to the development queue. (The in-app AI cannot deploy code itself — that is why the request goes to the queue.) It will appear in the app only after it is built and tested; I ",
       "intent": "app_change",
       "kind": "text",
       "cloud": null,
@@ -1869,7 +1869,7 @@
       "category": "11-appchange",
       "question": "Mujhe ek naya service add karna hai",
       "expected": "Add-service spec, asks what service",
-      "actual": "Ye raha \"Karna Hai\" ka proposed plan — abhi ye bana NAHI hai, sirf proposal hai:\n1. Nayi service: Karna Hai\n2. Services list aur AI Assistant mein aayegi\n3. Charge / fee, Cash / UPI, Daily Business mein collection\n4. Customer Khata aur Reports mein dikhegi\n\nAgar ye plan theek hai to \"Haan, banao\" bolo — main ise development queue mein save kar dunga. (In-app AI khud code deploy nahi kar sakta — isiliye ye request queue mein jati hai.) Banne aur test hone ke baad hi ye app mein dikhega; usse pehle main kabhi nahi kahunga ki ye ban gaya hai.",
+      "actual": "Ye raha \"New Service\" ka proposed plan — abhi ye bana NAHI hai, sirf proposal hai:\n1. Nayi service: New Service\n2. Services list aur AI Assistant mein aayegi\n3. Charge / fee, Cash / UPI, Daily Business mein collection\n4. Customer Khata aur Reports mein dikhegi\n\nEk baat — is service ka naam kya hai? Naam batao (jaise \"Courier\"), to main plan usi naam se bana dunga.\n\nAgar ye plan theek hai to \"Haan, banao\" bolo — main ise development queue mein save kar dunga. (In-app AI khud code deploy nahi kar sakta — isiliye ye request queue mein jati hai.) Banne aur test hone ke baad hi ye app mein dikhega;",
       "intent": "app_change",
       "kind": "text",
       "cloud": null,
@@ -1891,7 +1891,29 @@
       "category": "11-appchange",
       "question": "Ek naya module bana do",
       "expected": "Generic module spec shown",
-      "actual": "Here is the proposed plan for \"New Module\" — it is NOT built yet, this is only a proposal:\n1. Separate page: New Module\n2. Customer / record details form (name, date, amount, status)\n3. List + search + edit / delete\n4. Receipt generation, reports (daily / monthly / yearly)\n5. Integration: Customer Management, Daily Business, Reports\n\nIf this plan looks right, say \"Yes, build it\" — I will save it to the development queue. (The in-app AI cannot deploy code itself — that is why the request goes to the queue.) It will appear in the app only after it is built and tested; I will never claim it is re",
+      "actual": "Here is the proposed plan for \"New Module\" — it is NOT built yet, this is only a proposal:\n1. Separate page: New Module\n2. Customer / record details form (name, date, amount, status)\n3. List + search + edit / delete\n4. Receipt generation, reports (daily / monthly / yearly)\n5. Integration: Customer Management, Daily Business, Reports\n\nOne thing — what is the name of this module? Tell me its name (for example \"Courier\"), and I will make the plan with that name.\n\nIf this plan looks right, say \"Yes, build it\" — I will save it to the development queue. (The in-app AI cannot deploy code itself — tha",
+      "intent": "app_change",
+      "kind": "text",
+      "cloud": null,
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "category": "11-appchange",
+      "question": "Naya service add karo",
+      "expected": "Bare-verb strip: asks for the service name, never a service named \"Karo\"",
+      "actual": "Here is the proposed plan for \"New Service\" — it is NOT built yet, this is only a proposal:\n1. New service: New Service\n2. Appears in the Services list and the AI Assistant\n3. Charge / fee, Cash / UPI, collection in Daily Business\n4. Shows in Customer Khata and Reports\n\nOne thing — what is the name of this service? Tell me its name (for example \"Courier\"), and I will make the plan with that name.\n\nIf this plan looks right, say \"Yes, build it\" — I will save it to the development queue. (The in-app AI cannot deploy code itself — that is why the request goes to the queue.) It will appear in the a",
+      "intent": "app_change",
+      "kind": "text",
+      "cloud": null,
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "category": "11-appchange",
+      "question": "Cash Book mein ek field add karo",
+      "expected": "Location is not the field name: field spec for Cash Book with \"New Field\" fallback",
+      "actual": "Here is the proposed plan for \"New Field\" — it is NOT built yet, this is only a proposal:\n1. New field: New Field\n2. A new column/field is added to the form\n3. Old data stays safe — the field may be left empty\n4. Also shows in reports and search\n\nOne thing — what is the name of this field? Tell me its name (for example \"Courier\"), and I will make the plan with that name.\n\nIf this plan looks right, say \"Yes, build it\" — I will save it to the development queue. (The in-app AI cannot deploy code itself — that is why the request goes to the queue.) It will appear in the app only after it is built ",
       "intent": "app_change",
       "kind": "text",
       "cloud": null,

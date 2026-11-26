@@ -8,9 +8,9 @@
 
 | Suite | Total | Passed | Rate |
 |---|---|---|---|
-| UPDATE 20 single-turn (200 cases) | 200 | 200 | 100% |
+| UPDATE 20 single-turn (202 cases) | 202 | 202 | 100% |
 | UPDATE 20/21 multi-turn (6 conversations) | 38 | 38 | 100% |
-| Financial safety (inside the 200) | 12 | 12 | 100% (bar: 100%) |
+| Financial safety (inside the 202) | 12 | 12 | 100% (bar: 100%) |
 | Conversation acceptance (existing) | 47 | 47 | 100% |
 | Multilingual (existing) | 204 | 204 | 100% |
 | Accounting (existing) | 52 | 52 | 100% |
@@ -19,7 +19,7 @@
 | Voice (existing) | 168 | 168 | 100% |
 | Streaming (existing) | all | all | 100% |
 
-### Per-category (200-case suite)
+### Per-category (202-case suite)
 
 | Category | Total | Passed | Rate |
 |---|---|---|---|
@@ -33,7 +33,7 @@
 | 8-exp-cust | 15 | 15 | 100% |
 | 9-followup | 15 | 15 | 100% |
 | 10-multi | 15 | 15 | 100% |
-| 11-appchange | 15 | 15 | 100% |
+| 11-appchange | 17 | 17 | 100% |
 | 12-ambig | 15 | 15 | 100% |
 | 13-safety | 12 | 12 | 100% |
 | 14-honesty | 8 | 8 | 100% |
@@ -72,7 +72,9 @@ First full run of the 200-case suite: **113/200**. The failures fell into two gr
 17. **Farewell answered as a greeting (found by the drive, not the lib suite)** — "Bye, kal milte hain" got "Main ekdum theek hoon! Tum sunao — aaj ka din kaisa gaya?" because casualKindFor mapped bye/alvida to 'greeting' (the old comment even said "a greeting-kind reply fits"). The lib M1.13 check was too lenient to catch it. Fix: a distinct 'farewell' casual kind (checked before greeting) with farewell replies in hi/en/gu/mr, and the lib check now requires bye/kal words in the reply and forbids the greeting reply.
 18. **Language flip on bare follow-ups (found by the drive)** — "Aur 200 UPI" after a Hinglish conversation prompted "Shall I save these entries?" in English, and "Shukriya" got an English thanks reply, because detectLanguage sees no Hinglish marker in them. Fix: respondToMessage now keeps ctx.lastLanguage for bare follow-ups (numbers, aur/bhi, ha/nahi, and one-word casual turns like shukriya/bye/namaste). Also: a bare "Namaste" detected as English (no marker at all), so the first reply came back in English — namaste|namaskar|salaam|adaab|ram ram are now strong Hinglish markers. Language suite still 204/204.
 
-Retest after all fixes: **200/200 single-turn, 38/38 multi-turn, full `npm test` green** (see §1).
+19. **App-change name extraction — bare verb as the name, location as the name (found by the Android mirror re-read, 2026-11-27)** — "Naya service add karo" became a service named "Karo" (the after-kind strip ran once, leaving the trailing verb), and "Cash Book mein ek field add karo" became a field named "Cash Book" (the location guard read the stripped before-part, from which "mein"/"ek" had already been stripped). Fix: the after-kind verb strip now loops until the text stops changing and strips karo/karna/karne/banao/… repeatedly (also fixes "Mujhe ek naya service add karna hai" → "Karna Hai"); the location guard now reads the RAW before-part; a bare verb is never a name. When no real name remains, the spec uses the generic "New {Kind}" placeholder and the reply asks for the real name instead of presenting the placeholder (or a verb) as the name. Two new regression cases in the 11-appchange category (suite now 202 cases).
+
+Retest after all fixes: **202/202 single-turn, 38/38 multi-turn, full `npm test` green** (see §1).
 
 ## 3. Full 13-message transcript (M1 arc — real turns and replies from the multi-turn test run)
 
