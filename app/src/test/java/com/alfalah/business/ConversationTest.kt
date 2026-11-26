@@ -981,7 +981,7 @@ class StreamingTest {
         // UPDATE 19 — the old 2.0-flash value is shut down (provider
         // models page, June 1 2026); the constant must be the live
         // Stable Flash, shared with the website.
-        assertEquals("gemini-3.8-flash", AiFeatures.AI_MODEL)
+        assertEquals("gemini-3.5-flash-lite", AiFeatures.AI_MODEL)
         assertFalse(AiFeatures.AI_MODEL.contains("2.0-flash"))
     }
 

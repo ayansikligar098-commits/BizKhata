@@ -2251,18 +2251,17 @@ class SseParser:
 # Evaluated 2026-11-27 against the provider's own models page and
 # OpenAI-compatibility docs: gemini-2.0-flash is SHUT DOWN (June 1
 # 2026); gemini-2.5-flash is deprecated (routes to 3.5-flash-lite
-# from Dec 1 2026); gemini-3.8-flash is the Stable free-tier Flash
+# from Dec 1 2026); gemini-3.5-flash-lite is the Stable free-tier Flash
 # for agentic work. The website's UPSTREAM_MODEL / DEFAULT_MODEL
 # constants must carry the same value.
 # ---------------------------------------------------------------------------
-AI_MODEL = "gemini-3.8-flash"
+AI_MODEL = "gemini-3.5-flash-lite"
 CHAT_COMPLETIONS_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 MODEL_STATUS = {
     "gemini-2.0-flash": "shut_down",
     "gemini-2.5-flash": "deprecated",
     "gemini-3.5-flash-lite": "stable",
     "gemini-3.6-flash": "stable",
-    "gemini-3.8-flash": "stable",
     "gemini-4-hydrogen": "stable",
 }
 
@@ -4059,7 +4058,7 @@ def main():
 
     @t("u19-model is live stable flash")
     def _():
-        eq(AI_MODEL, "gemini-3.8-flash")
+        eq(AI_MODEL, "gemini-3.5-flash-lite")
         eq(MODEL_STATUS[AI_MODEL], "stable")
         eq(MODEL_STATUS["gemini-2.0-flash"], "shut_down")
         eq(MODEL_STATUS["gemini-2.5-flash"], "deprecated")

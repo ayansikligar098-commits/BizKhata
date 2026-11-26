@@ -526,8 +526,8 @@ for dead in ["streamGenerateContent", ":generateContent", "X-goog-api-key",
     if dead in cloud_src:
         fails.append(f"CloudAiClient.kt still contains retired native-call piece: {dead!r}")
 ai_features_src = (MAIN / "domain/AiFeatures.kt").read_text()
-if '"gemini-3.8-flash"' not in ai_features_src:
-    fails.append("AiFeatures.AI_MODEL is not gemini-3.8-flash (UPDATE 19)")
+if '"gemini-3.5-flash-lite"' not in ai_features_src:
+    fails.append("AiFeatures.AI_MODEL is not gemini-3.5-flash-lite (UPDATE 19)")
 for f in kt_files:
     if "gemini-2.0-flash" in f.read_text():
         fails.append(f"{f.name}: dead model gemini-2.0-flash still present (shut down June 1 2026, UPDATE 19)")
@@ -578,7 +578,7 @@ for needle in ["u17-chunker devanagari", "u17-typewriter final equals source",
                "u19-model is live stable flash", "u19-every cloud path sends model",
                "u19-sse content key deltas", "u19-nonstreaming content extraction",
                "def chat_body", "def extract_message_content",
-               "AI_MODEL = \"gemini-3.8-flash\"",
+               "AI_MODEL = \"gemini-3.5-flash-lite\"",
                "def grapheme_clusters", "def display_chunks",
                "class SseParser", "class TypewriterSim", "class GenerationSim",
                "def migrate_legacy_key", "def markdown_plain"]:
