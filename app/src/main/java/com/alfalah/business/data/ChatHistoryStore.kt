@@ -33,12 +33,32 @@ private val Context.aiChatDataStore: DataStore<Preferences> by preferencesDataSt
  * corrupt the store. At most 20 archived sessions × 100 messages are
  * kept per profile; older sessions are dropped.
  */
+/** UPDATE 22 — a saved development request: a RECORD of an app-change
+ *  the user confirmed, queued for the development workflow. It is NOT
+ *  the module / feature itself — the AI must never present it as
+ *  built or ready. It is listed in chat (the message carries it) so
+ *  the user can reopen it. */
+data class DevRequest(
+    val title: String,
+    val kind: String,
+    val detail: String,
+    val status: String = "QUEUED",
+    val createdAtMs: Long = 0L
+)
+
 data class StoredChatMessage(
     val text: String,
     val fromUser: Boolean,
     val timestampMs: Long,
     val note: String? = null,
-    val isError: Boolean = false
+    val isError: Boolean = false,
+    /** UPDATE 21 — the structured checklist this message carried, so
+     *  reopening the chat restores the ACTIVE checklist (not just its
+     *  text). Old 5-field rows decode with empty defaults. */
+    val checklist: List<String> = emptyList(),
+    val checklistTopic: String? = null,
+    /** UPDATE 22 — a queued development request this message carried. */
+    val devRequest: DevRequest? = null
 )
 
 data class StoredChatSession(
@@ -76,13 +96,25 @@ class ChatHistoryStore(context: Context) {
         ""
     }
 
-    /** Sessions joined by \u001e, messages by \u001f, fields by \u001d. */
+    /** Sessions joined by \u001e, messages by \u001f, fields by \u001d.
+     *  Fields 6–8 (UPDATE 21/22) are optional — old 5-field rows
+     *  decode with defaults. Checklist items are joined by \u001c
+     *  inside one Base64 field; a dev request is five \u001c fields
+     *  inside one Base64 field. */
     private fun encodeSessions(sessions: List<StoredChatSession>): String =
         sessions.joinToString("\u001e") { session ->
             val msgs = session.messages.joinToString("\u001f") { m ->
                 listOf(
                     enc(m.text), if (m.fromUser) "1" else "0",
-                    m.timestampMs.toString(), enc(m.note ?: ""), if (m.isError) "1" else "0"
+                    m.timestampMs.toString(), enc(m.note ?: ""), if (m.isError) "1" else "0",
+                    enc(m.checklist.joinToString("\u001c")),
+                    enc(m.checklistTopic ?: ""),
+                    enc(
+                        m.devRequest?.let {
+                            listOf(it.title, it.kind, it.detail, it.status, it.createdAtMs.toString())
+                                .joinToString("\u001c")
+                        } ?: ""
+                    )
                 ).joinToString("\u001d")
             }
             "${session.id}\u001d${session.startedAtMs}\u001d$msgs"
@@ -98,12 +130,23 @@ class ChatHistoryStore(context: Context) {
             val messages = parts[2].split("\u001f").mapNotNull { msgPart ->
                 val f = msgPart.split("\u001d")
                 if (f.size < 5) return@mapNotNull null
+                val devRequest = f.getOrNull(7)?.let { dec(it) }?.takeIf { it.isNotEmpty() }?.let { rawDev ->
+                    val d = rawDev.split("\u001c")
+                    if (d.size < 5) null else DevRequest(
+                        title = d[0], kind = d[1], detail = d[2], status = d[3],
+                        createdAtMs = d[4].toLongOrNull() ?: 0L
+                    )
+                }
                 StoredChatMessage(
                     text = dec(f[0]),
                     fromUser = f[1] == "1",
                     timestampMs = f[2].toLongOrNull() ?: 0L,
                     note = dec(f[3]).takeIf { it.isNotEmpty() },
-                    isError = f[4] == "1"
+                    isError = f[4] == "1",
+                    checklist = f.getOrNull(5)?.let { dec(it) }
+                        ?.split("\u001c")?.filter { it.isNotEmpty() } ?: emptyList(),
+                    checklistTopic = f.getOrNull(6)?.let { dec(it) }?.takeIf { it.isNotEmpty() },
+                    devRequest = devRequest
                 )
             }
             StoredChatSession(id, started, messages)

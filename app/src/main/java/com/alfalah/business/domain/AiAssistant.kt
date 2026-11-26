@@ -72,7 +72,73 @@ object AiAssistantParser {
          *  + the day it is for, so follow-ups ("uski checklist banao")
          *  resolve against it. */
         val lastPlanTopic: String? = null,
-        val lastPlanDayEpoch: Long? = null
+        val lastPlanDayEpoch: Long? = null,
+        /** UPDATE 20 (BUG A) — a checklist the assistant just offered
+         *  to build, mirroring the website's ChatContext.pendingOffer
+         *  (knowledge.ts PendingOffer): kind is always "checklist";
+         *  [topic] is the buildChecklist topic ("pan", "work", …);
+         *  [whenLabel] is "kal" / "parso" / "aaj". Lives for ONE turn:
+         *  a new message on any other topic clears it; a bare "Ha" /
+         *  "Bana do" while it is pending EXECUTES it (build + save the
+         *  real checklist) instead of becoming a financial confirm. */
+        val pendingChecklistOffer: PendingChecklistOffer? = null,
+        /** UPDATE 21 — a question the assistant just asked that a
+         *  short follow-up can answer. kind "count" is set when a plan
+         *  reply asks "Kitne applications hain?" — a bare number ("5")
+         *  then means 5 applications for [topic], and a correction
+         *  ("Nahi, 3 the, 5 nahi") replaces the stored count. */
+        val pendingQuestion: PendingQuestion? = null,
+        /** UPDATE 21 — the checklist currently active in this
+         *  conversation (built items + topic + language + count), so
+         *  follow-ups can edit it ("Isme documents bhi add karo"),
+         *  re-show it ("PAN wali checklist phir dikhao") or convert
+         *  it ("Aur English mein likho") with the content preserved. */
+        val activeChecklist: ActiveChecklist? = null,
+        /** UPDATE 22 — a proposed app change the assistant just showed
+         *  as a spec and is waiting for confirmation on ("Haan,
+         *  banao"). Lives for ONE turn like the checklist offer; a
+         *  bare yes while it is pending CONFIRMS it (queue the
+         *  development request, or perform the service add). */
+        val pendingAppChange: AppChangeRequest? = null
+    )
+
+    /** UPDATE 22 — a proposed change to BizKhata itself (module /
+     *  service / feature / category / field / report / modify), as
+     *  understood from the user's words. [kind] is one of "module",
+     *  "service", "feature", "category", "field", "report", "modify";
+     *  [title] is the name of the thing; [detail] is the spec body
+     *  (fields / pages / integrations / what changes). A queued
+     *  development request is a RECORD of this — never a claim that
+     *  the thing exists or is ready. */
+    data class AppChangeRequest(
+        val kind: String,
+        val title: String,
+        val detail: String
+    )
+
+    /** Mirror of website knowledge.ts PendingOffer. */
+    data class PendingChecklistOffer(
+        val kind: String = "checklist",
+        val topic: String,
+        val whenLabel: String
+    )
+
+    /** Mirror of the website's pending-question mechanism (UPDATE 21):
+     *  what the bot last asked, so a bare follow-up resolves against
+     *  it instead of falling through to a fixed "not understood". */
+    data class PendingQuestion(
+        val kind: String,
+        val topic: String?,
+        val detail: String? = null
+    )
+
+    /** The checklist active in this conversation (UPDATE 21). */
+    data class ActiveChecklist(
+        val topic: String,
+        val items: List<String>,
+        val lang: AiLanguage,
+        val whenLabel: String,
+        val count: Int? = null
     )
 
     // ------------------------------------------------------------------
@@ -136,11 +202,18 @@ object AiAssistantParser {
         ) : AiAction
 
         /** Customer OWES money — a due record (job with received = 0),
-         *  NEVER an income row. Needs a customer + service to create. */
+         *  NEVER an income row. `receivedPaise` is the part-payment that
+         *  came WITH the job ("bill 500, 200 mile" → total 500, received
+         *  200, due 300); `receivedMode` is its Cash/UPI home, required
+         *  whenever receivedPaise > 0, so the money is never recorded
+         *  without a mode. `dayEpoch` is the job's day. */
         data class RecordCustomerDue(
             val customerName: String?,
             val amountPaise: Long,
-            val service: ServiceType?
+            val service: ServiceType?,
+            val receivedPaise: Long = 0L,
+            val receivedMode: PaymentMode? = null,
+            val dayEpoch: Long = 0L
         ) : AiAction
 
         /** Soft-delete a transaction (Recycle Bin + audit, confirm first). */
@@ -197,7 +270,16 @@ object AiAssistantParser {
             val deepLinkRoute: String? = null,
             val deepLinkLabel: String? = null,
             val checklist: List<String> = emptyList(),
-            val needsCloud: Boolean = false
+            val needsCloud: Boolean = false,
+            /** UPDATE 21 — topic/count of a built checklist, so the
+             *  ViewModel can store the active checklist at delivery. */
+            val checklistTopic: String? = null,
+            val checklistCount: Int? = null,
+            /** UPDATE 22 — the proposed app change (spec / confirmed);
+             *  the ViewModel executes a confirmed service add or saves
+             *  the queued development request. */
+            val appChangeSpec: AppChangeRequest? = null,
+            val appChangeConfirmed: Boolean = false
         ) : AiParseResult
 
         /** Nothing understood — fall through to knowledge / built-in. */
@@ -268,12 +350,22 @@ object AiAssistantParser {
             found.add(100)
             text = text.replace(Regex("\\bsau\\b"), " ")
         }
-        // Digit amounts, preferring currency-marked ones.
+        // Digit amounts, preferring currency-marked ones. UPDATE 20 —
+        // a marked amount must NOT hide a bare money number: "10000
+        // rupaye ... commission 50" lost the 50, and the principal was
+        // then recorded as commission income (₹10,000 instead of ₹50).
+        // Bare numbers that are counts (5 applications, 3 customers)
+        // are still excluded.
         val marked = Regex("(\\d+(?:\\.\\d+)?)\\s*(?:rs\\.?|rupaye|rupee|rupay)\\b")
             .findAll(text).map { it.groupValues[1].toBigDecimal().toLong() }.toList()
-        if (marked.isNotEmpty()) return (found + marked).sorted()
         val all = Regex("\\d+(?:\\.\\d+)?").findAll(text)
             .map { it.value.toBigDecimal().toLong() }.toList()
+        if (marked.isNotEmpty()) {
+            val counts = Regex("(\\d+)\\s*(customer|customers|log|jobs|kaam|application|applications|card|cards)\\b")
+                .findAll(text).map { it.groupValues[1].toBigDecimal().toLong() }.toSet()
+            val extra = all.filter { it !in marked && it !in counts }
+            return (found + marked + extra).sorted()
+        }
         return (found + all).sorted()
     }
 
@@ -401,7 +493,9 @@ object AiAssistantParser {
         when (meaning.intent) {
             ConversationIntent.CASUAL, ConversationIntent.STATEMENT,
             ConversationIntent.PLAN, ConversationIntent.LANGUAGE_REQUEST,
-            ConversationIntent.CHECKLIST, ConversationIntent.QUESTION_GENERAL -> {
+            ConversationIntent.CHECKLIST, ConversationIntent.QUESTION_GENERAL,
+            ConversationIntent.ACCEPT_OFFER, ConversationIntent.OFFER_DECLINED,
+            ConversationIntent.APP_CHANGE, ConversationIntent.DO_IT_SUMMARY -> {
                 val reply = ConversationEngine.composeLocal(meaning, context)
                 return AiParseResult.Conversational(
                     text = reply.text,
@@ -409,13 +503,30 @@ object AiAssistantParser {
                     deepLinkRoute = reply.deepLinkRoute,
                     deepLinkLabel = reply.deepLinkLabel,
                     checklist = reply.checklist,
-                    needsCloud = reply.needsCloud
+                    needsCloud = reply.needsCloud,
+                    checklistTopic = reply.checklistTopic,
+                    checklistCount = reply.checklistCount,
+                    appChangeSpec = reply.appChangeSpec,
+                    appChangeConfirmed = reply.appChangeConfirmed
                 )
             }
             else -> { /* business / help / navigation: existing pipeline */ }
         }
 
         // --- App help: "kaise …?" / "how to …?" / "kahan …?" -------------
+        // UPDATE 20 — honour the meaning's APP_HELP topic FIRST: the
+        // classifier may have recognised a help question the
+        // keyword-based detectHelp cannot (e.g. video case 1 "kha
+        // likhu" has no "kahan"/"kaise" — it must reach the Daily
+        // Business guidance, never the daily-summary figures). Only
+        // a topic that is a real AppHelpKnowledge key is used; anything
+        // else falls through to detectHelp below.
+        if (meaning.intent == ConversationIntent.APP_HELP) {
+            val helpTopic = meaning.topic
+            if (helpTopic != null && AppHelpKnowledge.topics.containsKey(helpTopic)) {
+                return AiParseResult.Help(helpTopic)
+            }
+        }
         val help = detectHelp(q)
         if (help != null) return AiParseResult.Help(help)
 
@@ -510,10 +621,16 @@ object AiAssistantParser {
         }
 
         // --- Customer owes money — NEVER income ---------------------------
-        if ((q.contains("due") || q.contains("udhaar") || q.contains("udhar") ||
+        // Also fires on a total + received pair ("500 rupaye, 200 mile")
+        // even without a due-word — parseCustomerDue splits it into
+        // total/received instead of summing the two amounts.
+        val receivedMarker = Regex("\\b(mile|mila|mil gaye|mil gaya)\\b").containsMatchIn(q)
+        val totalAndReceived = receivedMarker && findAmounts(q).size >= 2 &&
+            knownCustomers.any { q.contains(it.lowercase()) }
+        if (((q.contains("due") || q.contains("udhaar") || q.contains("udhar") ||
                 q.contains("pending") || q.contains("baki hai") || q.contains("baaki") ||
                 q.contains("lena hai")) &&
-            mainAmount(q) != null
+            mainAmount(q) != null) || totalAndReceived
         ) {
             return parseCustomerDue(q, context, knownCustomers, lang)
         }
@@ -571,7 +688,12 @@ object AiAssistantParser {
             q.contains("expense") || q.contains("kharch") -> "expense"
             q.contains("maintenance") || q.contains("machine") -> "maintenance"
             q.contains("backup") || q.contains("export") -> "backup"
-            else -> "general"
+            // UPDATE 20 — no specific topic matched: null, not a
+            // placeholder "general" help. A "kaise" question about
+            // something else (advice, ideas) must reach the general
+            // path, never the fixed excuse "Is feature ki help abhi
+            // taiyaar hai."
+            else -> null
         }
     }
 
@@ -579,7 +701,7 @@ object AiAssistantParser {
         val questionWord = q.contains("kitna") || q.contains("kitne") || q.contains("kitni") ||
             q.contains("kis") || q.contains("kaun") || q.contains("kya") || q.contains("kab") ||
             q.contains("compare") || q.contains("batao") || q.contains("dikhao") ||
-            q.contains("hoga") || q.contains("hua tha") || q.contains("hoga") ||
+            q.contains("show") || q.contains("hoga") || q.contains("hua tha") || q.contains("hoga") ||
             q.endsWith("?") || q.contains("last month") || q.contains("pichhle") ||
             q.contains("summary") || q.contains("performance") || q.contains("sabse zyada")
         if (!questionWord) return false
@@ -830,6 +952,20 @@ object AiAssistantParser {
         val commissionWord = q.contains("commission")
         val principalWord = q.contains("transfer") || q.contains("bheja") || q.contains("bheje")
         if (commissionWord && amounts.size == 1) {
+            // "MT se 150 commission mila" — the single amount IS the
+            // commission. But "10000 rupaye bheje, commission batao"
+            // is the PRINCIPAL with the commission still unknown: the
+            // amount must sit next to "commission" to be the
+            // commission, otherwise ask for it — never record the
+            // principal as commission income.
+            val isCommissionAmount = Regex("commission\\s*\\d+|\\d+\\s*(?:rs\\.?|rupaye|rupee|rupay)?\\s*commission")
+                .containsMatchIn(q)
+            if (!isCommissionAmount) {
+                return AiParseResult.Clarify(
+                    MultilingualReplies.get(lang, "askCommission", "amount" to formatRupees(amounts[0] * 100)),
+                    missing = listOf("commission")
+                )
+            }
             // "MT se 150 commission mila" — commission only, no principal to move.
             val commission = amounts[0] * 100
             val mode = detectMode(q)
@@ -897,23 +1033,79 @@ object AiAssistantParser {
         val amount = mainAmount(q) ?: return AiParseResult.Unknown
         val name = knownCustomers.firstOrNull { q.contains(it.lowercase()) }
         val service = detectService(q) ?: context.lastService
+        // Total + received: "Rahul ka PAN Card ka kaam hai, 500 rupaye,
+        // 200 mile" — the amount next to mile/mila is the RECEIVED part,
+        // the other is the total (due = total - received). With a
+        // due-word ("200 baaki") the other amount IS the due, so total =
+        // received + due. NEVER sum the two amounts into one payment
+        // (that would record ₹700 instead of a ₹500 bill with ₹200
+        // received). If the split is impossible (received > total and no
+        // due-word), ask instead of guessing.
+        val amounts = findAmounts(q)
+        val receivedMarker = Regex("\\b(mile|mila|mil gaye|mil gaya)\\b").containsMatchIn(q)
+        var totalPaise = rupeesToPaise(amount)
+        var receivedPaise = 0L
+        var splitImpossible = false
+        var receivedRupees = 0
+        if (amounts.size >= 2 && receivedMarker) {
+            val received = amounts.find { a ->
+                Regex("\\b$a\\s*(?:rs\\.?|rupaye|rupee|rupay)?\\s*(?:mile|mila|mil gaye|mil gaya)\\b")
+                    .containsMatchIn(q)
+            } ?: amounts.minOrNull()!!
+            receivedRupees = received
+            val others = amounts.filter { it != received }
+            val dueWord = q.contains("baaki") || q.contains("baki") ||
+                q.contains("due") || q.contains("pending")
+            val total = if (dueWord) received + (others.maxOrNull() ?: 0)
+                else (others.maxOrNull() ?: received)
+            if (total < received) {
+                splitImpossible = true
+            } else {
+                totalPaise = rupeesToPaise(total)
+                receivedPaise = rupeesToPaise(received)
+            }
+        }
+        if (splitImpossible) {
+            return AiParseResult.Clarify(
+                "Samajh nahi aaya — ${formatRupees(rupeesToPaise(receivedRupees))} mile aur total kitna hai? Misal: \"500 ka kaam, 200 mile\".",
+                missing = listOf("total")
+            )
+        }
         if (name == null) {
             return AiParseResult.Clarify(
-                MultilingualReplies.get(lang, "askCustomer", "amount" to formatRupees(rupeesToPaise(amount))),
-                partial = AiAction.RecordCustomerDue(null, rupeesToPaise(amount), service),
+                MultilingualReplies.get(lang, "askCustomer", "amount" to formatRupees(totalPaise)),
+                partial = AiAction.RecordCustomerDue(null, totalPaise, service, receivedPaise, null, context.dayEpoch),
                 missing = listOf("customer")
             )
         }
         if (service == null) {
             return AiParseResult.Clarify(
-                "$name ka ${formatRupees(rupeesToPaise(amount))} due — kaunsi service ka hai (Xerox, PAN, Aadhaar…)?",
-                partial = AiAction.RecordCustomerDue(name, rupeesToPaise(amount), null),
+                "$name ka ${formatRupees(totalPaise)} due — kaunsi service ka hai (Xerox, PAN, Aadhaar…)?",
+                partial = AiAction.RecordCustomerDue(name, totalPaise, null, receivedPaise, null, context.dayEpoch),
                 missing = listOf("service")
             )
         }
+        // A received part needs its Cash/UPI home — ask one short
+        // question, never record money without a mode.
+        if (receivedPaise > 0L) {
+            val mode = detectMode(q)
+            if (mode == null) {
+                return AiParseResult.Clarify(
+                    MultilingualReplies.get(lang, "askMode", "amount" to formatRupees(receivedPaise)),
+                    partial = AiAction.RecordCustomerDue(name, totalPaise, service, receivedPaise, null, context.dayEpoch),
+                    missing = listOf("payment mode")
+                )
+            }
+            val due = totalPaise - receivedPaise
+            return AiParseResult.Action(
+                AiAction.RecordCustomerDue(name, totalPaise, service, receivedPaise, mode, context.dayEpoch),
+                "Customer due (income NAHI): $name — ${service.label} total ${formatRupees(totalPaise)}, " +
+                    "${formatRupees(receivedPaise)} mile (${mode.name}), ${formatRupees(due)} baaki."
+            )
+        }
         return AiParseResult.Action(
-            AiAction.RecordCustomerDue(name, rupeesToPaise(amount), service),
-            "Customer due (income NAHI): $name — ${service.label} ${formatRupees(rupeesToPaise(amount))} baaki. " +
+            AiAction.RecordCustomerDue(name, totalPaise, service, 0L, null, context.dayEpoch),
+            "Customer due (income NAHI): $name — ${service.label} ${formatRupees(totalPaise)} baaki. " +
                 "Ye sirf udhaar record hoga; cash tabhi badhega jab payment milega."
         )
     }
@@ -927,7 +1119,9 @@ object AiAssistantParser {
         val name = knownCustomers.firstOrNull { q.contains(it.lowercase()) } ?: return null
         val amount = mainAmount(q) ?: return null
         if (!(q.contains("diya") || q.contains("diye") || q.contains("jama") ||
-                q.contains("paid") || q.contains("payment") || q.contains("mila"))
+                q.contains("paid") || q.contains("payment") || q.contains("mila") ||
+                q.contains("mile") || q.contains("mil gaye") || q.contains("mil gaya") ||
+                q.contains("aaye") || q.contains("aaya"))
         ) return null
         val mode = detectMode(q)
         if (mode == null) {
@@ -1007,12 +1201,81 @@ object AiAssistantParser {
             n.contains("confirm") || n == "kar do" || n == "kardo" || n.contains("theek hai")
     }
 
+    /**
+     * UPDATE 20 (BUG A) — bare acceptance of a pending checklist
+     * offer, mirroring the website's OFFER_ACCEPT_RE (intent.ts)
+     * EXACTLY: the whole message is just a yes / "bana do" / "kar do"
+     * / "checklist", nothing else. Anchored + full-message, so "Ha,
+     * aur Xerox 300 cash hue" (yes + a real entry) is NOT swallowed
+     * as an acceptance — it stays a financial message. This is
+     * deliberately SEPARATE from [isAffirmative] (the financial
+     * confirm, which is a contains-check and must only ever fire
+     * while a preview is actually pending).
+     */
+    private val offerAcceptRegex = Regex(
+        "^(haan?|ha+|yes|yep|ok+|okay|theek\\s*hai|bilkul|ji\\s*haan|" +
+            "kar\\s*do|karo|confirm|save|save\\s*kar|" +
+            "bana\\s*do|bana\\s*de|bana\\s*dena|banake\\s*do|bana\\s*dijiye|banakar\\s*do|" +
+            "checklist|list\\s*bana\\s*do|list\\s*banao|banao|" +
+            "haan?\\s*(bana\\s*do|banao|kar\\s*do|checklist\\s*bana\\s*do))[\\s.!]*$"
+    )
+
+    fun isOfferAcceptance(q: String): Boolean {
+        val n = normalise(q).trim()
+        return offerAcceptRegex.containsMatchIn(n)
+    }
+
+    /**
+     * UPDATE 21 — a bare number ("5", "5.") as a whole message, for
+     * answering a pending count question ("Kitne applications
+     * hain?"). Returns the number, or null. A number inside a longer
+     * sentence is NOT bare — it goes through the normal parser (an
+     * amount stays an amount).
+     */
+    fun bareNumber(q: String): Int? {
+        val n = normalise(q).trim().removeSuffix(".").removeSuffix("!").trim()
+        if (!Regex("^\\d+$").containsMatchIn(n)) return null
+        return n.toIntOrNull()
+    }
+
+    /**
+     * UPDATE 21 — the corrected count in a message like "Nahi, 3 the,
+     * 5 nahi" (it was 3, not 5). The number next to "the / tha / thi /
+     * hain" is the correction; the number next to "nahi" is the
+     * rejected one. Falls back to the only number present.
+     */
+    fun correctedCount(q: String): Int? {
+        val n = normalise(q)
+        Regex("(\\d+)\\s*(the|tha|thi|hain|hai)\\b").find(n)?.let { return it.groupValues[1].toIntOrNull() }
+        // A lone number next to "nahi" ("Nahi, 5 nahi") is the REJECTED
+        // value, not a correction — never return it as the new count.
+        if (Regex("\\d+\\s*nahi\\b").containsMatchIn(n)) return null
+        // A single number is a correction ONLY when the message starts
+        // with a no ("Nahi, 3"). A bare "5" is a count ANSWER (step 2),
+        // and "Xerox ke 300 cash hue" is a financial entry — neither
+        // may be silently reinterpreted as a correction.
+        val numbers = Regex("\\d+").findAll(n).map { it.value.toIntOrNull() }.toList()
+        if (numbers.size == 1 && (n.startsWith("nahi") || n.startsWith("no"))) return numbers[0]
+        return null
+    }
+
     fun isNegative(q: String): Boolean {
         val n = normalise(q)
         return Multilingual.isNegative(n) ||
             n == "nahi" || n == "nahin" || n == "no" || n.startsWith("nahi ") ||
             n.contains("cancel") || n.contains("mat karo") || n.contains("rehnedo") ||
             n.contains("rehne do")
+    }
+
+    /** UPDATE 20 — "Nahi, 500 the" corrects the pending preview's
+     *  amount, it does not cancel it. A number + a correction marker
+     *  (nahi/no/galat/the/tha/thi), and NOT a follow-up add ("aur" /
+     *  "bhi" / "add" belongs to the merge path). Returns paise or null. */
+    fun correctedPreviewAmount(q: String): Long? {
+        val n = normalise(q)
+        if (n.contains("aur") || n.contains("bhi") || n.contains("add")) return null
+        if (!Regex("\\b(no|nahi|galat|the|tha|thi|actually|matlab)\\b").containsMatchIn(n)) return null
+        return mainAmount(n)?.let { rupeesToPaise(it) }
     }
 
     /** A bare follow-up amount ("Aur 200 UPI bhi add kar do") — same

@@ -533,7 +533,8 @@ class MainActivity : ComponentActivity() {
                                         chatHistory = chatHistory,
                                         language = language,
                                         onOpenSettings = { nav.navigate(Routes.SETTINGS) },
-                                        onOpenRoute = { route -> nav.navigate(route) }
+                                        onOpenRoute = { route -> nav.navigate(route) },
+                                        onClose = { nav.popBackStack() }
                                     )
                                 }
                                 composable(Routes.DIFFERENCE_FINDER) {

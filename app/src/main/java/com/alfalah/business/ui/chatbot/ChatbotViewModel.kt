@@ -3,6 +3,7 @@ package com.alfalah.business.ui.chatbot
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.alfalah.business.data.ChatHistoryStore
+import com.alfalah.business.data.DevRequest
 import com.alfalah.business.data.SettingsStore
 import com.alfalah.business.data.StoredChatMessage
 import com.alfalah.business.data.StoredChatSession
@@ -17,7 +18,9 @@ import com.alfalah.business.domain.BusinessKnowledge
 import com.alfalah.business.domain.BusinessSnapshot
 import com.alfalah.business.domain.CloudAiClient
 import com.alfalah.business.domain.ConversationEngine
+import com.alfalah.business.domain.ConversationIntent
 import com.alfalah.business.domain.ConversationMemory
+import com.alfalah.business.domain.ConversationReplies
 import com.alfalah.business.domain.Debtor
 import com.alfalah.business.domain.AgentOwed
 import com.alfalah.business.domain.JobStatus
@@ -69,6 +72,12 @@ data class ChatMessage(
     /** UPDATE 16 — a real checklist produced by a "checklist banao"
      *  command (rendered from [text] too; kept structured for the UI). */
     val checklist: List<String> = emptyList(),
+    /** UPDATE 21 — the topic of [checklist], so reopening the chat
+     *  restores the active checklist exactly. */
+    val checklistTopic: String? = null,
+    /** UPDATE 22 — a queued development request this message carries
+     *  (a RECORD of a confirmed app-change, never a claim it exists). */
+    val devRequest: DevRequest? = null,
     /** UPDATE 17 — streaming display: [streaming] while the reply is
      *  still being typed out (timestamp is shown only after it
      *  finishes), [streamingStopped] when the user stopped it (the
@@ -152,6 +161,24 @@ class ChatbotViewModel(
 
     private val _messages = MutableStateFlow(listOf(ChatMessage(text = greetingText, fromUser = false)))
     val messages: StateFlow<List<ChatMessage>> = _messages
+
+    /** UPDATE 20/21 — the pending checklist offer, exposed for the
+     *  contextual suggestion chip ("✓ Checklist banao"). Set when a
+     *  plan offers a checklist, cleared when it is accepted, declined
+     *  or expires (one turn). */
+    private val _pendingOffer = MutableStateFlow<AiAssistantParser.PendingChecklistOffer?>(null)
+    val pendingOffer: StateFlow<AiAssistantParser.PendingChecklistOffer?> = _pendingOffer
+
+    /** Contextual follow-up chips (website chatbot.tsx QUICK_QUESTIONS
+     *  + conversation.ts suggestionsFor): the starter set on a fresh
+     *  chat, then only what the LAST reply earned — never static
+     *  chips, and never a chip for an action that does not exist here
+     *  (the website's "Module Requests kholo" has no Android page;
+     *  the queued record is listed in chat instead). */
+    private val _suggestions = MutableStateFlow(
+        listOf("Aaj ka dhandha kitna hua?", "Cash Book kholo", "Kal ke kaam ki checklist banao")
+    )
+    val suggestions: StateFlow<List<String>> = _suggestions
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
@@ -342,6 +369,7 @@ class ChatbotViewModel(
             if (last != null && last.messages.isNotEmpty()) {
                 currentSessionId = last.id
                 _messages.value = last.messages.map { it.toChatMessage() }
+                restoreContextFromHistory(last.messages)
             }
             historyLoaded = true
         }
@@ -386,6 +414,36 @@ class ChatbotViewModel(
                     customServices = inputs.customServices
                 )
                 _snapshot.value = buildBusinessSnapshot(inputs)
+            }
+        }
+    }
+
+    /** UPDATE 21 — reopening a chat restores CONTEXT, not just the
+     *  message list: the active checklist (exact items + topic) and
+     *  the last plan topic. The pending offer / question are one-turn
+     *  and are NOT restored — that turn has passed. */
+    private fun restoreContextFromHistory(stored: List<StoredChatMessage>) {
+        val lastChecklist = stored.lastOrNull { it.checklist.isNotEmpty() }
+        if (lastChecklist != null) {
+            context = context.copy(
+                activeChecklist = AiAssistantParser.ActiveChecklist(
+                    topic = lastChecklist.checklistTopic ?: "work",
+                    items = lastChecklist.checklist,
+                    lang = context.lastLanguage,
+                    whenLabel = "aaj"
+                )
+            )
+        }
+        val planMsg = stored.asReversed().firstOrNull { s ->
+            s.fromUser && s.text.lowercase().let { t ->
+                t.contains("banane hai") || t.contains("banane hain") ||
+                    t.contains("karna hai") || t.contains("karne hai")
+            }
+        }
+        if (planMsg != null) {
+            val q = AiAssistantParser.normalise(planMsg.text)
+            AiAssistantParser.detectService(q)?.let { svc ->
+                context = context.copy(lastPlanTopic = svc.name.lowercase())
             }
         }
     }
@@ -516,6 +574,8 @@ class ChatbotViewModel(
         _pendingPreviewId.value = null
         clarification = null
         context = AiAssistantParser.AiConversationContext(dayEpoch = today)
+        _pendingOffer.value = null
+        _suggestions.value = listOf("Aaj ka dhandha kitna hua?", "Cash Book kholo", "Kal ke kaam ki checklist banao")
         lastKnowledge = null
         currentSessionId = System.currentTimeMillis()
         _messages.value = listOf(ChatMessage(text = greetingText, fromUser = false))
@@ -837,6 +897,8 @@ class ChatbotViewModel(
         note: String? = null,
         isAiSummary: Boolean = false,
         checklist: List<String> = emptyList(),
+        checklistTopic: String? = null,
+        devRequest: DevRequest? = null,
         table: List<Triple<String, String, String>> = emptyList(),
         tableHeaders: Triple<String, String, String>? = null,
         deepLinkRoute: String? = null,
@@ -857,6 +919,8 @@ class ChatbotViewModel(
                 isAiSummary = isAiSummary,
                 note = note,
                 checklist = checklist,
+                checklistTopic = checklistTopic,
+                devRequest = devRequest,
                 table = table,
                 tableHeaders = tableHeaders,
                 deepLinkRoute = deepLinkRoute,
@@ -993,18 +1057,17 @@ class ChatbotViewModel(
         // Memory never overrides the ledgers.
         val meaning = ConversationEngine.understand(text, context, lang)
         context = ConversationMemory.updateContext(context, text, meaning)
+        // Default: no chips. handleConversational and the Factual
+        // branch set the contextual ones when the reply earns them
+        // (website suggestionsFor default is empty).
+        _suggestions.value = emptyList()
+        _pendingOffer.value = context.pendingChecklistOffer
 
         // --- 1. A pending financial action: Haan / Nahi / follow-up amount.
         pendingAction?.let { pending ->
             val norm = AiAssistantParser.normalise(text)
             if (AiAssistantParser.isAffirmative(norm)) {
                 confirmPendingFromChat()
-                return
-            }
-            if (AiAssistantParser.isNegative(norm)) {
-                pendingAction = null
-                _pendingPreviewId.value = null
-                append(ChatMessage(text = MultilingualReplies.get(lang, "cancelled"), fromUser = false))
                 return
             }
             // "Aur 200 UPI bhi add kar do" — append to the pending entries.
@@ -1026,6 +1089,45 @@ class ChatbotViewModel(
                 )
                 return
             }
+            // UPDATE 20 — "Nahi, 500 the" corrects the single pending
+            // amount (and mode/service if named), it does not cancel.
+            // A bare "Nahi" (no number) still cancels below.
+            val correctedAmount = AiAssistantParser.correctedPreviewAmount(norm)
+            if (correctedAmount != null && pending.action is AiAssistantParser.AiAction.DailyEntries) {
+                val entries = (pending.action as AiAssistantParser.AiAction.DailyEntries).entries
+                if (entries.size == 1) {
+                    val old = entries[0]
+                    val service = AiAssistantParser.detectService(norm)
+                    val corrected = old.copy(
+                        amountPaise = correctedAmount,
+                        mode = AiAssistantParser.detectMode(norm) ?: old.mode,
+                        service = service ?: old.service,
+                        serviceLabel = service?.label ?: old.serviceLabel
+                    )
+                    val merged = (pending.action as AiAssistantParser.AiAction.DailyEntries)
+                        .copy(entries = listOf(corrected))
+                    val newKey = keyFor(merged)
+                    pendingAction = pending.copy(action = merged, key = newKey)
+                    replaceMessage(
+                        pending.previewMessageId,
+                        ChatMessage(
+                            id = pending.previewMessageId,
+                            text = "Theek hai — amount update kar diya hai:\n" +
+                                AiAssistantParser.previewDaily(merged.entries, lang),
+                            fromUser = false,
+                            preview = previewFor(merged),
+                            note = "Confirm karein to save karunga — abhi kuch save nahi hua hai."
+                        )
+                    )
+                    return
+                }
+            }
+            if (AiAssistantParser.isNegative(norm)) {
+                pendingAction = null
+                _pendingPreviewId.value = null
+                append(ChatMessage(text = MultilingualReplies.get(lang, "cancelled"), fromUser = false))
+                return
+            }
             // A different message — drop the old pending action explicitly.
             pendingAction = null
             _pendingPreviewId.value = null
@@ -1039,17 +1141,43 @@ class ChatbotViewModel(
             clarification = null
         }
 
-        // --- 3. Navigation: "Cash Book kholo" etc. (UPDATE 11 §9).
-        AiNavigation.routeFor(text)?.let { (route, label) ->
-            append(
-                ChatMessage(
-                    text = "$label khol raha hoon.",
-                    fromUser = false,
-                    deepLinkRoute = route, deepLinkLabel = "$label kholo"
-                )
-            )
-            _navigationEvents.emit(route)
+        // --- 2c. UPDATE 20 (BUG A) — a bare "Ha" with NO pending
+        //      financial preview, NO pending checklist offer, NO
+        //      pending question and NO pending app-change spec is
+        //      neither a financial confirm nor an acceptance: say so
+        //      honestly. (With a pending offer/question the parser
+        //      resolves it below as ACCEPT_OFFER / a count answer.)
+        //      The "no pending entry" line must NEVER appear here.
+        if (pendingAction == null &&
+            context.pendingChecklistOffer == null && context.pendingQuestion == null &&
+            context.pendingAppChange == null &&
+            meaning.intent in setOf(
+                ConversationIntent.CASUAL, ConversationIntent.STATEMENT,
+                ConversationIntent.UNKNOWN
+            ) &&
+            AiAssistantParser.isOfferAcceptance(AiAssistantParser.normalise(text))
+        ) {
+            append(ChatMessage(text = ConversationReplies.get(lang, "honestBareYes"), fromUser = false))
             return
+        }
+
+        // --- 3. Navigation: "Cash Book kholo" etc. (UPDATE 11 §9).
+        //     Gated on the meaning: an app-change request ("Modify the
+        //     Cash Book to show weekly totals") is a change request,
+        //     not "open Cash Book" (website classifyIntent step 1b
+        //     beats 2d — same ordering as ConversationEngine).
+        if (meaning.intent != ConversationIntent.APP_CHANGE) {
+            AiNavigation.routeFor(text)?.let { (route, label) ->
+                append(
+                    ChatMessage(
+                        text = "$label khol raha hoon.",
+                        fromUser = false,
+                        deepLinkRoute = route, deepLinkLabel = "$label kholo"
+                    )
+                )
+                _navigationEvents.emit(route)
+                return
+            }
         }
 
         // --- 4. Parse the message.
@@ -1075,7 +1203,12 @@ class ChatbotViewModel(
                     )
                 )
             }
-            is AiAssistantParser.AiParseResult.Factual -> answerQuestion(text)
+            is AiAssistantParser.AiParseResult.Factual -> {
+                // A business question earns the summary chip (website
+                // suggestionsFor: business_query -> "Aaj ka summary banao").
+                _suggestions.value = listOf("Aaj ka summary banao")
+                answerQuestion(text)
+            }
             is AiAssistantParser.AiParseResult.Unknown -> {
                 // Last chance for the built-in parser: cloud structured parse.
                 val cloudParsed = tryCloudParse(text)
@@ -1108,6 +1241,30 @@ class ChatbotViewModel(
         userText: String,
         lang: AiLanguage
     ) {
+        // UPDATE 20 — a do-it summary is answered from the real
+        // ledgers, never streamed as a conversational reply.
+        if (result.intent == "summary") {
+            answerQuestion(userText)
+            return
+        }
+        // UPDATE 22 — a confirmed service add is PERFORMED now,
+        // through the real Customization Studio store, and verified.
+        if (result.intent == "app_change_service" && result.appChangeConfirmed) {
+            executeServiceAdd(result.appChangeSpec, lang)
+            return
+        }
+        // Contextual follow-up chips (website conversation.ts
+        // suggestionsFor): only what THIS reply earned. A queued
+        // dev request earns none — the website's "Module Requests
+        // kholo" has no Android page; the record is listed in chat.
+        _suggestions.value = when (result.intent) {
+            "plan" -> if (context.pendingChecklistOffer != null) {
+                listOf("Checklist bana do", "Documents bhi batao")
+            } else emptyList()
+            "checklist" -> listOf("Documents bhi add karo", "English mein likho")
+            "app_change_spec" -> listOf("Haan, banao")
+            else -> emptyList()
+        }
         val key = settings.aiKey.first()
         val localText = withRealPlanData(result.text, result.intent)
         if (result.needsCloud && key.isBlank()) {
@@ -1121,6 +1278,19 @@ class ChatbotViewModel(
             streamReply(localText = limitation)
             return
         }
+        // UPDATE 22 — a confirmed app-change (not a service) becomes a
+        // real saved development request, carried on the reply message
+        // so the user can reopen it. It is a RECORD, never a claim the
+        // thing exists.
+        val devRequest = if (result.intent == "app_change_queued" && result.appChangeConfirmed && result.appChangeSpec != null) {
+            DevRequest(
+                title = result.appChangeSpec.title,
+                kind = result.appChangeSpec.kind,
+                detail = result.appChangeSpec.detail,
+                status = "QUEUED",
+                createdAtMs = System.currentTimeMillis()
+            )
+        } else null
         // UPDATE 17 — cloud reply streams over real SSE when a key is
         // configured; otherwise the local reply is typed out by the
         // typewriter (local engine, no network stream). If the cloud
@@ -1132,12 +1302,85 @@ class ChatbotViewModel(
             isAiSummary = cloudFlow != null,
             note = if (cloudFlow != null) "AI jawab" else null,
             checklist = result.checklist,
+            checklistTopic = result.checklistTopic,
+            devRequest = devRequest,
             deepLinkRoute = result.deepLinkRoute,
             deepLinkLabel = result.deepLinkLabel
         )
         if (!delivered && cloudFlow == null && result.needsCloud) {
             val limitation = ConversationEngine.honestLimitation(lang)
             streamReply(localText = limitation)
+        }
+        // UPDATE 21/22 — delivery bookkeeping, ONLY after the reply is
+        // really shown (final directive §6: verify, never fake it).
+        // The shown message must actually carry the checklist / dev
+        // request; if it does not, the state is left alone so a later
+        // follow-up cannot act on something the user never saw.
+        if (delivered) {
+            val shown = _messages.value.lastOrNull { !it.fromUser }
+            if (result.checklist.isNotEmpty() && shown != null && shown.checklist == result.checklist) {
+                val whenLabel = context.pendingChecklistOffer?.whenLabel
+                    ?: context.activeChecklist?.whenLabel ?: "aaj"
+                context = context.copy(
+                    activeChecklist = AiAssistantParser.ActiveChecklist(
+                        topic = result.checklistTopic ?: context.activeChecklist?.topic ?: "work",
+                        items = result.checklist, lang = lang, whenLabel = whenLabel,
+                        count = result.checklistCount
+                    ),
+                    pendingChecklistOffer = null, pendingQuestion = null
+                )
+            }
+            if (result.intent == "app_change_queued" && shown != null && shown.devRequest == devRequest) {
+                context = context.copy(pendingAppChange = null)
+            }
+            _pendingOffer.value = context.pendingChecklistOffer
+        }
+    }
+
+    /** UPDATE 22 (final directive §1/§6) — a new service is supported
+     *  NOW: add it through the real Customization Studio store and
+     *  VERIFY it is there before saying so. A failed add is reported
+     *  honestly — never a fake success. */
+    private suspend fun executeServiceAdd(spec: AiAssistantParser.AppChangeRequest?, lang: AiLanguage) {
+        context = context.copy(pendingAppChange = null)
+        _pendingOffer.value = context.pendingChecklistOffer
+        val title = spec?.title?.trim().orEmpty()
+        if (title.isBlank() || title == "Naya Service") {
+            append(
+                ChatMessage(
+                    text = "Kaunsi service add karni hai? Naam batao — jaise 'Photo Printing service add karo'.",
+                    fromUser = false, isError = true
+                )
+            )
+            return
+        }
+        try {
+            settings.addCustomService(title)
+            val saved = settings.customServices.first().any { it.equals(title, ignoreCase = true) }
+            if (saved) {
+                append(ChatMessage(text = "✓ '$title' service add ho gayi hai — Services list aur Daily Business entry mein dikhegi.", fromUser = false))
+            } else {
+                append(
+                    ChatMessage(
+                        text = "'$title' service add nahi ho payi — phir se try karein. Kuch bhi change nahi hua hai.",
+                        fromUser = false, isError = true
+                    )
+                )
+            }
+        } catch (_: IllegalArgumentException) {
+            append(
+                ChatMessage(
+                    text = "'$title' service add nahi ho payi — service ke naam mein comma (,) nahi ho sakta. Kuch bhi change nahi hua hai.",
+                    fromUser = false, isError = true
+                )
+            )
+        } catch (_: Exception) {
+            append(
+                ChatMessage(
+                    text = "'$title' service add nahi ho payi — phir se try karein. Kuch bhi change nahi hua hai.",
+                    fromUser = false, isError = true
+                )
+            )
         }
     }
 
@@ -1411,7 +1654,7 @@ class ChatbotViewModel(
             is AiAssistantParser.AiAction.CustomerPayment ->
                 "custpay:${action.customerName}:${action.amountPaise}:${action.mode}|${action.dayEpoch}"
             is AiAssistantParser.AiAction.RecordCustomerDue ->
-                "due:${action.customerName}:${action.amountPaise}:${action.service}"
+                "due:${action.customerName}:${action.amountPaise}:${action.receivedPaise}:${action.receivedMode}:${action.service}"
             is AiAssistantParser.AiAction.DeleteTransaction ->
                 "delete:${action.transactionId}"
             is AiAssistantParser.AiAction.CorrectTransaction ->
@@ -1510,8 +1753,16 @@ class ChatbotViewModel(
      *  what the backend confirms (step 11–12). Never retried
      *  automatically: a retry would re-check the same idempotency key
      *  and return Duplicate instead of writing twice. */
+    /** UPDATE 20 (final directive §6) — an explicit Confirm with
+     *  nothing pending is a FAILED action, not a silent no-op and
+     *  never a fake "saved": say so honestly. (Normally unreachable
+     *  — the Confirm button only renders on a pending preview — but
+     *  a stale tap must not pretend it saved anything.) */
     fun confirmPending(editedLines: List<AiPreviewLine>? = null) {
-        val pending = pendingAction ?: return
+        val pending = pendingAction ?: run {
+            append(ChatMessage(text = "Confirm karne ke liye koi pending entry nahi hai. Pehle koi entry batao, phir confirm karna.", fromUser = false))
+            return
+        }
         if (_isLoading.value) return
         pendingAction = null
         _pendingPreviewId.value = null
@@ -1573,8 +1824,12 @@ class ChatbotViewModel(
         }
     }
 
+    /** Same honesty for an explicit Cancel with nothing pending. */
     fun cancelPending() {
-        if (pendingAction == null) return
+        if (pendingAction == null) {
+            append(ChatMessage(text = "Cancel karne ke liye koi pending entry nahi hai.", fromUser = false))
+            return
+        }
         pendingAction = null
         _pendingPreviewId.value = null
         append(ChatMessage(text = "Theek hai — entry save nahi ki gayi. Kuch bhi change nahi hua hai.", fromUser = false))
@@ -1756,7 +2011,10 @@ class ChatbotViewModel(
                 } else null
             }
             is AiAssistantParser.AiAction.RecordCustomerDue -> {
-                if (missing.contains("customer")) {
+                if (missing.contains("payment mode")) {
+                    val mode = AiAssistantParser.detectMode(norm) ?: return null
+                    partial.copy(receivedMode = mode)
+                } else if (missing.contains("customer")) {
                     val name = norm.trim()
                     if (name.length < 2) return null
                     partial.copy(customerName = name)
@@ -1776,7 +2034,10 @@ class ChatbotViewModel(
         is AiAssistantParser.AiAction.MoneyTransfer -> "Money Transfer: principal ${formatPaise(action.principalPaise)}, commission ${formatPaise(action.commissionPaise)}."
         is AiAssistantParser.AiAction.InternalTransfer -> "Internal transfer: ${formatPaise(action.amountPaise)} ${action.from.name} → ${if (action.from == PaymentMode.CASH) "UPI" else "Cash"}."
         is AiAssistantParser.AiAction.CustomerPayment -> "Customer payment: ${action.customerName} se ${formatPaise(action.amountPaise)} (${action.mode?.name})."
-        is AiAssistantParser.AiAction.RecordCustomerDue -> "Customer due (income NAHI): ${action.customerName} — ${formatPaise(action.amountPaise)} baaki."
+        is AiAssistantParser.AiAction.RecordCustomerDue -> if (action.receivedPaise > 0L)
+            "Customer due (income NAHI): ${action.customerName} — ${action.service?.label} total ${formatPaise(action.amountPaise)}, ${formatPaise(action.receivedPaise)} mile (${action.receivedMode?.name}), ${formatPaise(action.amountPaise - action.receivedPaise)} baaki."
+        else
+            "Customer due (income NAHI): ${action.customerName} — ${formatPaise(action.amountPaise)} baaki."
         is AiAssistantParser.AiAction.DeleteTransaction -> "Ye entry delete karu?\n• ${action.label}"
         is AiAssistantParser.AiAction.CorrectTransaction -> "Ye entry sahi karu?\n• ${action.label} → ${formatPaise(action.newAmountPaise)}"
         is AiAssistantParser.AiAction.AddCustomer -> "Naya customer: ${action.name} (${action.service.label})."
@@ -1844,10 +2105,16 @@ class ChatbotViewModel(
 
     // --- Mapping helpers ----------------------------------------------------
     private fun StoredChatMessage.toChatMessage(): ChatMessage =
-        ChatMessage(text = text, fromUser = fromUser, timestampMs = timestampMs, note = note, isError = isError)
+        ChatMessage(
+            text = text, fromUser = fromUser, timestampMs = timestampMs, note = note, isError = isError,
+            checklist = checklist, checklistTopic = checklistTopic, devRequest = devRequest
+        )
 
     private fun ChatMessage.toStored(): StoredChatMessage =
-        StoredChatMessage(text = text, fromUser = fromUser, timestampMs = timestampMs, note = note, isError = isError)
+        StoredChatMessage(
+            text = text, fromUser = fromUser, timestampMs = timestampMs, note = note, isError = isError,
+            checklist = checklist, checklistTopic = checklistTopic, devRequest = devRequest
+        )
 
     private data class KnowledgeInputs(
         val txs: List<com.alfalah.business.data.entity.TransactionEntity>,

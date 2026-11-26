@@ -661,7 +661,12 @@ class BusinessRepository(private val db: AppDatabase) {
         )
     }
 
-    /** A due is a JOB with received = 0 — never an income row. */
+    /** A due is a JOB — never an income row by itself. A part-payment
+     *  that came with the job (receivedPaise > 0) is recorded through
+     *  [receivePayment], so it lands in the Khata + Cash/UPI Book as
+     *  real income with its mode, and the job's received/due stay
+     *  consistent. receivedPaise > 0 without a mode is refused here
+     *  (the parser asks for the mode first). */
     private suspend fun executeAiCustomerDue(
         profileId: Long,
         action: AiAssistantParser.AiAction.RecordCustomerDue,
@@ -672,6 +677,9 @@ class BusinessRepository(private val db: AppDatabase) {
         }
         val name = action.customerName ?: return AiExecuteResult.Failed("Customer ka naam bataye bina due record nahi kar sakta.")
         val service = action.service ?: return AiExecuteResult.Failed("Kaunsi service ka due hai — service bataye bina record nahi kar sakta.")
+        if (action.receivedPaise > 0L && action.receivedMode == null) {
+            return AiExecuteResult.Failed("₹${action.receivedPaise / 100} mile — Cash ya UPI, mode bataye bina save nahi kar sakta.")
+        }
         var jobId = 0L
         db.runInTransaction {
             val existing = findCustomerByName(profileId, name)
@@ -688,6 +696,20 @@ class BusinessRepository(private val db: AppDatabase) {
                 )
             )
             markExecuted(profileId, key, "customer due job=$jobId $name ${action.amountPaise}")
+        }
+        if (action.receivedPaise > 0L) {
+            val job = jobs.getById(jobId)
+                ?: return AiExecuteResult.Failed("Due record ho gaya, lekin received payment save nahi ho payi — job nahi mila.")
+            receivePayment(
+                profileId, job, action.receivedPaise,
+                action.receivedMode!!,
+                if (action.dayEpoch != 0L) action.dayEpoch else AccountingEngine.todayEpochDay()
+            )
+            val due = AccountingEngine.customerDue(action.amountPaise, action.receivedPaise)
+            return AiExecuteResult.Saved(
+                "Due record ho gaya (income NAHI): $name — ${service.label} total ${rupeesText(action.amountPaise)}, " +
+                    "${rupeesText(action.receivedPaise)} mile (${action.receivedMode.name}), ${rupeesText(due)} baaki."
+            )
         }
         return AiExecuteResult.Saved(
             "Due record ho gaya (income NAHI): $name — ${service.label} ${rupeesText(action.amountPaise)} baaki. " +

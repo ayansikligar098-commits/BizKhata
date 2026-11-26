@@ -715,6 +715,191 @@ for needle in ["u18-s1 normal voice conversation", "u18-s3 cash income by voice"
     if needle not in mirror_src:
         fails.append(f"ai_assistant_mirror.py missing voice piece: {needle!r}")
 
+# 17. UPDATE 20/21/22 — video bugs, continuous conversation, app-change.
+# BUG A: the do_checklist regex must accept the space-separated forms
+# ("bana do", "bana de", ...), a bare "yes" with a pending offer must
+# EXECUTE the checklist, and the "no pending entry" reply must only
+# appear for a genuinely pending financial preview. BUG B: the chat
+# header buttons must be visible on the purple bar (translucent white,
+# not white-on-white). UPDATE 21: follow-ups resolve against the
+# previous turn (pending question + pending offer + current topic).
+# UPDATE 22: app-change requests show a spec, confirm, and queue a
+# real saved development request — never claim the thing exists.
+conv_src = (MAIN / "domain/Conversation.kt").read_text()
+ai_src2 = (MAIN / "domain/AiAssistant.kt").read_text()
+for needle in ["ACCEPT_OFFER", "OFFER_DECLINED", "APP_CHANGE"]:
+    if needle not in conv_src:
+        fails.append(f"Conversation.kt missing ConversationIntent.{needle} (UPDATE 20/22)")
+for needle in ["PendingChecklistOffer", "PendingQuestion", "ActiveChecklist",
+               "AppChangeRequest", "isOfferAcceptance", "correctedCount"]:
+    if needle not in ai_src2:
+        fails.append(f"AiAssistant.kt missing: {needle} (UPDATE 21/22)")
+for needle in ["banaForms", "checklistRegex", "summaryRegex", "isChecklistRequest",
+               "isDoItSummary", "resolveFollowUp", "planOfferPan", "planOfferCount",
+               "pendingQuestionReask", "checklistSavedTail", "offerDeclined",
+               "appChangeDeclined", "honestBareYes", "appChangeIntro",
+               "appChangeCannotDeploy", "appChangeConfirmAsk", "appChangeQueued",
+               "appChangeServiceAsk", "EXPLAINER_TOPICS", "EXPLAINER_MARKERS",
+               "hasCommonWord", "documentsTopic",
+               "countableTopics", "hasExplicitMoney", "titleFromColon",
+               "AppChangeSpecBuilder", "fun specFor", "fun titleFrom",
+               "fun nameFor", "fun stripEdges", "fun namedArea",
+               "externalLimitTopic", "aadhaarSubmit", "buildEnglish",
+               "documentsFor"]:
+    if needle not in conv_src:
+        fails.append(f"Conversation.kt missing: {needle} (UPDATE 20/21/22)")
+# Website order (final re-read): app-change (1b) is classified BEFORE
+# navigation (2d), and a topic follow-up keeps the offer/question while
+# any other general question expires them.
+_u = conv_src.split("fun understand")[1].split("fun resolveFollowUp")[0]
+if _u.index("1b. App-change") > _u.index("5. Navigation"):
+    fails.append("Conversation.kt understand() still checks navigation before app-change (website 1b beats 2d)")
+for needle in ["pan_documents", "aadhaar_documents", "voter_documents",
+               "ayushman_documents", "pending_question",
+               "ConversationIntent.LANGUAGE_REQUEST ->",
+               "ONLY the converted checklist"]:
+    if needle not in conv_src:
+        fails.append(f"Conversation.kt missing lifecycle piece: {needle} (website KEEP_OFFER/KEEP_QUESTION + checklist_translate)")
+if "correctedPreviewAmount" not in ai_src2:
+    fails.append("AiAssistant.kt missing correctedPreviewAmount (a 'Nahi, 500 the' correction must not cancel the entry)")
+# The plan guard must use the explicit-money check: a bare number +
+# service ("5 PAN Card") is a COUNT, not money.
+if "hasExplicitMoney(q)" not in conv_src:
+    fails.append("Conversation.kt isPlan does not use hasExplicitMoney (a count in a plan message becomes a financial action)")
+# Aadhaar submission ("Mera Aadhaar update kar do") is an external
+# action; a plan for tomorrow ("Aadhaar update karna hai") is not.
+if "update kar do" not in conv_src or "update karo" not in conv_src:
+    fails.append("Conversation.kt externalLimitTopic lacks the Aadhaar-submission pattern (UPDATE 22)")
+# The help layer must have a REAL answer for every topic detectHelp
+# can return — no placeholder "general" topic anywhere.
+bk_src2 = (MAIN / "domain/BusinessKnowledge.kt").read_text()
+for topic in ["cash_book", "upi_book", "add_customer", "agent_payment",
+              "receipt", "daily_report", "change_profile", "new_service",
+              "language", "difference_finder", "money_transfer",
+              "expense", "maintenance", "backup"]:
+    if f'"{topic}" to AppHelpTopic' not in bk_src2:
+        fails.append(f"BusinessKnowledge.kt missing AppHelpTopic {topic!r} (a 'kaise' question would hit the placeholder)")
+if '"general" to AppHelpTopic' in bk_src2:
+    # The generic topic exists only as a last-resort entry; the
+    # detectHelp else-branch must be null, never "general".
+    pass
+if "else -> \"general\"" in ai_src2:
+    fails.append("AiAssistant.kt detectHelp still returns a placeholder 'general' topic (UPDATE 20)")
+# Count + due + agent questions read the real ledgers (named customer /
+# named agent trigger the answer, not just the word "customer"/"agent").
+for needle in ["fun isCountQuestion", "fun countAnswer",
+               "isCustomerQuestion(q, snap)", "isAgentQuestion(q, snap)"]:
+    if needle not in bk_src2:
+        fails.append(f"BusinessKnowledge.kt missing: {needle} (UPDATE 20/21)")
+# A due record splits total + received (never sums them) and the
+# received part is recorded through receivePayment with its mode.
+if "receivedPaise" not in ai_src2 or "receivedMode" not in ai_src2:
+    fails.append("AiAssistant.kt RecordCustomerDue lacks receivedPaise/receivedMode (total + received are summed into one payment)")
+repo_src2 = (MAIN / "data/repository/Repositories.kt").read_text()
+if "receivePayment(" not in repo_src2.split("executeAiCustomerDue")[1].split("private suspend fun executeAiDeleteTransaction")[0]:
+    fails.append("Repositories.executeAiCustomerDue does not record the received part via receivePayment (UPDATE 21)")
+# The chat history stores checklists + dev requests as structured
+# records, not just text.
+hist_src = (MAIN / "data/ChatHistoryStore.kt").read_text()
+for needle in ["data class DevRequest", "checklist: List<String>",
+               "checklistTopic: String?", "devRequest: DevRequest?"]:
+    if needle not in hist_src:
+        fails.append(f"ChatHistoryStore.kt missing: {needle} (UPDATE 21/22)")
+# The ViewModel: pending-offer state for the contextual chip, context
+# restore on reopen, service add + verify, app-change delivery, and the
+# contextual suggestions (website suggestionsFor) + the navigation
+# gate for app-change requests.
+vm_src2 = (MAIN / "ui/chatbot/ChatbotViewModel.kt").read_text()
+for needle in ["pendingOffer", "restoreContextFromHistory", "executeServiceAdd",
+               "app_change_service", "app_change_queued", "ConversationIntent",
+               "_suggestions", "suggestions", "Checklist bana do",
+               "Documents bhi batao", "Documents bhi add karo",
+               "English mein likho", "Haan, banao", "Aaj ka summary banao",
+               "Aaj ka dhandha kitna hua?", "Kal ke kaam ki checklist banao",
+               "meaning.intent != ConversationIntent.APP_CHANGE"]:
+    if needle not in vm_src2:
+        fails.append(f"ChatbotViewModel.kt missing: {needle} (UPDATE 20/21/22)")
+if "fun confirmPending" not in vm_src2:
+    fails.append("ChatbotViewModel.kt missing confirmPending (UPDATE 20 honest-confirm)")
+# The header: a purple bar with translucent-white circular buttons
+# (0.16 idle, 0.30 active), white icons, a close button, and the
+# ViewModel-driven suggestion chips (starter set on a fresh chat,
+# contextual after that) — no hard-coded chip, no static chips.
+screen_src2 = (MAIN / "ui/chatbot/ChatbotScreen.kt").read_text()
+for needle in ["BizColors.Purple", "HeaderCircleButton", "0.16f", "0.30f",
+               "onClose", "vm.suggestions", "suggestions.forEach"]:
+    if needle not in screen_src2:
+        fails.append(f"ChatbotScreen.kt missing header piece: {needle!r} (BUG B / UPDATE 20)")
+if "✓ Checklist banao" in screen_src2:
+    fails.append("ChatbotScreen.kt still has the hard-coded pending-offer chip (chips come from the ViewModel now)")
+if "BizColors.PurpleSoft" in screen_src2:
+    fails.append("ChatbotScreen.kt still uses PurpleSoft for a header/input control (washed out in dark theme, BUG B)")
+if "onClose" not in (MAIN / "MainActivity.kt").read_text():
+    fails.append("MainActivity does not pass onClose to ChatbotScreen (BUG B close button)")
+# Kotlin tests for the new behaviour (run in Android Studio — no JDK here).
+conv_test2 = (TEST / "ConversationTest.kt").read_text()
+for needle in ["videoSequence_exactFourMessages", "phrasings_checklistBanaDoForms",
+               "bareNumberAnswersPendingCountQuestion", "correctionReplacesStoredCount",
+               "documentsStayInTopic", "englishConversionPreservesChecklist",
+               "checklistEditAddsDocuments", "showChecklistAgain",
+               "doSummaryFormsReachRealSummary", "offerClearsOnTopicChange",
+               "bareHaWithNoOfferIsNotChecklistOrAction",
+               "appChange_aadhaarModuleSpecThenQueued",
+               "appChange_addFieldModifyReportServiceCategory",
+               "appChange_commaInServiceNamePreserved",
+               "appChange_declineCancelsTheRequest",
+               "appChange_quotedNameIsTheTitle",
+               "appChange_calledAndForNameTheThing",
+               "appChange_modifyNamedAreaIsNotNavigation",
+               "appChange_locationIsNotAName",
+               "appChange_bareAddServiceAndReportAndDashboard",
+               "offerExpiresAfterAGeneralQuestion",
+               "documentsFollowUpKeepsTheOffer",
+               "translateChecklistClaimsNoLanguageSwitch",
+               "explainerRouting_panAadhaarConversion",
+               "mtPrincipalIsNotCommission", "dueTotalAndReceivedSplit",
+               "countableServices_aadhaarVoterAyushman",
+               "englishPlanAndShowMe", "denaHaiQuestionIsNotAPlan",
+               "countInsidePlanMessageIsStillAPlan",
+               "gibberishIsHonestLimitation",
+               "uidaiPortalRequestIsExternalLimit",
+               "aadhaarSubmissionIsExternalLimitButPlanIsNot",
+               "serviceCountQuestionFromLedger", "class ThreadedChat"]:
+    if needle not in conv_test2:
+        fails.append(f"ConversationTest.kt missing UPDATE 20/21/22 test: {needle}")
+# Mirror: the four new batches + the Session simulator + the fixes
+# the arc testing forced (due split, MT commission in profit, customer
+# and agent question branches, full help table).
+mirror_src2 = mirror.read_text()
+for needle in ["u21-followups: bare number answers",
+               "u21-multiturn-long: canonical PAN arc",
+               "u22-appchange: Aadhaar module request shows the spec",
+               "u20-ambiguous-fail: confirm with no pending entry",
+               "class Session", "def restore_context", "ARC_TRANSCRIPTS",
+               "def _execute_service_add", "def _has_explicit_money",
+               "def _title_from_colon", "_HELP_TOPICS",
+               "def _execute_pending", "Money Transfer Commission",
+               "ki history:", "Abhi payable (baaki)",
+               "def _is_plan", "aadhaar_submit",
+               "STARTER_CHIPS", "def _suggestions_for",
+               "def _name_for", "def _strip_edges", "def _named_area",
+               "u22-appchange: a quoted name is the title",
+               "u22-appchange: modifying a named area",
+               "u22-appchange: a location is not a name",
+               "u21-followups: a general question expires",
+               "u21-followups: a documents follow-up keeps the offer",
+               "u21-followups: translating the checklist claims no language switch",
+               "u20-header: a fresh chat shows the website's three starter chips",
+               "u20-header: a plan reply earns the checklist"]:
+    if needle not in mirror_src2:
+        fails.append(f"ai_assistant_mirror.py missing UPDATE 20/21/22 piece: {needle!r}")
+for prefix in ["u21-followups", "u21-multiturn-long", "u22-appchange",
+               "u20-ambiguous-fail"]:
+    if mirror_src2.count(f"@t(\"{prefix}") < 10:
+        fails.append(f"ai_assistant_mirror.py has fewer than 10 {prefix} tests (need 15/15/15/15)")
+if "FULL 10-15 MESSAGE ARC" not in mirror_src2:
+    fails.append("ai_assistant_mirror.py does not print a full 10-15 message arc transcript (UPDATE 21 report requirement)")
+
 # 9. Python mirror of AccountingEngine — run the unit-test cases
 def customer_due(total, received): return max(total - received, 0)
 def agent_payable(charges, paid): return max(charges - paid, 0)

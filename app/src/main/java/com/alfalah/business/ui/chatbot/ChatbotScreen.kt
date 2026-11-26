@@ -9,7 +9,8 @@ import androidx.compose.animation.core.infiniteTransition
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,13 +26,13 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.VolumeOff
@@ -42,12 +43,15 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SuggestionChip
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -55,6 +59,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -88,6 +93,30 @@ import java.util.Locale
 private fun formatTime(ms: Long): String =
     SimpleDateFormat("HH:mm", Locale.ENGLISH).format(Date(ms))
 
+/** UPDATE 20 (BUG B) — a header circle button on the purple header
+ *  bar: translucent-white background (0.16 alpha, 0.30 when the
+ *  button's state is ON) + translucent-white border (0.35) + white
+ *  icon, mirroring the website's .chat-panel-head.icon-btn fix. White
+ *  on translucent white on purple — visible in light and dark themes.
+ *  Never a plain white circle (that was the invisibility). */
+@Composable
+private fun HeaderCircleButton(
+    onClick: () -> Unit,
+    contentDescription: String,
+    active: Boolean = false,
+    content: @Composable () -> Unit
+) {
+    Box(
+        Modifier.size(40.dp).clip(CircleShape)
+            .background(Color.White.copy(alpha = if (active) 0.30f else 0.16f))
+            .border(1.dp, Color.White.copy(alpha = 0.35f), CircleShape)
+            .clickable(onClick = onClick, role = Role.Button),
+        contentAlignment = Alignment.Center
+    ) {
+        CompositionLocalProvider(LocalContentColor provides Color.White) { content() }
+    }
+}
+
 /**
  * BizKhata AI Assistant screen — "BizKhata AI Assistant" /
  * "Your Intelligent Business Assistant" (UPDATE 12: no provider name
@@ -119,7 +148,8 @@ fun ChatbotScreen(
     chatHistory: ChatHistoryStore,
     language: AppLanguage,
     onOpenSettings: () -> Unit,
-    onOpenRoute: (String) -> Unit
+    onOpenRoute: (String) -> Unit,
+    onClose: () -> Unit = {}
 ) {
     val vm: ChatbotViewModel = viewModel(
         factory = vmFactory { ChatbotViewModel(profileId, repository, settings, chatHistory) }
@@ -148,6 +178,12 @@ fun ChatbotScreen(
     val speechPitch by vm.speechPitch.collectAsState()
     val continuousMode by vm.continuousMode.collectAsState()
     val searchQuery by vm.searchQuery.collectAsState()
+    // UPDATE 20 §2/§7 — contextual suggestion chips from the
+    // ViewModel (website chatbot.tsx QUICK_QUESTIONS on a fresh chat,
+    // conversation.ts suggestionsFor after that): only what the last
+    // reply earned. A chip sends the real text through the same
+    // pipeline.
+    val suggestions by vm.suggestions.collectAsState()
     var input by remember { mutableStateOf("") }
     var showSearch by remember { mutableStateOf(false) }
     var showClearConfirm by remember { mutableStateOf(false) }
@@ -287,39 +323,78 @@ fun ChatbotScreen(
 
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Spacer(Modifier.height(8.dp))
-        BizCard(Modifier.fillMaxWidth()) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)).background(BizColors.Purple),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Filled.Chat, contentDescription = "AI Assistant", tint = Color.White)
+        // UPDATE 20 (BUG B) — the chat header is a PURPLE bar, mirroring
+        // the website's .chat-panel-head fix: white title/subtitle and
+        // circular buttons with a translucent-white background
+        // (White 0.16 alpha) + translucent-white border (0.35) + white
+        // icons, so every button is visible in light AND dark themes —
+        // no white-on-white circle anywhere. Buttons: voice toggle
+        // (VolumeUp/VolumeOff; ON = stronger 0.30 background, a clear
+        // visual state), search (functional), New Chat (Add icon),
+        // Close. The "Voice replies: ON/OFF" chip below stays as the
+        // visible voice-state label.
+        Surface(
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)),
+            color = BizColors.Purple
+        ) {
+            Column(Modifier.padding(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text(
+                            "BizKhata AI Assistant",
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color.White
+                        )
+                        Text(
+                            "Your Intelligent Business Assistant",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.85f)
+                        )
+                        Text(
+                            if (aiEnabled) "AI summary ON — figures aapke real record se"
+                            else "AI summary OFF — built-in jawab, aapke real record se",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.85f)
+                        )
+                    }
+                    HeaderCircleButton(
+                        onClick = { vm.setVoiceResponsesEnabled(!voiceResponsesEnabled) },
+                        contentDescription = if (voiceResponsesEnabled) "Voice replies on — tap to mute" else "Voice replies off — tap to enable",
+                        active = voiceResponsesEnabled
+                    ) {
+                        Icon(
+                            if (voiceResponsesEnabled) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
+                            contentDescription = null,
+                            tint = Color.White
+                        )
+                    }
+                    HeaderCircleButton(
+                        onClick = { showSearch = !showSearch },
+                        contentDescription = "Search chat history"
+                    ) {
+                        Icon(Icons.Filled.Search, contentDescription = null, tint = Color.White)
+                    }
+                    HeaderCircleButton(
+                        onClick = { vm.newChat() },
+                        contentDescription = "New chat"
+                    ) {
+                        Icon(Icons.Filled.Add, contentDescription = null, tint = Color.White)
+                    }
+                    HeaderCircleButton(
+                        onClick = onClose,
+                        contentDescription = "Close chat"
+                    ) {
+                        Icon(Icons.Filled.Close, contentDescription = null, tint = Color.White)
+                    }
                 }
-                Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                    Text("BizKhata AI Assistant", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "Your Intelligent Business Assistant",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        if (aiEnabled) "AI summary ON — figures aapke real record se"
-                        else "AI summary OFF — built-in jawab, aapke real record se",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                IconButton(onClick = { showSearch = !showSearch }) {
-                    Icon(Icons.Filled.Search, contentDescription = "Search chat history")
-                }
-                TextButton(onClick = { vm.newChat() }) { Text("New Chat", color = BizColors.Purple) }
-            }
-            Row {
-                TextButton(onClick = onOpenSettings) {
-                    Text(if (aiEnabled) "AI Key" else "AI Key add karein", color = BizColors.Purple)
-                }
-                TextButton(onClick = { showClearConfirm = true }) {
-                    Text("Clear history", color = BizColors.Purple)
+                Row {
+                    TextButton(onClick = onOpenSettings) {
+                        Text(if (aiEnabled) "AI Key" else "AI Key add karein", color = Color.White)
+                    }
+                    TextButton(onClick = { showClearConfirm = true }) {
+                        Text("Clear history", color = Color.White)
+                    }
                 }
             }
         }
@@ -447,23 +522,18 @@ fun ChatbotScreen(
                 label = { Text(if (voiceResponsesEnabled) "Voice replies: ON" else "Voice replies: OFF") }
             )
         }
-        if (messages.size <= 1) {
+        // UPDATE 20 §2/§7 — contextual suggestion chips: the starter
+        // set on a fresh chat, then only what the last reply earned
+        // (a chip sends the real text through the same pipeline).
+        if (suggestions.isNotEmpty()) {
             Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                listOf(
-                    "Aaj Xerox ke 300 rupaye cash hue",
-                    "Aaj ka profit kitna hai?",
-                    "Is mahine Xerox se kitni earning hui?",
-                    "Kaun paise dene wala hai?",
-                    "Agent ko kitna dena hai?",
-                    "Cash Book kholo",
-                    "Cash balance kitna hai?"
-                ).forEach { suggestion ->
+                suggestions.forEach { chip ->
                     SuggestionChip(
-                        onClick = { send(suggestion) },
-                        label = { Text(suggestion) }
+                        onClick = { send(chip) },
+                        label = { Text(chip) }
                     )
                 }
             }
@@ -532,7 +602,15 @@ fun ChatbotScreen(
                 },
                 modifier = Modifier.size(48.dp)
                     .clip(RoundedCornerShape(24.dp))
-                    .background(if (listening || speaking) BizColors.ExpenseRed else BizColors.PurpleSoft)
+                    // UPDATE 20 (BUG B) — the idle mic uses the theme's
+                    // primaryContainer / onPrimaryContainer, so it is
+                    // visible in light AND dark themes (the old
+                    // PurpleSoft + Purple pair was washed out in dark).
+                    // Listening / speaking stays ExpenseRed + White.
+                    .background(
+                        if (listening || speaking) BizColors.ExpenseRed
+                        else MaterialTheme.colorScheme.primaryContainer
+                    )
             ) {
                 Icon(
                     Icons.Filled.Mic,
@@ -541,11 +619,12 @@ fun ChatbotScreen(
                         listening -> "Stop listening"
                         else -> "Voice input"
                     },
-                    tint = if (listening || speaking) Color.White else BizColors.Purple
+                    tint = if (listening || speaking) Color.White else MaterialTheme.colorScheme.onPrimaryContainer
                 )
             }
             // Mute toggle next to the mic (same setting as the chip
-            // above and as Settings -> Voice Assistant).
+            // above and as Settings -> Voice Assistant). Theme primary
+            // tint, so it stays visible in both themes.
             IconButton(
                 onClick = { vm.setVoiceResponsesEnabled(!voiceResponsesEnabled) },
                 modifier = Modifier.padding(start = 4.dp)
@@ -553,7 +632,7 @@ fun ChatbotScreen(
                 Icon(
                     if (voiceResponsesEnabled) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
                     contentDescription = if (voiceResponsesEnabled) "Mute voice replies" else "Unmute voice replies",
-                    tint = BizColors.Purple
+                    tint = MaterialTheme.colorScheme.primary
                 )
             }
             OutlinedTextField(

@@ -196,7 +196,14 @@ object BuiltInChatbotResponder {
             else -> "kaam"
         }
         val whenWord = if (q.contains("kal")) "Kal" else "Aaj"
-        return "Achha! $whenWord $topic ka kaam karna hai. Agar chaho toh main tumhare liye kaam ki checklist bhi bana sakta hoon — bas bol do."
+        // UPDATE 21 — the PAN plan asks the count question and offers
+        // the checklist with BOTH options ("checklist bana do" or just
+        // "haan"), like the main engine's planOfferPan. This is only a
+        // backstop: the main engine answers plans first.
+        if (q.contains("pan")) {
+            return "Achha! $whenWord $topic ka kaam karna hai. Kitne applications hain? Agar chaho toh main tumhare liye kaam ki checklist bhi bana sakta hoon — bas 'checklist bana do' bolo, ya bas 'haan' bolo."
+        }
+        return "Achha! $whenWord $topic ka kaam karna hai. Agar chaho toh main tumhare liye kaam ki checklist bhi bana sakta hoon — bas 'checklist bana do' bolo, ya bas 'haan' bolo."
     }
 
     private fun isJoke(q: String) =

@@ -251,6 +251,10 @@ object Multilingual {
         "और" to "aur", "અને" to "aur", "এবং" to "aur", "আৰু" to "aur",
         "ਤੇ" to "aur", "மற்றும்" to "aur", "మరియు" to "aur", "ಮತ್ತು" to "aur",
         "പിന്നെ" to "aur", "ଏବଂ" to "aur", "आणि" to "aur",
+        // Yes ("हाँ" / "हां" in Devanagari — a bare "हाँ" accepts a
+        // pending offer exactly like "Haan"; the canonical form must
+        // be "haan" or the anchored acceptance regex never matches).
+        "हाँ" to "haan", "हां" to "haan",
         // Today.
         "आज" to "aaj", "આજે" to "aaj", "আজ" to "aaj", "ਅੱਜ" to "aaj",
         "இன்று" to "aaj", "ఈరోజు" to "aaj", "ಇಂದು" to "aaj", "ഇന്ന്" to "aaj",

@@ -94,6 +94,18 @@ enum class ConversationIntent {
     NAVIGATION,
     LANGUAGE_REQUEST,
     CHECKLIST,
+    /** UPDATE 20 (BUG A) — a bare "Ha" / "Bana do" that accepts a
+     *  pending checklist offer. Builds + saves the real checklist
+     *  for the offered topic; never a financial confirm. */
+    ACCEPT_OFFER,
+    /** UPDATE 21 — a bare "Nahi" that declines a pending offer /
+     *  question. Acknowledged once, no fixed follow-up question. */
+    OFFER_DECLINED,
+    /** App-change request (UPDATE 22): "module bana do", "naya
+     *  service add karo", "report create karo" … — a proposed change
+     *  to BizKhata itself. Spec → confirm → queued development
+     *  request. NEVER a financial action, NEVER a portal deflection. */
+    APP_CHANGE,
     DO_IT_SUMMARY,
     UNKNOWN
 }
@@ -112,7 +124,24 @@ data class Meaning(
     val canonicalText: String,
     val language: AiLanguage,
     /** The language the user asked to switch to (LANGUAGE_REQUEST). */
-    val requestedLanguage: AiLanguage? = null
+    val requestedLanguage: AiLanguage? = null,
+    /** UPDATE 21 — a bare number answering a pending count question
+     *  ("Kitne applications hain?" → "5" means 5 applications). */
+    val count: Int? = null,
+    /** UPDATE 21 — this count corrects a previous one ("Nahi, 3 the,
+     *  5 nahi"). */
+    val isCorrection: Boolean = false,
+    /** UPDATE 21 — items to ADD to the active checklist ("Isme
+     *  documents bhi add karo"). Null means build fresh / re-show. */
+    val checklistEditItems: List<String>? = null,
+    /** UPDATE 21 — re-show the active checklist ("PAN wali checklist
+     *  phir dikhao") instead of rebuilding it. */
+    val reuseChecklist: Boolean = false,
+    /** UPDATE 22 — the proposed app change (APP_CHANGE). */
+    val appChangeSpec: AiAssistantParser.AppChangeRequest? = null,
+    /** UPDATE 22 — the user confirmed a pending app-change spec
+     *  ("Haan, banao") — queue the development request. */
+    val appChangeConfirmed: Boolean = false
 )
 
 /** A locally composed reply. [needsCloud] means the local engine
@@ -125,7 +154,14 @@ data class LocalReply(
     val checklist: List<String> = emptyList(),
     val needsCloud: Boolean = false,
     val deepLinkRoute: String? = null,
-    val deepLinkLabel: String? = null
+    val deepLinkLabel: String? = null,
+    /** UPDATE 21 — topic/count of a built checklist, carried through
+     *  to the ViewModel so it can store the active checklist. */
+    val checklistTopic: String? = null,
+    val checklistCount: Int? = null,
+    /** UPDATE 22 — the proposed app change (spec / confirmed). */
+    val appChangeSpec: AiAssistantParser.AppChangeRequest? = null,
+    val appChangeConfirmed: Boolean = false
 )
 
 object MeaningParser {
@@ -148,6 +184,25 @@ object MeaningParser {
     /** Words that make a message a financial action / money talk:
      *  income / expense / agent / transfer / due / payment verbs, an
      *  "entry" word, or a service + an amount. */
+    /** Explicit money: a currency word or a money verb. A bare number
+     *  next to a service ("5 PAN Card") is a COUNT, not money — "Kal ke
+     *  liye 5 PAN Card banane hain" is a plan, and the count question is
+     *  the follow-up, not a date clarification. */
+    private fun hasExplicitMoney(q: String): Boolean {
+        if (q.contains("entry")) return true
+        val moneyVerb = q.contains("hue") || q.contains("hua") || q.contains("mile") ||
+            q.contains("mila") || q.contains("aaye") || q.contains("aaya") ||
+            q.contains("diye") || q.contains("diya") || q.contains("kharch") ||
+            q.contains("expense") || q.contains("agent") || q.contains("transfer") ||
+            q.contains("due") || q.contains("udhaar") || q.contains("udhar") ||
+            q.contains("jama") || q.contains("refund") || q.contains("payment") ||
+            q.contains("add kar") || q.contains("save kar")
+        if (moneyVerb) return true
+        return q.contains("rupaye") || q.contains("rupee") || q.contains("rupay") ||
+            q.contains("cash") || q.contains("upi") || q.contains("taka") ||
+            q.contains("₹") || Regex("\\brs\\b").containsMatchIn(q)
+    }
+
     private fun hasMoneySignal(q: String): Boolean {
         if (q.contains("entry")) return true
         val moneyVerb = q.contains("hue") || q.contains("hua") || q.contains("mile") ||
@@ -165,20 +220,74 @@ object MeaningParser {
     private fun hasBusinessVocab(q: String): Boolean =
         businessVocab.any { q.contains(it) }
 
+    // UPDATE 20 — everyday Hinglish / English / Roman-regional words.
+    // A message with none of these is gibberish, not a statement.
+    private val commonWords = listOf(
+        "aaj", "kal", "parso", "abhi", "phir", "bhi", "nahi", "haan",
+        "theek", "achha", "accha", "bura", "bore", "thak", "khush", "dukaan",
+        "shop", "bhai", "mera", "meri", "mere", "mujhe", "tum", "aap", "ye",
+        "wo", "woh", "kya", "kitna", "kitne", "kitni", "bahut", "kaam", "tha",
+        "hai", "ho", "raha", "rahe", "rahi", "gaya", "gayi", "hua", "hoga",
+        "kar", "karo", "karna", "batao", "bolo", "suno", "dekho", "chahiye",
+        "din", "raat", "subah", "shaam", "paisa", "rupaye", "list", "plan",
+        "help", "madad", "joke", "thanks", "shukriya", "bye", "namaste",
+        "hello", "hi", "good", "morning", "evening", "night", "today",
+        "yesterday", "tomorrow", "tired", "happy", "sad", "busy", "done",
+        "work", "day", "very", "much", "not", "yes", "no", "please", "my",
+        "your", "this", "that", "it", "we", "you", "he", "she", "they",
+        "and", "or", "but", "so", "then", "now", "here", "there", "when",
+        "where", "why", "how", "what", "who", "which", "is", "am", "are",
+        "was", "were", "have", "has", "do", "does", "did", "can", "will",
+        "would", "should", "go", "come", "give", "take", "make", "see",
+        "know", "think", "want", "need", "like", "love", "feel", "feeling",
+        "boring", "mood", "kharab", "sahi", "galat", "alag", "naya",
+        "purana", "bada", "chhota", "zyada", "kam", "sab", "kuch", "koi",
+        "kisi", "kis", "kaun", "kab", "kahan", "kaise", "kyun", "aur", "ya",
+        "lekin", "kyunki", "isliye", "kabhi", "hamesha", "aksar", "shayad",
+        "zaroor", "bilkul", "sach", "baat", "cheez", "dhandha", "business",
+        "customer", "grahak", "agent", "service", "xerox", "print", "pan",
+        "aadhaar", "voter", "ayushman", "card", "mobile", "number", "cash",
+        "upi", "bank", "account", "khata", "hisab", "report", "summary",
+        "checklist", "hafta", "mahina", "saal", "khup", "hota", "mala", "mi",
+        "inniku", "romba", "velai", "enna", "nenu", "eeroju", "pani",
+        "khub", "kaaj", "ami", "aaje", "mane", "tame", "ajj", "kamm",
+        "mainu", "innu", "valare", "tumba", "kelasa"
+    )
+    // Whole-token match: substring matching would let "gibbet" match
+    // "it" and "blorp" match "or".
+    private fun hasCommonWord(q: String): Boolean =
+        q.split(Regex("\\s+")).any { it in commonWords }
+
     /** Future-infinitive plan verbs ("banane hai", "karna hai", …) —
      *  a statement about what the user WILL do, not a transaction. */
     private val planVerbs = listOf(
         "banane hai", "banana hai", "banani hai", "banane hain",
         "karna hai", "karne hai", "karni hai", "karna hain",
         "jaana hai", "jana hai", "jaane hai", "kholna hai",
-        "lena hai", "dena hai", "seekhna hai", "shuru karna hai"
+        "lena hai", "dena hai", "seekhna hai", "shuru karna hai",
+        // UPDATE 20 — English future plans ("I have to make PAN cards
+        // tomorrow"). The money-signal guard still blocks financial
+        // instructions ("I will make a payment").
+        "have to make", "have to do", "will make", "will do",
+        "going to make", "going to do", "need to make",
+        "need to do", "plan to make", "plan to do"
     )
 
     private fun isPlan(q: String): Boolean =
         planVerbs.any { q.contains(it) } &&
-            !hasMoneySignal(q) &&
+            // A bare number + service is a COUNT, not money (see
+            // hasExplicitMoney) — "Kal ke liye 5 PAN Card banane hain"
+            // is a plan, not a financial action.
+            !hasExplicitMoney(q) &&
             // "dena hai" / "lena hai" are dues, not plans.
-            !q.contains("due") && !q.contains("baki") && !q.contains("udhaar")
+            !q.contains("due") && !q.contains("baki") && !q.contains("udhaar") &&
+            // A QUESTION about how much is owed ("Ramesh ko kitna dena
+            // hai?") is a due question, not a plan — only a statement
+            // of intent ("Kal PAN Card banane hai") is a plan.
+            !((q.contains("dena hai") || q.contains("lena hai")) &&
+                (q.contains("kitna") || q.contains("kitne") || q.contains("kitni") ||
+                    q.contains("kya") || q.contains("kaun") || q.contains("kab") ||
+                    q.trim().endsWith("?")))
 
     /** "Kal mujhe kya kya kaam karna chahiye?" — a question about
      *  tomorrow's work, not a date to clarify and not an entry. */
@@ -211,17 +320,38 @@ object MeaningParser {
             )
         }
 
-        // 2. Navigation — executed by the ViewModel, not described.
-        if (AiNavigation.routeFor(rawText) != null) {
-            return Meaning(ConversationIntent.NAVIGATION, "navigation", null, null, null, rawText, q, lang)
+        // 1b. App-change request (UPDATE 22) — "module bana do",
+        //     "naya service add karo", "create a report" … — recognised
+        //     BEFORE navigation (website classifyIntent step 1b beats
+        //     2d): "Modify the Cash Book to show weekly totals" is a
+        //     change request, not "open Cash Book". Also before the
+        //     summary and business paths: it is a request to change
+        //     BizKhata itself, never a ledger action and never a
+        //     portal deflection.
+        appChangeSpecFor(q, rawText)?.let { spec ->
+            return Meaning(
+                ConversationIntent.APP_CHANGE, spec.title.lowercase(), timeRef, service, null,
+                rawText, q, lang, appChangeSpec = spec
+            )
         }
+
+        // 2b. UPDATE 21 — follow-ups resolve against the previous turn
+        //     FIRST, before any fresh classification: a bare number
+        //     answers the pending count question, a bare yes/no
+        //     accepts/declines the pending offer, an edit or a
+        //     re-show targets the active checklist, and a "Haan,
+        //     banao" confirms a pending app-change spec. Without this
+        //     step a follow-up falls through to a fixed "not
+        //     understood" — the UPDATE 21 complaint.
+        resolveFollowUp(rawText, q, context, lang, timeRef)?.let { return it }
 
         // 3. Checklist — "Kal ke kaam ki checklist banao". The topic
         //    prefers an explicit service, then the remembered plan
         //    ("kal PAN Card banane hai" → PAN checklist), then the words.
-        if (isChecklistRequest(q)) {
+        if (isChecklistRequest(q, context)) {
             val topic = service?.name?.lowercase()
                 ?: context.lastPlanTopic
+                ?: context.pendingChecklistOffer?.topic
                 ?: detectTopic(q, context)
                 ?: "work"
             return Meaning(ConversationIntent.CHECKLIST, topic, timeRef, service, null, rawText, q, lang)
@@ -232,12 +362,18 @@ object MeaningParser {
             return Meaning(ConversationIntent.DO_IT_SUMMARY, "summary", timeRef, service, null, rawText, q, lang)
         }
 
-        // 5. Tomorrow's-work question.
+        // 5. Navigation — executed by the ViewModel, not described
+        //    (website step 2d, AFTER the do-commands and follow-ups).
+        if (AiNavigation.routeFor(rawText) != null) {
+            return Meaning(ConversationIntent.NAVIGATION, "navigation", null, null, null, rawText, q, lang)
+        }
+
+        // 6. Tomorrow's-work question.
         if (isTomorrowPlanQuestion(q)) {
             return Meaning(ConversationIntent.QUESTION_GENERAL, "tomorrow_plan", "tomorrow", null, null, rawText, q, lang)
         }
 
-        // 6. PLAN — future infinitive, no money signal. This beats the
+        // 7. PLAN — future infinitive, no money signal. This beats the
         //    "kal" date rule and every money branch: a plan is never a
         //    transaction, and must never be answered with a money question.
         if (isPlan(q)) {
@@ -262,6 +398,55 @@ object MeaningParser {
             return Meaning(ConversationIntent.APP_HELP, detectTopic(q, context), null, null, null, rawText, q, lang)
         }
 
+        // 9b. UPDATE 20 video case 1 — "Mene jo dukan se dhandha kara
+        //     use ye website me kha likhu bataoge?" (where do I write
+        //     the day's business?). This is a WHERE-TO-WRITE question,
+        //     not a figures question: it must reach the Daily Business
+        //     guidance + deep link, never the daily-summary figures.
+        //     Checked BEFORE the business-question step, which would
+        //     otherwise answer it with today's totals.
+        if (isDailyWriteHelp(q)) {
+            return Meaning(ConversationIntent.APP_HELP, "daily_report", null, null, null, rawText, q, lang)
+        }
+
+        // 10b. UPDATE 21 — "Documents bhi batao" inside a countable
+        //      service discussion: that service's documents, from the
+        //      remembered topic (plan / offer / active checklist), not
+        //      a generic "I could not understand". Checked before the
+        //      business question, which has no documents answer.
+        val documentsTopic = documentsTopic(context)
+        if (q.contains("document") && documentsTopic != null) {
+            return Meaning(ConversationIntent.QUESTION_GENERAL, "${documentsTopic}_documents", timeRef, service, null, rawText, q, lang)
+        }
+
+        // 10a. UPDATE 20 (final directive) — an external action the
+        //      in-app AI cannot perform (UIDAI / portal). Honest
+        //      limitation, never fake success, never a bare deflection.
+        //      Moved BEFORE the business question and the explainer
+        //      check: a UIDAI/portal request is an honest limitation,
+        //      never an explainer and never a figures question.
+        val externalLimit = externalLimitTopic(q)
+        if (externalLimit != null) {
+            return Meaning(ConversationIntent.QUESTION_GENERAL, externalLimit, timeRef, service, null, rawText, q, lang)
+        }
+
+        // 10b. UPDATE 20 — explainer questions ("PAN Card kya hai?",
+        //      "Aadhaar mein kya update ho sakta hai?") are GENERAL
+        //      questions, not business-data questions: the
+        //      business-question rule (question word + business word)
+        //      would otherwise swallow them and answer with an honest
+        //      "samajh nahi paya". Checked BEFORE the business
+        //      question. Explainer topics need an explainer marker, so
+        //      a count question ("Kitne PAN Card banaye aaj?") still
+        //      reaches the ledgers; troubleshoot / calculation /
+        //      translation / writing / live-info topics need no marker
+        //      — they never collide with a figures question.
+        val earlyGeneral = generalTopic(q, lowerRaw)
+        if (earlyGeneral != null && (earlyGeneral !in EXPLAINER_TOPICS ||
+                EXPLAINER_MARKERS.any { q.contains(it) })) {
+            return Meaning(ConversationIntent.QUESTION_GENERAL, earlyGeneral, timeRef, service, null, rawText, q, lang)
+        }
+
         // 10. Business-data question — figures from the ledgers.
         if (isBusinessQuestion(q)) {
             return Meaning(ConversationIntent.BUSINESS_QUERY, detectTopic(q, context), timeRef, service, null, rawText, q, lang)
@@ -276,7 +461,11 @@ object MeaningParser {
         // 12. Statement — declarative, no business vocabulary, no
         //     question mark: "Aaj bahut kaam tha." A statement is
         //     acknowledged, never turned into a question about money.
-        if (!q.trim().endsWith("?") && !hasBusinessVocab(q)) {
+        //     UPDATE 20: a message with NO recognisable word at all
+        //     ("Xyzqwv blorp") is not a statement to acknowledge — it
+        //     is unknown, and gets the honest limitation, never a fake
+        //     "Theek hai, sun liya".
+        if (!q.trim().endsWith("?") && !hasBusinessVocab(q) && hasCommonWord(q)) {
             val topic = detectTopic(q, context) ?: statementTopic(q)
             return Meaning(ConversationIntent.STATEMENT, topic, timeRef, null, null, rawText, q, lang)
         }
@@ -309,7 +498,12 @@ object MeaningParser {
         "santali" to AiLanguage.SANTALI
     )
 
-    /** "… mein samjhao / bolo / baat karo" + a language name. */
+    /** "… mein samjhao / bolo / baat karo" + a language name.
+     *  UPDATE 21 likho-gate: "Aur English mein likho" IS a language
+     *  request — but ONLY when the language name is directly followed
+     *  by "mein likho" and the message is short. "English mein
+     *  message likh do" is a WRITING request, not a switch, and must
+     *  NOT land here. */
     fun languageRequest(rawText: String, lowerRaw: String): AiLanguage? {
         val asksLanguage = lowerRaw.contains("samjhao") || lowerRaw.contains("samjhaao") ||
             lowerRaw.contains("bolo") || lowerRaw.contains("baat karo") ||
@@ -318,20 +512,230 @@ object MeaningParser {
             lowerRaw.contains("talk") || rawText.contains("વાત કરો") ||
             rawText.contains("માં વાત") || rawText.contains("समझाओ") ||
             rawText.contains("बोलो")
-        if (!asksLanguage) return null
+        if (!asksLanguage) {
+            val words = lowerRaw.trim().split(Regex("\\s+"))
+            if (words.size <= 8 && lowerRaw.contains("likho")) {
+                val hit = languageNames.firstOrNull { (name, _) ->
+                    lowerRaw.contains("${name.lowercase()} mein likho") ||
+                        lowerRaw.contains("${name.lowercase()} me likho") ||
+                        rawText.contains("$name में लिखो") || rawText.contains("$name मे लिखो")
+                }
+                if (hit != null) return hit.second
+            }
+            return null
+        }
         return languageNames.firstOrNull { (name, _) ->
             lowerRaw.contains(name.lowercase()) || rawText.contains(name)
         }?.second
     }
 
-    private fun isChecklistRequest(q: String): Boolean =
-        q.contains("checklist") && (q.contains("banao") || q.contains("banado") ||
-            q.contains("bana do") || q.contains("make") || q.contains("bana"))
+    // BUG A (UPDATE 20) — the "bana do" space bug, mirrored from the
+    // website's intent.ts: "banao" / "banado" alone never matched the
+    // space-separated forms ("bana do", "bana de", "bana dena",
+    // "banake do", "bana dijiye", "banakar do"). BANA_FORMS covers
+    // all of them, for checklists and summaries alike.
+    private val banaForms = "(bana\\s*do|bana\\s*de|bana\\s*dena|banake\\s*do|bana\\s*dijiye|banakar\\s*do|banao|banado|banaye|banau|bana\\b|save\\s*karo)"
+    private val checklistRegex = Regex("checklist.*$banaForms|list\\s+$banaForms|kaam\\s*ki\\s*list\\s+$banaForms")
+    private val summaryRegex = Regex("(summary|report|hisab).*($banaForms|dikhao)|$banaForms.*(summary|report|hisab)")
 
-    private fun isDoItSummary(q: String): Boolean =
-        (q.contains("summary") || q.contains("report") || q.contains("hisab")) &&
-            (q.contains("banao") || q.contains("banado") || q.contains("bana do") ||
-                q.contains("generate") || q.contains("dikhao") || q.contains("batao"))
+    private fun isChecklistRequest(q: String, context: AiAssistantParser.AiConversationContext): Boolean {
+        if (checklistRegex.containsMatchIn(q)) return true
+        // Bare "checklist" while an offer is pending = accept it
+        // (website isChecklistRequest is offer-gated the same way).
+        if (q.trim() == "checklist" && context.pendingChecklistOffer != null) return true
+        return false
+    }
+
+    private fun isDoItSummary(q: String): Boolean = summaryRegex.containsMatchIn(q)
+
+    /** The topic a follow-up is about: the pending question / offer /
+     *  active checklist first, then the remembered plan, then "work". */
+    private fun topicForFollowUp(context: AiAssistantParser.AiConversationContext): String =
+        context.pendingQuestion?.topic
+            ?: context.pendingChecklistOffer?.topic
+            ?: context.activeChecklist?.topic
+            ?: context.lastPlanTopic
+            ?: "work"
+
+    /** UPDATE 21 — follow-ups resolve against the previous turn FIRST,
+     *  before any fresh classification. Order matters:
+     *  1. correction ("Nahi, 3 the, 5 nahi") — replaces the stored
+     *     count, against the pending question OR the active checklist;
+     *  2. bare number ("5") answering the pending count question;
+     *  3. "Haan, banao" confirming a pending app-change spec;
+     *  4. bare yes accepting the pending checklist offer;
+     *  5. bare no declining a pending offer / question;
+     *  6. edit ("Isme documents bhi add karo") the active checklist;
+     *  7. re-show ("PAN wali checklist phir dikhao") it.
+     *  A bare "5" / "Ha" with NOTHING pending falls through (null)
+     *  and is classified normally — never forced into a meaning. */
+    private fun resolveFollowUp(
+        rawText: String,
+        q: String,
+        context: AiAssistantParser.AiConversationContext,
+        lang: AiLanguage,
+        timeRef: String?
+    ): Meaning? {
+        val service = AiAssistantParser.detectService(q)
+        // 0. The user asks about the question the bot just asked
+        //    ("Kitne applications hain, ye tumne pucha tha?") — re-ask
+        //    the pending question from context, never a fixed reply.
+        if (context.pendingQuestion != null && listOf(
+                "tumne pucha", "tumne poocha", "tumne kaha", "tumne poochha",
+                "phir se batao", "dobara batao", "repeat karo"
+            ).any { q.contains(it) }) {
+            return Meaning(
+                ConversationIntent.QUESTION_GENERAL, "pending_question", timeRef, service, null,
+                rawText, q, lang
+            )
+        }
+        // 1. Correction — the number next to "the / tha / thi" wins;
+        //    "5 nahi" (a lone rejected number) is NOT a correction.
+        if (context.pendingQuestion?.kind == "count" || context.activeChecklist?.count != null) {
+            AiAssistantParser.correctedCount(q)?.let { corrected ->
+                return Meaning(
+                    ConversationIntent.CHECKLIST, topicForFollowUp(context), timeRef, service, null,
+                    rawText, q, lang, count = corrected, isCorrection = true
+                )
+            }
+        }
+        // 2. Bare number answering the pending count question.
+        if (context.pendingQuestion?.kind == "count") {
+            AiAssistantParser.bareNumber(q)?.let { n ->
+                return Meaning(
+                    ConversationIntent.CHECKLIST, topicForFollowUp(context), timeRef, service, null,
+                    rawText, q, lang, count = n
+                )
+            }
+        }
+        // 3. App-change confirm — "Haan, banao" after the spec.
+        if (context.pendingAppChange != null && AiAssistantParser.isOfferAcceptance(q)) {
+            return Meaning(
+                ConversationIntent.APP_CHANGE, context.pendingAppChange.title.lowercase(), timeRef, service, null,
+                rawText, q, lang, appChangeSpec = context.pendingAppChange, appChangeConfirmed = true
+            )
+        }
+        // 4. Bare yes accepts the pending checklist offer.
+        if (context.pendingChecklistOffer != null && AiAssistantParser.isOfferAcceptance(q)) {
+            return Meaning(
+                ConversationIntent.ACCEPT_OFFER, context.pendingChecklistOffer.topic, timeRef, service, null,
+                rawText, q, lang, count = context.activeChecklist?.count
+            )
+        }
+        // 5. Bare no declines a pending offer / question / app-change spec.
+        if ((context.pendingChecklistOffer != null || context.pendingQuestion != null ||
+                context.pendingAppChange != null) &&
+            AiAssistantParser.isNegative(q)
+        ) {
+            return Meaning(
+                ConversationIntent.OFFER_DECLINED, topicForFollowUp(context), timeRef, service, null,
+                rawText, q, lang, appChangeSpec = context.pendingAppChange
+            )
+        }
+        // 6. Edit the active checklist.
+        if (context.activeChecklist != null) {
+            extractChecklistEditItems(q, context.activeChecklist.topic)?.let { items ->
+                return Meaning(
+                    ConversationIntent.CHECKLIST, context.activeChecklist.topic, timeRef, service, null,
+                    rawText, q, lang, checklistEditItems = items
+                )
+            }
+            // 7. Re-show it.
+            if (q.contains("checklist") &&
+                (q.contains("dikhao") || q.contains("phir") || q.contains("wahi") || q.contains("dobara") || q.contains("batao"))
+            ) {
+                return Meaning(
+                    ConversationIntent.CHECKLIST, context.activeChecklist.topic, timeRef, service, null,
+                    rawText, q, lang, reuseChecklist = true
+                )
+            }
+        }
+        return null
+    }
+
+    /** Items to add to the active checklist, from the user's words.
+     *  "documents" expands to the topic's required documents; a few
+     *  single items are recognised directly. Unknown edit words return
+     *  null so the message is classified normally instead of inventing
+     *  a checklist item. */
+    private fun extractChecklistEditItems(q: String, topic: String): List<String>? {
+        if (!q.contains("add")) return null
+        return when {
+            q.contains("document") -> ChecklistBuilder.documentsFor(topic)
+            q.contains("photo") -> listOf("Passport-size photo lo")
+            q.contains("signature") -> listOf("Signature lo")
+            q.contains("fee") || q.contains("receipt") || q.contains("rasid") -> listOf("Fee lo aur receipt do")
+            q.contains("status") -> listOf("Status check karo")
+            else -> null
+        }
+    }
+
+    /** UPDATE 22 — an app-change request ("module bana do", "naya
+     *  service add karo", "report create karo" …). Checked BEFORE the
+     *  summary and business paths: it is a request to change BizKhata
+     *  itself, never a ledger action and never a portal deflection.
+     *  The spec builder owns the detection order (field before module,
+     *  so "module mein naya field" is a field, not a module). */
+    private fun appChangeSpecFor(q: String, rawText: String): AiAssistantParser.AppChangeRequest? =
+        AppChangeSpecBuilder.specFor(q, rawText)
+
+    /** UPDATE 20 video case 1 — "Mene jo dukan se dhandha kara use
+     *  ye website me kha likhu bataoge?" Where-to-write, not figures:
+     *  "kha/kahan likhu" + a business reference. */
+    private fun isDailyWriteHelp(q: String): Boolean {
+        val writeWords = q.contains("kha likhu") || q.contains("kahan likhu") ||
+            q.contains("kaha likhu") || q.contains("kahan likh") ||
+            q.contains("kha likh") || q.contains("kahan likhun") ||
+            q.contains("kha likhun") || q.contains("where do i write")
+        val businessRef = q.contains("dhandha") || q.contains("business") ||
+            q.contains("dukaan") || q.contains("dukan") || q.contains("shop") ||
+            q.contains("kamai") || q.contains("collection")
+        return writeWords && businessRef
+    }
+
+    // UPDATE 21 — the countable services: a plan for any of them asks
+    // "Kitne applications hain?" and a bare number answers it, and
+    // "Documents bhi batao" lists that service's documents.
+    private val countableTopics = setOf("pan", "aadhaar", "aadhar", "voter", "ayushman")
+
+    /** The countable service the conversation is about (plan / offer /
+     *  active checklist / last topic / pending question), or null. */
+    private fun documentsTopic(context: AiAssistantParser.AiConversationContext): String? {
+        for (topic in listOf(
+            context.lastPlanTopic, context.pendingChecklistOffer?.topic,
+            context.activeChecklist?.topic, context.lastTopic,
+            context.pendingQuestion?.topic
+        )) {
+            if (topic?.lowercase() in countableTopics) {
+                return if (topic.equals("aadhar", ignoreCase = true)) "aadhaar" else topic!!.lowercase()
+            }
+        }
+        return null
+    }
+
+    /** Is the current conversation about PAN (plan / offer / question /
+     *  active checklist)? Guards the "Documents bhi batao" follow-up. */
+    private fun panContext(context: AiAssistantParser.AiConversationContext): Boolean =
+        documentsTopic(context) == "pan"
+
+    /** UPDATE 20 (final directive) — an EXTERNAL action the in-app AI
+     *  cannot perform: "Mujhe UIDAI portal par Aadhaar update kar do",
+     *  "CSC portal par registration kar do". Honest limitation, never
+     *  fake success and never a bare portal deflection. A BizKhata
+     *  module request ("module bana do") is NOT this — it has no
+     *  "uidai"/"portal" and is caught by the app-change step first. */
+    private fun externalLimitTopic(q: String): String? {
+        val external = q.contains("uidai") || q.contains("portal")
+        val action = q.contains("update") || q.contains("submit") || q.contains("register") ||
+            q.contains("registration") || q.contains("kar do") || q.contains("karwa") ||
+            q.contains("kara do") || q.contains("bana do") || q.contains("apply")
+        // An actual Aadhaar submission ("Mera Aadhaar update kar do") is
+        // an external action too — but "Aadhaar update karna hai" (a plan
+        // for tomorrow) is NOT; only the do-it forms match.
+        val aadhaarSubmit = q.contains("aadhaar") &&
+            (q.contains("update kar do") || q.contains("update karo") || q.contains("submit"))
+        return if ((external && action) || aadhaarSubmit) "external_limit" else null
+    }
 
     /** Casual topics, strict: a greeting / feeling / small-talk pattern
      *  with no money signal. "hi" alone at the start, or a whole
@@ -350,11 +754,10 @@ object MeaningParser {
             q.contains("kaisa hai") || q.contains("kaisa chal") ||
             q.contains("kya haal") || q.contains("how are you") ||
             q.contains("su chale chhe") || q.contains("kya chal raha") ||
-            q.contains("aur batao") || q.contains("kya kar rahe ho") ||
-            q.contains("kya kar rahe") || q.contains("tum kaun ho") ||
+            q.contains("aur batao") || q.contains("tum kaun ho") ||
             q.contains("who are you")
         ) return "greeting"
-        if (q.contains("joke") && (q.contains("sunao") || q.contains("batao") || q.contains("tell"))) return "joke"
+        if (q.contains("joke") && (q.contains("sunao") || q.contains("batao") || q.contains("tell") || q.contains("show"))) return "joke"
         if (q.contains("bore") || q.contains("boring") || q.contains("feeling bored")) return "bored"
         if (q.contains("mood kharab") || q.contains("mood achha") || q.contains("mood kharaab") ||
             q.contains("feeling sad") || q.contains("thak gaya") || q.contains("tired") ||
@@ -389,11 +792,26 @@ object MeaningParser {
         val questionWord = q.contains("kitna") || q.contains("kitne") || q.contains("kitni") ||
             q.contains("kis") || q.contains("kaun") || q.contains("kya") || q.contains("kab") ||
             q.contains("compare") || q.contains("batao") || q.contains("dikhao") ||
-            q.contains("summary") || q.contains("performance") || q.contains("sabse zyada") ||
+            q.contains("show") || q.contains("summary") || q.contains("performance") || q.contains("sabse zyada") ||
             q.trim().endsWith("?")
         if (!questionWord) return false
         return hasBusinessVocab(q) || q.contains("dhandha") || q.contains("total")
     }
+
+    // UPDATE 20 step 10b — explainer topics that a question word +
+    // business word would otherwise drag into the business-question
+    // rule, and the markers that prove the user wants an explanation
+    // (not a count from the ledgers).
+    private val EXPLAINER_TOPICS = setOf(
+        "pan_explainer", "aadhaar_explainer", "voter_explainer",
+        "ayushman_explainer", "csc_explainer", "website_build",
+        "business_idea"
+    )
+    private val EXPLAINER_MARKERS = listOf(
+        "kya hai", "ke baare", "samjhao", "kya hota", "matlab",
+        "kaise kaam", "ho sakta", "kya chahiye", "chahiye",
+        "kaise ban", "kaise banta", "kya karte", "kya karna", "badhaye"
+    )
 
     /** General-knowledge topics the local engine can genuinely answer.
      *  Returns null for anything else — the caller must then use the
@@ -405,13 +823,14 @@ object MeaningParser {
         if (q.contains("ayushman")) return "ayushman_explainer"
         if (q.contains("csc") && (q.contains("kya hai") || q.contains("ke baare") || q.contains("centre") || q.contains("center"))) return "csc_explainer"
         if (q.contains("website") && (q.contains("bana") || q.contains("kaise") || q.contains("how"))) return "website_build"
-        if (q.contains("business idea") || q.contains("business ka idea") || q.contains("idea chahiye")) return "business_idea"
+        if (q.contains("business idea") || q.contains("business ka idea") || q.contains("idea chahiye") ||
+            q.contains("kaise badhaye") || q.contains("business grow") || q.contains("grow kare")) return "business_idea"
         if (q.contains("phone") && (q.contains("slow") || q.contains("hang") || q.contains("chal nahi"))) return "troubleshoot_phone"
         if ((q.contains("printer") || q.contains("print")) && (q.contains("nahi") || q.contains("not") || q.contains("kharab"))) return "troubleshoot_printer"
         if (q.contains("internet") && (q.contains("nahi") || q.contains("slow") || q.contains("down") || q.contains("chal nahi"))) return "troubleshoot_internet"
         if (q.contains("upi") && (q.contains("nahi") || q.contains("fail") || q.contains("chal nahi"))) return "troubleshoot_upi"
         if (q.contains("message likh") || q.contains("email likh") || q.contains("caption") || q.contains("likh do")) return "writing"
-        if (q.contains("translate") || q.contains("anuvaad") || q.contains("ka matlab") || q.contains("meaning of")) return "translation"
+        if (q.contains("translate") || q.contains("anuvaad") || q.contains("ka matlab") || q.contains("matlab") || q.contains("meaning of")) return "translation"
         if (isArithmetic(q) || isConversion(q)) return "calculation"
         if (isLiveInfo(q, lowerRaw)) return "live_info"
         // A "what is / explain" question about a named thing.
@@ -435,12 +854,24 @@ object MeaningParser {
 
     private val arithmeticRegex = Regex("(\\d+(?:\\.\\d+)?)\\s*(%\\s*of|plus|minus|guna|multiply|bhag|divide|\\+|-|\\*|x|×|/)\\s*(\\d+(?:\\.\\d+)?)")
     fun isArithmetic(q: String): Boolean = arithmeticRegex.containsMatchIn(q)
-    private val conversionRegex = Regex("(\\d+(?:\\.\\d+)?)\\s*(km|m|cm|inch|kg|g|litre|ml)\\s*(me|mein|in|to)\\s*(m|cm|km|inch|g|kg|ml|litre)")
+    private val conversionRegex = Regex("(\\d+(?:\\.\\d+)?)\\s*(km|m|cm|inch|kg|g|litre|ml)\\s*(me|mein|in|to)\\s*(?:kitne|kitna|kitni)?\\s*(m|cm|km|inch|g|kg|ml|litre)")
     fun isConversion(q: String): Boolean = conversionRegex.containsMatchIn(q)
 
     /** Topic of a message: service, named feature, or a life topic. */
     fun detectTopic(q: String, context: AiAssistantParser.AiConversationContext): String? {
-        AiAssistantParser.detectService(q)?.let { return it.name.lowercase() }
+        AiAssistantParser.detectService(q)?.let {
+            // UPDATE 21 — service codes are not topics: VOTER_ID is
+            // the "voter" topic, or the plan/checklist/documents
+            // lookups miss it.
+            return when (it) {
+                ServiceType.VOTER_ID -> "voter"
+                ServiceType.MONEY_TRANSFER -> "money_transfer"
+                ServiceType.SMART_CARD -> "smart_card"
+                ServiceType.PASSPORT_PHOTO -> "passport_photo"
+                ServiceType.DOCUMENT_WORK -> "document_work"
+                else -> it.name.lowercase()
+            }
+        }
         return when {
             q.contains("website") -> "website"
             q.contains("csc") || q.contains("cyber") -> "csc"
@@ -461,12 +892,313 @@ object MeaningParser {
     }
 }
 
+/** UPDATE 22 — proposed-change specs for app-change requests. The
+ *  spec is what the assistant SHOWS before asking for confirmation;
+ *  it is never a claim that the thing exists. Detection order matters:
+ *  field before module ("module mein naya field" is a field), and the
+ *  Aadhaar Mobile Number Update module has its own full spec.
+ *
+ *  What each kind means on confirm:
+ *  - "service": SUPPORTED NOW — Customization Studio can add a custom
+ *    service immediately. Performed on confirm, verified, never queued.
+ *  - "module" / "feature" / "category" / "field" / "report" /
+ *    "modify": needs code the in-app AI cannot deploy — queued as a
+ *    real saved development request, with the plain statement that
+ *    the AI cannot deploy code and the thing does not exist yet.
+ *  The Aadhaar module is a BizKhata management module: it tracks the
+ *  shop's work and does NOT submit to UIDAI (no official integration).
+ *  The module build itself is CANCELLED by the owner (02:41 IST) —
+ *  only the request behaviour stays. */
+object AppChangeSpecBuilder {
+
+    fun specFor(q: String, rawText: String): AiAssistantParser.AppChangeRequest? {
+        // Aadhaar Mobile Number Update module — the UPDATE 22 case.
+        if (q.contains("aadhaar") && q.contains("mobile") && q.contains("module") &&
+            (q.contains("bana") || q.contains("naya") || q.contains("new") || q.contains("create") || q.contains("chahiye"))
+        ) {
+            return AiAssistantParser.AppChangeRequest("module", "Aadhaar Mobile Number Update", aadhaarMobileSpec)
+        }
+        // Modify an existing thing — the website's two forms: the verb
+        // before the kind word / named area ("Modify the Cash Book to
+        // show weekly totals", "Update the Cash Book"), and the
+        // Hinglish form with the verb after it ("Cash Book module ko
+        // modify karo"). 'app' is NOT a thing here (website):
+        // "Update the app" is a version update, not a modify request.
+        val modifyVerb = Regex("(modify|change|update|badlo)")
+        val kindWord = Regex("(module|service|feature|categor\\w*|report|dashboard)")
+        val areaWord = Regex("(cash book|upi book|daily business|dashboard|receipts?|settings|money transfer|customer khata|agents?|expenses?|services?)")
+        val area = namedArea(q)
+        if (Regex("${modifyVerb.pattern}\\s+(the\\s+)?${kindWord.pattern}\\b").containsMatchIn(q) ||
+            Regex("${modifyVerb.pattern}\\s+(the\\s+)?${areaWord.pattern}\\b").containsMatchIn(q) ||
+            ((q.contains("modify") || q.contains("badlo") || q.contains("badal") || q.contains("change karo")) &&
+                (q.contains("module") || q.contains("service") || q.contains("feature") || q.contains("report")))
+        ) {
+            val thing = if (area != null) titleCase(area) else nameFor(rawText, "module")
+                ?: titleFrom(q, listOf("modify", "badlo", "badal", "change", "karo", "kar", "ko", "mein", "me", "ka", "ki", "mujhe", "please", "ek")) ?: "Module"
+            return AiAssistantParser.AppChangeRequest("modify", thing, modifySpec(thing))
+        }
+        // New field — before module, so "module mein naya field" is a field.
+        if (q.contains("field") && (q.contains("naya") || q.contains("new") || q.contains("add") || q.contains("bana") || q.contains("chahiye") || q.contains("ek aur"))) {
+            val title = nameFor(rawText, "field") ?: "Naya Field"
+            return AiAssistantParser.AppChangeRequest("field", title, fieldSpec(title))
+        }
+        // New service — supported right now, performed on confirm.
+        if ((q.contains("naya service") || q.contains("new service") || q.contains("ek aur service") ||
+            (q.contains("service") && (q.contains("add") || q.contains("bana")))) &&
+            !q.contains("kaise") && !q.contains("how")
+        ) {
+            // The colon form ("Add a new service: Photo, Printing")
+            // keeps the name verbatim — including a comma, so the
+            // name validation in executeServiceAdd can actually fire.
+            val title = titleFromColon(rawText) ?: nameFor(rawText, "service") ?: "Naya Service"
+            return AiAssistantParser.AppChangeRequest("service", title, serviceSpec(title))
+        }
+        // New category.
+        if (q.contains("categor") && (q.contains("naya") || q.contains("nayi") || q.contains("new") || q.contains("bana") || q.contains("add") || q.contains("create") || q.contains("chahiye") || q.contains("ek aur"))) {
+            val title = nameFor(rawText, "category") ?: "Nayi Category"
+            return AiAssistantParser.AppChangeRequest("category", title, categorySpec(title))
+        }
+        // New feature (a dashboard is a feature on the website).
+        if ((q.contains("feature") || q.contains("dashboard")) && (q.contains("naya") || q.contains("new") || q.contains("add") || q.contains("bana") || q.contains("chahiye") || q.contains("ek aur") || q.contains("create"))) {
+            val title = nameFor(rawText, "feature") ?: "Naya Feature"
+            return AiAssistantParser.AppChangeRequest("feature", title, featureSpec(title))
+        }
+        // New report — naya/new/create, "ek aur", or "add a report"
+        // (the website's add-before-kind form). A plain "report bana
+        // do" is a do-it summary (real figures), not a feature request.
+        if (q.contains("report") && (q.contains("naya") || q.contains("new") || q.contains("create") || q.contains("add") || q.contains("ek aur"))) {
+            val title = nameFor(rawText, "report") ?: "Naya Report"
+            return AiAssistantParser.AppChangeRequest("report", title, reportSpec(title))
+        }
+        // New module (generic).
+        if (q.contains("module") && (q.contains("bana") || q.contains("naya") || q.contains("new") || q.contains("create") || q.contains("add") || q.contains("chahiye") || q.contains("ek aur"))) {
+            val title = nameFor(rawText, "module") ?: "Naya Module"
+            return AiAssistantParser.AppChangeRequest("module", title, moduleSpec(title))
+        }
+        return null
+    }
+
+    /** A named app area in the message ("Cash Book", "Daily Business"). */
+    private fun namedArea(q: String): String? {
+        val areas = listOf(
+            "cash book", "upi book", "daily business", "dashboard",
+            "receipts", "settings", "money transfer", "customer khata",
+            "agents", "expenses", "services"
+        )
+        return areas.firstOrNull { q.contains(it) }
+    }
+
+    private val kindLabels = mapOf(
+        "module" to "Module", "service" to "Service", "feature" to "Feature",
+        "category" to "Category", "field" to "Field", "report" to "Report"
+    )
+
+    /** Mirror of website dev-requests.ts stripEdges: drop leading
+     *  action/filler words and trailing filler words, repeatedly. A
+     *  bare filler word left on its own is not a name. */
+    private fun stripEdges(t: String): String {
+        var s = t.trim()
+        val lead = Regex(
+            "^(please\\s+|kripya\\s+|ek\\s+|a\\s+|an\\s+|naya\\s+|new\\s+|add\\s+|create\\s+|bana\\s*do\\s+|banao\\s+|banado\\s+|mere\\s+liye\\s+|mujhe\\s+)+",
+            RegexOption.IGNORE_CASE
+        )
+        val trail = Regex(
+            "\\s+(ka|ki|ke|mein|me|par|ko|naya|new|ek|a|an)$",
+            RegexOption.IGNORE_CASE
+        )
+        while (true) {
+            val next = lead.replace(s, "").trim()
+            if (next == s) break
+            s = next
+        }
+        while (true) {
+            val next = trail.replace(s, "").trim()
+            if (next == s) break
+            s = next
+        }
+        // A leading separator ("— Voter ID Correction") is not part
+        // of a name.
+        s = Regex("^[^A-Za-z0-9\"']+").replace(s, "").trim()
+        if (Regex("^(please|kripya|ek|a|an|naya|new|add|create|mere liye|mujhe)$", RegexOption.IGNORE_CASE).matches(s)) return ""
+        return s
+    }
+
+    private fun titleCase(t: String): String {
+        val acronyms = setOf("id", "pan", "uidai", "upi", "csc", "gst")
+        return t.split(Regex("\\s+")).joinToString(" ") {
+            if (it.lowercase() in acronyms) it.uppercase()
+            else it.replaceFirstChar { c -> c.uppercaseChar() }
+        }
+    }
+
+    /** Mirror of website dev-requests.ts appChangeNameFor: the name of
+     *  the thing being requested. Quoted name first, then 'called X',
+     *  then 'for X', then the text BEFORE the kind word (a location —
+     *  'Cash Book mein …' — is not a name), then the text AFTER it,
+     *  then the whole message when it names nothing else. Null = no
+     *  name found (the caller falls back to "New {Kind}"). */
+    private fun nameFor(rawText: String, kind: String): String? {
+        Regex("[\"']([^\"']+)[\"']").find(rawText)?.let {
+            return titleCase(it.groupValues[1].trim())
+        }
+        Regex("\\bcalled\\s+[\"']?([A-Za-z][\\w\\s]*?)[\"']?\\s*$", RegexOption.IGNORE_CASE)
+            .find(rawText)?.let { return titleCase(it.groupValues[1].trim()) }
+        Regex("\\bfor\\s+([A-Za-z][\\w\\s]*?)\\s*$", RegexOption.IGNORE_CASE)
+            .find(rawText)?.let {
+                val name = Regex(
+                    "\\s+(services?|modules?|features?|categor\\w*|fields?|reports?|work)$",
+                    RegexOption.IGNORE_CASE
+                ).replace(it.groupValues[1].trim(), "").trim()
+                if (name.isNotEmpty()) return titleCase(name)
+            }
+        if (rawText.contains("dashboard", ignoreCase = true)) return "Dashboard"
+        Regex(
+            "\\b(cash book|upi book|daily business|money transfer|customer khata|receipts?|settings|agents?|expenses?)\\b",
+            RegexOption.IGNORE_CASE
+        ).find(rawText)?.let {
+            if (Regex("(modify|change|update|badlo)", RegexOption.IGNORE_CASE).containsMatchIn(rawText)) {
+                return titleCase(it.groupValues[1])
+            }
+        }
+        Regex(
+            "\\b(module|service|feature|categor\\w*|field|report|dashboard)\\b",
+            RegexOption.IGNORE_CASE
+        ).find(rawText)?.let { m ->
+            val rawBefore = rawText.substring(0, m.range.first)
+            val before = stripEdges(rawBefore)
+            // The location guard reads the RAW before-part: stripEdges
+            // drops trailing "mein"/"ek" as filler, so checking the
+            // stripped text would miss "Cash Book mein ek …" entirely
+            // (the website checks the stripped text and returns "Cash
+            // Book" — a location as the name — for exactly that phrase).
+            if (before.isNotEmpty() && !Regex("\\b(mein|me|par|ko)\\b", RegexOption.IGNORE_CASE).containsMatchIn(rawBefore)) {
+                val name = if (Regex("^(monthly|daily|weekly|yearly)$", RegexOption.IGNORE_CASE).matches(before)) {
+                    "${titleCase(before)} ${kindLabels[kind]}"
+                } else before
+                return titleCase(name)
+            }
+            // Strip ALL leading request verbs, repeatedly: a single
+            // replace leaves "karo" behind ("Naya service add karo"
+            // -> after "add karo" -> "karo" -> title "Karo", the
+            // website's own bug — its replace() runs once).
+            val verb = Regex(
+                "^\\s*(bana\\s*do|banao|banado|create|add|called\\s+|kar|karo|do|de|dena|chahiye|naya|new)\\b\\s*",
+                RegexOption.IGNORE_CASE
+            )
+            var after = rawText.substring(m.range.last + 1)
+            var prev: String? = null
+            while (after != prev) {
+                prev = after
+                after = verb.replace(after, "")
+            }
+            after = stripEdges(after)
+            if (after.isNotEmpty()) return titleCase(after)
+        }
+        val whole = stripEdges(rawText)
+        if (whole.isNotEmpty() && !Regex(
+                "\\b(mein|me|par|ko|module|service|feature|categor\\w*|field|report|dashboard|bana|banao|banado|create|add|chahiye|naya|new)\\b",
+                RegexOption.IGNORE_CASE
+            ).containsMatchIn(whole)
+        ) {
+            return titleCase(whole)
+        }
+        return null
+    }
+
+    /** The name of the thing, from the words that are not the request
+     *  verbs / stopwords. "photo printing service add karo" →
+     *  "Photo Printing"; "naya service add karo" → null (generic). */
+    /** The name after a colon ("Add a new service: Photo, Printing" →
+     *  "Photo, Printing") — kept verbatim, commas included, so the name
+     *  validation can fire. Trailing request words are dropped. */
+    private fun titleFromColon(rawText: String): String? {
+        val after = rawText.substringAfter(":", "").trim()
+        if (after.isEmpty()) return null
+        val requestWords = setOf("add", "karo", "kar", "bana", "do", "banao", "chahiye")
+        val words = after.split(Regex("\\s+")).takeWhile { it.lowercase().trimEnd(',', '.') !in requestWords }
+        val acronyms = setOf("id", "pan", "uidai", "upi", "csc", "gst")
+        val cleaned = words.joinToString(" ") { w ->
+            val core = w.trimEnd(',', '.')
+            val titled = if (core.lowercase() in acronyms) core.uppercase()
+                else core.replaceFirstChar { c -> c.uppercaseChar() }
+            titled + w.substring(core.length)
+        }.trim()
+        return cleaned.ifEmpty { null }
+    }
+
+    private fun titleFrom(q: String, stopwords: List<String>): String? {
+        // Articles ("a"/"an"/"the"), "mujhe" (I/me), "please" and "ek"
+        // (one/a) are never part of a title — "Add a new service:
+        // Passport Photo" is "Passport Photo", not "A Passport Photo";
+        // "Mujhe ek naya module chahiye — Voter ID Correction" is
+        // "Voter ID Correction". Known acronyms stay uppercase.
+        val acronyms = setOf("id", "pan", "uidai", "upi", "csc", "gst")
+        val words = q.split(Regex("[^a-z0-9]+")).filter {
+            it.isNotBlank() && it !in stopwords &&
+                it !in setOf("a", "an", "the", "mujhe", "please", "ek")
+        }
+        if (words.isEmpty()) return null
+        return words.joinToString(" ") {
+            if (it in acronyms) it.uppercase() else it.replaceFirstChar { c -> c.uppercaseChar() }
+        }
+    }
+
+    private const val aadhaarMobileSpec =
+        "Module: Aadhaar Mobile Number Update\n" +
+            "Page: Services mein naya page — Aadhaar Mobile Number Update\n" +
+            "Fields: Customer naam; purana mobile number; naya mobile number; application date; service charge; received amount (auto: received + pending); payment mode (Cash/UPI); status (New / Pending / Completed / Delivered / Cancelled); notes; job history\n" +
+            "Kaam: Receipt generate karna; Daily / Monthly / Yearly reports; edit / delete / search\n" +
+            "Integrations: Customer Management; Daily Business; Reports\n" +
+            "Note: Yeh module sirf dukaan ke Aadhaar mobile-update kaam ko track karega — ye UIDAI ko submit nahi karega, koi official integration nahi hai."
+
+    private fun moduleSpec(title: String): String =
+        "Module: $title\n" +
+            "Page: Services mein naya page — $title\n" +
+            "Fields: Customer naam; date; service charge; received amount; payment mode (Cash/UPI); status (New / Pending / Completed / Delivered / Cancelled); notes\n" +
+            "Kaam: Receipt generate karna; edit / delete / search; reports\n" +
+            "Integrations: Customer Management; Daily Business; Reports"
+
+    private fun serviceSpec(title: String): String =
+        "Service: $title\n" +
+            "Yeh service turant add ho jayegi — Customization Studio ke through. Services list aur Daily Business entry mein dikhegi. Koi development nahi chahiye."
+
+    private fun featureSpec(title: String): String =
+        "Feature: $title\n" +
+            "Badlav: App mein naya feature — $title\n" +
+            "Integrations: Dashboard; Reports; Daily Business (jahan zaroori ho)"
+
+    private fun categorySpec(title: String): String =
+        "Category: $title\n" +
+            "Badlav: Business categories mein nayi category — $title\n" +
+            "Integrations: Business profile setup; Services; Reports"
+
+    private fun fieldSpec(title: String): String =
+        "Field: $title\n" +
+            "Badlav: Form mein naya field — $title (naam, type, zaroori hai ya nahi)\n" +
+            "Integrations: Jis module ka form hai; Reports; Receipt"
+
+    private fun reportSpec(title: String): String =
+        "Report: $title\n" +
+            "Badlav: Reports mein naya report — $title (date filter, service-wise / customer-wise totals, PDF + Excel export)\n" +
+            "Integrations: Daily Business; Cash Book; UPI Book; Customer Khata"
+
+    private fun modifySpec(thing: String): String =
+        "Badlav: $thing ko modify karna\n" +
+            "Kya badlega: Is module/feature ke fields, pages ya behaviour mein badlav — detail confirm karne ke baad tay hogi\n" +
+            "Integrations: Wahi modules jinse $thing juda hai"
+}
+
 /** Real checklists, built from the topic — rendered in chat and kept
  *  in the per-profile chat history, so they can be found again.
  *  A checklist is an ACTION (UPDATE 16), not a description of one. */
 object ChecklistBuilder {
 
     fun build(topic: String?, lang: AiLanguage, context: AiAssistantParser.AiConversationContext): List<String> {
+        // UPDATE 21 — English conversion keeps the same content, in
+        // English ("Aur English mein likho" re-renders the active
+        // checklist). Other languages fall back to Hinglish (the same
+        // documented UPDATE 13 limit as the reply tables).
+        if (lang == AiLanguage.ENGLISH) return buildEnglish(topic)
         return when (topic?.lowercase()) {
             "pan" -> listOf(
                 "Customer ka Aadhaar card lo",
@@ -493,7 +1225,23 @@ object ChecklistBuilder {
                 "Update form bharo aur submit karo",
                 "Acknowledgement slip customer ko do"
             )
-            "work", "shop", "csc" -> listOf(
+            "voter", "voter_id" -> listOf(
+                "Age proof lo",
+                "Address proof lo",
+                "Passport-size photo lo",
+                "Voter form bharo aur submit karo",
+                "Acknowledgement number customer ko do",
+                "Status check karo, card aane par deliver karo"
+            )
+            "ayushman" -> listOf(
+                "Aadhaar card lo",
+                "Ration card lo",
+                "Parivaar ki details lo",
+                "Eligibility check karo",
+                "Form bharo aur submit karo",
+                "Card aane par customer ko do"
+            )
+            "work", "shop", "csc", "shop_day" -> listOf(
                 "Pending jobs ki list dekho — kaunsi adhuri hai",
                 "Kal ke customers ko yaad dilao",
                 "Cash closing karo — Cash aur UPI alag-alag",
@@ -508,6 +1256,95 @@ object ChecklistBuilder {
                 "Poora hote hi list se hatao"
             )
         }
+    }
+
+    private fun buildEnglish(topic: String?): List<String> = when (topic?.lowercase()) {
+        "pan" -> listOf(
+            "Take the customer's Aadhaar card",
+            "Take a passport-size photo",
+            "Take the mobile number linked to Aadhaar",
+            "Fill the PAN form — name and date exactly as on Aadhaar",
+            "Take the fee and give a receipt",
+            "Submit the application",
+            "Give the acknowledgement number to the customer",
+            "Check the status, and print and deliver the card when it arrives"
+        )
+        "website" -> listOf(
+            "Decide the website's purpose — for the shop or something else",
+            "List the pages (Home, Services, Contact…)",
+            "Pick the design and colours",
+            "Write the content — services, rates, contact",
+            "Look at free hosting / domain options",
+            "Test it, then publish it"
+        )
+        "aadhaar", "aadhar" -> listOf(
+            "Take the customer's old Aadhaar card",
+            "What needs updating — name, mobile, address or photo?",
+            "Take the correct documents",
+            "Fill and submit the update form",
+            "Give the acknowledgement slip to the customer"
+        )
+        "voter", "voter_id" -> listOf(
+            "Take the age proof",
+            "Take the address proof",
+            "Take a passport-size photo",
+            "Fill and submit the voter form",
+            "Give the acknowledgement number to the customer",
+            "Check the status, and deliver the card when it arrives"
+        )
+        "ayushman" -> listOf(
+            "Take the Aadhaar card",
+            "Take the ration card",
+            "Take the family details",
+            "Check the eligibility",
+            "Fill and submit the form",
+            "Give the card to the customer when it arrives"
+        )
+        "work", "shop", "csc", "shop_day" -> listOf(
+            "Look at the pending jobs list — which ones are unfinished",
+            "Remind tomorrow's customers",
+            "Do the cash closing — Cash and UPI separately",
+            "Check the Money Transfer fund balance",
+            "Check the machine, paper and ink",
+            "Tomorrow morning, finish the pending work first"
+        )
+        else -> listOf(
+            "Make a list of the work",
+            "Write the most important work first",
+            "Finish it one by one",
+            "Remove each item as soon as it is done"
+        )
+    }
+
+    /** The documents a topic needs — used by the "Documents bhi batao"
+     *  follow-up and by checklist edits ("Isme documents bhi add
+     *  karo"). Same items as the explainer, in checklist form. */
+    fun documentsFor(topic: String?): List<String> = when (topic?.lowercase()) {
+        "pan" -> listOf(
+            "Aadhaar card",
+            "Passport-size photo",
+            "Aadhaar se linked mobile number",
+            "Signature"
+        )
+        "aadhaar", "aadhar" -> listOf(
+            "Purana Aadhaar card",
+            "Sahi proof (mobile update ke liye linked number, address ke liye address proof)"
+        )
+        "voter" -> listOf(
+            "Age proof",
+            "Address proof",
+            "Passport-size photo"
+        )
+        "ayushman" -> listOf(
+            "Aadhaar card",
+            "Ration card",
+            "Parivaar ki details"
+        )
+        else -> listOf(
+            "Sahi documents",
+            "Passport-size photo",
+            "Signature"
+        )
     }
 }
 
@@ -863,10 +1700,10 @@ object ConversationReplies {
             AiLanguage.NEPALI to listOf("ko kaam garne ho.")
         ),
         "planOffer" to mapOf(
-            AiLanguage.HINGLISH to listOf("Agar chaho toh main tumhare liye kaam ki checklist bhi bana sakta hoon — bas bol do."),
-            AiLanguage.ENGLISH to listOf("If you like, I can also make a checklist for this work — just say the word."),
-            AiLanguage.HINDI to listOf("अगर चाहो तो मैं तुम्हारे लिए काम की checklist भी बना सकता हूँ — बस बोल दो।"),
-            AiLanguage.GUJARATI to listOf("Jo joie to hu tamara mate kaam ni checklist pan banavi shaku chhu — bas kahi do."),
+            AiLanguage.HINGLISH to listOf("Agar chaho toh main tumhare liye kaam ki checklist bhi bana sakta hoon — bas 'checklist bana do' bolo, ya bas 'haan' bolo."),
+            AiLanguage.ENGLISH to listOf("If you like, I can also make a checklist for this work — just say 'make a checklist', or just say 'yes'."),
+            AiLanguage.HINDI to listOf("अगर चाहो तो मैं तुम्हारे लिए काम की checklist भी बना सकता हूँ — बस 'checklist बना दो' बोलो, या बस 'हाँ' बोलो।"),
+            AiLanguage.GUJARATI to listOf("Jo joie to hu tamara mate kaam ni checklist pan banavi shaku chhu — bas 'checklist banavi do' kaho, ke bas 'haan' kaho."),
             AiLanguage.MARATHI to listOf("Hava asel tar mi tuzyasathi kamachi checklist suddha banavu shakto — bas sang."),
             AiLanguage.BENGALI to listOf("Chaile ami tomar jonno kaajer checklist o baniye dite pari — bas bolo."),
             AiLanguage.PUNJABI to listOf("Je chaho taan main tuhade layi kamm di checklist vi bana sakda haan — bas bol do."),
@@ -991,6 +1828,120 @@ object ConversationReplies {
             AiLanguage.ASSAMESE to listOf("Ei lua, kaamor checklist — eta-eta kori xomponno kora:"),
             AiLanguage.URDU to listOf("Ye lo, kaam ki checklist — ek-ek karke poora karo:"),
             AiLanguage.NEPALI to listOf("Yo liu, kaam ko checklist — ek-ek gardai pura gar:")
+        ),
+        "planOfferPan" to mapOf(
+            AiLanguage.HINGLISH to listOf("Kitne applications hain? Agar chaho toh main tumhare liye kaam ki checklist bhi bana sakta hoon — bas 'checklist bana do' bolo, ya bas 'haan' bolo."),
+            AiLanguage.ENGLISH to listOf("How many applications are there? If you like, I can also make a checklist for this work — just say 'make a checklist', or just say 'yes'."),
+            AiLanguage.HINDI to listOf("कितने applications हैं? अगर चाहो तो मैं तुम्हारे लिए काम की checklist भी बना सकता हूँ — बस 'checklist बना दो' बोलो, या बस 'हाँ' बोलो।"),
+            AiLanguage.GUJARATI to listOf("Ketla applications chhe? Jo joie to hu tamara mate kaam ni checklist pan banavi shaku chhu — bas 'checklist banavi do' kaho, ke bas 'haan' kaho.")
+        ),
+        "planOfferCount" to mapOf(
+            AiLanguage.HINGLISH to listOf("Kitne applications hain? Agar chaho toh main tumhare liye {label} kaam ki checklist bhi bana sakta hoon — bas 'checklist bana do' bolo, ya bas 'haan' bolo."),
+            AiLanguage.ENGLISH to listOf("How many applications are there? If you like, I can also make a checklist for this {label} work — just say 'make a checklist', or just say 'yes'."),
+            AiLanguage.HINDI to listOf("कितने applications हैं? अगर चाहो तो मैं तुम्हारे लिए {label} काम की checklist भी बना सकता हूँ — बस 'checklist बना दो' बोलो, या बस 'हाँ' बोलो।"),
+            AiLanguage.GUJARATI to listOf("Ketla applications chhe? Jo joie to hu tamara mate {label} kaam ni checklist pan banavi shaku chhu — bas 'checklist banavi do' kaho, ke bas 'haan' kaho.")
+        ),
+        "documentsIntro" to mapOf(
+            AiLanguage.HINGLISH to listOf("{label} ke kaam ke liye ye documents chahiye:"),
+            AiLanguage.ENGLISH to listOf("These documents are needed for {label} work:"),
+            AiLanguage.HINDI to listOf("{label} के काम के लिए ये documents चाहिए:"),
+            AiLanguage.GUJARATI to listOf("{label} na kaam mate aa documents joie chhe:")
+        ),
+        "checklistIntroCount" to mapOf(
+            AiLanguage.HINGLISH to listOf("{count} {label} ke liye checklist — ek-ek karke poora karo:"),
+            AiLanguage.ENGLISH to listOf("Checklist for {count} {label} — go through it one by one:"),
+            AiLanguage.HINDI to listOf("{count} {label} के लिए checklist — एक-एक करके पूरा करो:"),
+            AiLanguage.GUJARATI to listOf("{count} {label} mate checklist — ek-ek kari ne poori karo:")
+        ),
+        "checklistCorrected" to mapOf(
+            AiLanguage.HINGLISH to listOf("Theek hai — {new} applications, {old} nahi. Checklist update kar diya hai:"),
+            AiLanguage.ENGLISH to listOf("Okay — {new} applications, not {old}. I have updated the checklist:"),
+            AiLanguage.HINDI to listOf("ठीक है — {new} applications, {old} नहीं। Checklist update कर दिया है:"),
+            AiLanguage.GUJARATI to listOf("Theek chhe — {new} applications, {old} nahi. Checklist update kari didhi chhe:")
+        ),
+        "checklistCorrectedNoOld" to mapOf(
+            AiLanguage.HINGLISH to listOf("Theek hai — {new} applications. Checklist update kar diya hai:"),
+            AiLanguage.ENGLISH to listOf("Okay — {new} applications. I have updated the checklist:"),
+            AiLanguage.HINDI to listOf("ठीक है — {new} applications। Checklist update कर दिया है:"),
+            AiLanguage.GUJARATI to listOf("Theek chhe — {new} applications. Checklist update kari didhi chhe:")
+        ),
+        "checklistEditNote" to mapOf(
+            AiLanguage.HINGLISH to listOf("Add kar diya: {items}. Update hui checklist:"),
+            AiLanguage.ENGLISH to listOf("Added: {items}. Here is the updated checklist:"),
+            AiLanguage.HINDI to listOf("Add कर दिया: {items}। Update हुई checklist:"),
+            AiLanguage.GUJARATI to listOf("Add kari didhu: {items}. Update thayeli checklist:")
+        ),
+        "checklistReuse" to mapOf(
+            AiLanguage.HINGLISH to listOf("Ye rahi wahi checklist:"),
+            AiLanguage.ENGLISH to listOf("Here is the same checklist:"),
+            AiLanguage.HINDI to listOf("ये रही वही checklist:"),
+            AiLanguage.GUJARATI to listOf("Aa rahi te j checklist:")
+        ),
+        "checklistSavedTail" to mapOf(
+            AiLanguage.HINGLISH to listOf("Maine ise save kar diya hai — chat se phir khol sakte ho. Koi kaam ho jaye to batao, main tick kar dunga."),
+            AiLanguage.ENGLISH to listOf("I have saved it — you can open it again from the chat. Tell me when a task is done and I will tick it off."),
+            AiLanguage.HINDI to listOf("मैंने इसे save कर दिया है — chat से फिर खोल सकते हो। कोई काम हो जाए तो बताओ, मैं tick कर दूँगा।"),
+            AiLanguage.GUJARATI to listOf("Me aa save kari didhi chhe — chat thi phari kholi shaksho. Kai kaam thai jaye to kaho, hu tick kari daish.")
+        ),
+        "offerDeclined" to mapOf(
+            AiLanguage.HINGLISH to listOf("Theek hai, koi baat nahi — jab chahiye ho to bata dena."),
+            AiLanguage.ENGLISH to listOf("Okay, no problem — tell me whenever you need it."),
+            AiLanguage.HINDI to listOf("ठीक है, कोई बात नहीं — जब चाहिए हो तो बता देना।"),
+            AiLanguage.GUJARATI to listOf("Theek chhe, kai vandho nahi — jyare joie tyare kahi do.")
+        ),
+        "appChangeDeclined" to mapOf(
+            AiLanguage.HINGLISH to listOf("Theek hai — {title} ka change request cancel kar diya hai, kuch save nahi hua."),
+            AiLanguage.ENGLISH to listOf("Okay — the change request for {title} is cancelled, nothing was saved."),
+            AiLanguage.HINDI to listOf("ठीक है — {title} का change request cancel कर दिया है, कुछ save नहीं हुआ।"),
+            AiLanguage.GUJARATI to listOf("Theek chhe — {title} no change request cancel kari didho chhe, kashu save nathi thayu.")
+        ),
+        "honestBareYes" to mapOf(
+            AiLanguage.HINGLISH to listOf("Theek hai! Batao kis liye haan — koi entry save karni hai, checklist banana hai, ya kuch aur help chahiye?"),
+            AiLanguage.ENGLISH to listOf("Okay! Tell me what you are saying yes to — do you want to save an entry, make a checklist, or need some other help?"),
+            AiLanguage.HINDI to listOf("ठीक है! बताओ किस लिए हाँ — कोई entry save करनी है, checklist बनानी है, या कुछ और help चाहिए?"),
+            AiLanguage.GUJARATI to listOf("Theek chhe! Kaho shu mate haan — kai entry save karvi chhe, checklist banavvi chhe, ke biji kai madad joie chhe?")
+        ),
+        "pendingQuestionReask" to mapOf(
+            AiLanguage.HINGLISH to listOf("Haan, maine ye pucha tha: {detail} — batao, main aage badhta hoon."),
+            AiLanguage.ENGLISH to listOf("Yes, I asked this: {detail} — tell me and I will go ahead."),
+            AiLanguage.HINDI to listOf("हाँ, मैंने ये पूछा था: {detail} — बताओ, मैं आगे बढ़ता हूँ।"),
+            AiLanguage.GUJARATI to listOf("Haan, me aa puchyu hatu: {detail} — kaho, hu aagad vadhu chhu.")
+        ),
+        "panDocumentsIntro" to mapOf(
+            AiLanguage.HINGLISH to listOf("PAN Card ke kaam ke liye ye documents chahiye:"),
+            AiLanguage.ENGLISH to listOf("These documents are needed for PAN Card work:"),
+            AiLanguage.HINDI to listOf("PAN Card के काम के लिए ये documents चाहिए:"),
+            AiLanguage.GUJARATI to listOf("PAN Card na kaam mate aa documents joie chhe:")
+        ),
+        "appChangeIntro" to mapOf(
+            AiLanguage.HINGLISH to listOf("Theek hai — maine tumhari request samajh li. Proposed change:"),
+            AiLanguage.ENGLISH to listOf("Okay — I understood your request. Proposed change:"),
+            AiLanguage.HINDI to listOf("ठीक है — मैंने तुम्हारी request समझ ली। Proposed change:"),
+            AiLanguage.GUJARATI to listOf("Theek chhe — hu tamari request samji gayo. Proposed change:")
+        ),
+        "appChangeCannotDeploy" to mapOf(
+            AiLanguage.HINGLISH to listOf("Ek baat saaf kar dun: in-app AI code deploy nahi kar sakta — yeh {title} abhi exist nahi karta."),
+            AiLanguage.ENGLISH to listOf("To be clear: the in-app AI cannot deploy code — this {title} does not exist yet."),
+            AiLanguage.HINDI to listOf("एक बात साफ़ कर दूँ: in-app AI code deploy नहीं कर सकता — ये {title} अभी exist नहीं करता।"),
+            AiLanguage.GUJARATI to listOf("Ek vaat saaf kari daun: in-app AI code deploy nahi kari shaktu — aa {title} hamana exist nathi kartu.")
+        ),
+        "appChangeConfirmAsk" to mapOf(
+            AiLanguage.HINGLISH to listOf("Confirm karo — 'Haan, banao' bolo to main ise development request ke roop mein save kar dunga."),
+            AiLanguage.ENGLISH to listOf("Confirm — say 'Yes, make it' and I will save this as a development request."),
+            AiLanguage.HINDI to listOf("Confirm करो — 'हाँ, बनाओ' बोलो तो मैं इसे development request के रूप में save कर दूँगा।"),
+            AiLanguage.GUJARATI to listOf("Confirm karo — 'Haan, banavo' kaho to hu aa ne development request tarike save kari daish.")
+        ),
+        "appChangeServiceAsk" to mapOf(
+            AiLanguage.HINGLISH to listOf("Confirm karo — 'Haan, add karo' bolo to main abhi add kar dunga."),
+            AiLanguage.ENGLISH to listOf("Confirm — say 'Yes, add it' and I will add it right now."),
+            AiLanguage.HINDI to listOf("Confirm करो — 'हाँ, add करो' बोलो तो मैं अभी add कर दूँगा।"),
+            AiLanguage.GUJARATI to listOf("Confirm karo — 'Haan, add karo' kaho to hu hamana j add kari daish.")
+        ),
+        "appChangeQueued" to mapOf(
+            AiLanguage.HINGLISH to listOf("Development request save kar di hai — queue mein hai.\n• {title} ({kind})\nBaat saaf hai: in-app AI code deploy nahi kar sakta — yeh request development workflow mein gayi hai, module ban ne aur test hone ke baad hi milega. Tab tak yeh exist nahi karta — main use karne ka daava nahi karunga."),
+            AiLanguage.ENGLISH to listOf("Development request saved — it is in the queue.\n• {title} ({kind})\nTo be clear: the in-app AI cannot deploy code — this request has gone to the development workflow, and it will only be available after it is built and tested. Until then it does not exist — I will not claim you can use it."),
+            AiLanguage.HINDI to listOf("Development request save कर दी है — queue में है।\n• {title} ({kind})\nबात साफ़ है: in-app AI code deploy नहीं कर सकता — ये request development workflow में गई है, module बनने और test होने के बाद ही मिलेगा। तब तक ये exist नहीं करता — मैं use करने का दावा नहीं करूँगा।"),
+            AiLanguage.GUJARATI to listOf("Development request save kari didhi chhe — queue ma chhe.\n• {title} ({kind})\nVaat saaf chhe: in-app AI code deploy nahi kari shakto — aa request development workflow ma gai chhe, module banva ane test thaya pachhi j malse. Tya sudhi aa exist nathi kartu — hu vaprva no daavo nahi karish.")
         ),
         "honestLimitation" to mapOf(
             AiLanguage.HINGLISH to listOf("Maaf kijiye — ye main abhi theek se samajh nahi paya. Zara phir se, thoda detail mein batao, main koshish karunga."),
@@ -1126,26 +2077,231 @@ object ConversationEngine {
             ConversationIntent.CASUAL -> composeCasual(meaning, context, seed)
             ConversationIntent.STATEMENT -> composeStatement(meaning, context, seed)
             ConversationIntent.PLAN -> composePlan(meaning, context, seed)
-            ConversationIntent.LANGUAGE_REQUEST -> {
-                val requested = meaning.requestedLanguage ?: AiLanguage.HINGLISH
-                val text = ConversationReplies.get(requested, "languageConfirm")
-                    .replace("{language}", requested.nativeName)
-                LocalReply(text, "language_request")
-            }
-            ConversationIntent.CHECKLIST -> {
-                val items = ChecklistBuilder.build(meaning.topic, lang, context)
+            ConversationIntent.LANGUAGE_REQUEST -> composeLanguageRequest(meaning, context)
+            ConversationIntent.CHECKLIST -> composeChecklist(meaning, context)
+            ConversationIntent.ACCEPT_OFFER -> {
+                // UPDATE 20 (BUG A) — a bare "Ha" / "Bana do" while a
+                // checklist offer is pending EXECUTES it: the real
+                // checklist is built + saved, never a financial confirm.
+                val topic = meaning.topic ?: "work"
+                val items = ChecklistBuilder.build(topic, lang, context)
                 val intro = ConversationReplies.get(lang, "checklistIntro")
-                val text = intro + "\n" + items.mapIndexed { i, item -> "${i + 1}. $item" }.joinToString("\n")
-                LocalReply(text, "checklist", checklist = items)
+                val tail = ConversationReplies.get(lang, "checklistSavedTail")
+                val text = intro + "\n" + numbered(items) + "\n" + tail
+                LocalReply(text, "checklist", checklist = items, checklistTopic = topic, checklistCount = meaning.count)
             }
+            ConversationIntent.OFFER_DECLINED -> {
+                val spec = meaning.appChangeSpec
+                if (spec != null) LocalReply(
+                    ConversationReplies.get(lang, "appChangeDeclined").replace("{title}", spec.title),
+                    "offer_declined"
+                ) else LocalReply(ConversationReplies.get(lang, "offerDeclined"), "offer_declined")
+            }
+            ConversationIntent.DO_IT_SUMMARY -> {
+                // UPDATE 20 — the do-it summary was classified but never
+                // handled (it fell through to factual/unknown). The
+                // ViewModel answers it from the real ledgers.
+                LocalReply("", "summary")
+            }
+            ConversationIntent.APP_CHANGE -> composeAppChange(meaning, context)
             ConversationIntent.QUESTION_GENERAL -> {
-                if (meaning.topic == "tomorrow_plan") {
-                    return LocalReply(tomorrowPlanGeneric(lang), "tomorrow_plan")
+                when (meaning.topic) {
+                    "tomorrow_plan" -> LocalReply(tomorrowPlanGeneric(lang), "tomorrow_plan")
+                    "pan_documents" -> {
+                        val items = ChecklistBuilder.documentsFor("pan")
+                        val intro = ConversationReplies.get(lang, "panDocumentsIntro")
+                        LocalReply(intro + "\n" + numbered(items), "pan_documents")
+                    }
+                    "aadhaar_documents", "voter_documents", "ayushman_documents" -> {
+                        val topic = meaning.topic!!.removeSuffix("_documents")
+                        val items = ChecklistBuilder.documentsFor(topic)
+                        val intro = ConversationReplies.get(lang, "documentsIntro")
+                            .replace("{label}", topicLabel(topic, lang))
+                        LocalReply(intro + "\n" + numbered(items), meaning.topic!!)
+                    }
+                    "external_limit" -> LocalReply(externalLimitText(meaning, lang), "external_limit")
+                    "pending_question" -> {
+                        // UPDATE 21 — the user asks about the question
+                        // the bot just asked: re-ask it from the stored
+                        // pending question, never a fixed reply.
+                        val detail = context.pendingQuestion?.detail ?: "Kitne kaam hain?"
+                        LocalReply(
+                            ConversationReplies.get(lang, "pendingQuestionReask").replace("{detail}", detail),
+                            "pending_question"
+                        )
+                    }
+                    else -> {
+                        val answer = generalAnswer(meaning, context)
+                        if (answer != null) LocalReply(answer, "general") else LocalReply("", "general", needsCloud = true)
+                    }
                 }
-                val answer = generalAnswer(meaning, context)
-                if (answer != null) LocalReply(answer, "general") else LocalReply("", "general", needsCloud = true)
             }
             else -> LocalReply("", "unknown", needsCloud = true)
+        }
+    }
+
+    private fun numbered(items: List<String>): String =
+        items.mapIndexed { i, item -> "${i + 1}. $item" }.joinToString("\n")
+
+    /** UPDATE 21 — checklist follow-ups: re-show the stored list,
+     *  edit it (stored + new items), answer with a count, or
+     *  acknowledge a correction. The active checklist is the single
+     *  source of truth — follow-ups never rebuild it from scratch. */
+    private fun composeChecklist(
+        meaning: Meaning,
+        context: AiAssistantParser.AiConversationContext
+    ): LocalReply {
+        val lang = meaning.language
+        val topic = meaning.topic ?: "work"
+        val active = context.activeChecklist
+        if (meaning.reuseChecklist && active != null) {
+            val intro = ConversationReplies.get(lang, "checklistReuse")
+            return LocalReply(
+                intro + "\n" + numbered(active.items), "checklist",
+                checklist = active.items, checklistTopic = active.topic, checklistCount = active.count
+            )
+        }
+        if (meaning.checklistEditItems != null && active != null) {
+            val merged = (active.items + meaning.checklistEditItems).distinctBy { it.lowercase().trim() }
+            val note = ConversationReplies.get(lang, "checklistEditNote")
+                .replace("{items}", meaning.checklistEditItems.joinToString(", "))
+            return LocalReply(
+                note + "\n" + numbered(merged), "checklist",
+                checklist = merged, checklistTopic = active.topic, checklistCount = active.count
+            )
+        }
+        val items = ChecklistBuilder.build(topic, lang, context)
+        if (meaning.isCorrection && meaning.count != null) {
+            val old = active?.count
+            val intro = if (old != null && old != meaning.count) {
+                ConversationReplies.get(lang, "checklistCorrected")
+                    .replace("{new}", meaning.count.toString()).replace("{old}", old.toString())
+            } else {
+                ConversationReplies.get(lang, "checklistCorrectedNoOld")
+                    .replace("{new}", meaning.count.toString())
+            }
+            return LocalReply(
+                intro + "\n" + numbered(items), "checklist",
+                checklist = items, checklistTopic = topic, checklistCount = meaning.count
+            )
+        }
+        if (meaning.count != null) {
+            val label = topicLabel(topic, lang)
+            val intro = ConversationReplies.get(lang, "checklistIntroCount")
+                .replace("{count}", meaning.count.toString()).replace("{label}", label)
+            return LocalReply(
+                intro + "\n" + numbered(items), "checklist",
+                checklist = items, checklistTopic = topic, checklistCount = meaning.count
+            )
+        }
+        val intro = ConversationReplies.get(lang, "checklistIntro")
+        return LocalReply(
+            intro + "\n" + numbered(items), "checklist",
+            checklist = items, checklistTopic = topic
+        )
+    }
+
+    /** UPDATE 21 — "Aur English mein likho" with an active checklist
+     *  converts the CHECKLIST (content preserved), not just the
+     *  language. Without an active checklist it is a plain switch. */
+    private fun composeLanguageRequest(
+        meaning: Meaning,
+        context: AiAssistantParser.AiConversationContext
+    ): LocalReply {
+        val requested = meaning.requestedLanguage ?: AiLanguage.HINGLISH
+        val active = context.activeChecklist
+        if (active != null) {
+            // Website checklist_translate (conversation.ts): the reply
+            // is ONLY the converted checklist — no language-switch
+            // claim. The conversation itself does NOT switch language
+            // (the next reply stays Hinglish); claiming "From now on I
+            // will talk to you in English" was wrong, so the
+            // languageConfirm sentence is dropped here.
+            val items = ChecklistBuilder.build(active.topic, requested, context)
+            val intro = ConversationReplies.get(requested, "checklistReuse")
+            return LocalReply(
+                "$intro\n" + numbered(items), "checklist",
+                checklist = items, checklistTopic = active.topic, checklistCount = active.count
+            )
+        }
+        val text = ConversationReplies.get(requested, "languageConfirm")
+            .replace("{language}", requested.nativeName)
+        return LocalReply(text, "language_request")
+    }
+
+    /** UPDATE 22 — app-change spec / confirm. Unconfirmed: show the
+     *  proposed change + the plain cannot-deploy statement (except a
+     *  service, which is supported now) + ask for confirmation.
+     *  Confirmed: a service goes to the ViewModel for immediate
+     *  execution; anything else is a QUEUED development request —
+     *  never a claim that the thing exists. */
+    private fun composeAppChange(
+        meaning: Meaning,
+        context: AiAssistantParser.AiConversationContext
+    ): LocalReply {
+        val lang = meaning.language
+        val spec = meaning.appChangeSpec ?: return LocalReply("", "unknown", needsCloud = true)
+        if (meaning.appChangeConfirmed) {
+            if (spec.kind == "service") {
+                return LocalReply("", "app_change_service", appChangeSpec = spec, appChangeConfirmed = true)
+            }
+            val text = ConversationReplies.get(lang, "appChangeQueued")
+                .replace("{title}", spec.title).replace("{kind}", spec.kind)
+            return LocalReply(text, "app_change_queued", appChangeSpec = spec, appChangeConfirmed = true)
+        }
+        val intro = ConversationReplies.get(lang, "appChangeIntro")
+        // A service request with no name cannot be performed: ask for
+        // the name instead of queuing a service called "Naya Service".
+        if (spec.kind == "service" && spec.title == "Naya Service") {
+            val askName = when (lang) {
+                AiLanguage.ENGLISH -> "Which service should I add? Tell me the name — for example, 'Add a Photo Printing service'."
+                AiLanguage.HINDI -> "कौनसी service add करनी है? नाम बताओ — जैसे 'Photo Printing service add karo'।"
+                AiLanguage.GUJARATI -> "Kai service add karvi chhe? Naam kaho — jaise 'Photo Printing service add karo'."
+                else -> "Kaunsi service add karni hai? Naam batao — jaise 'Photo Printing service add karo'."
+            }
+            return LocalReply(askName, "app_change_spec", appChangeSpec = spec)
+        }
+        val ask = if (spec.kind == "service") {
+            ConversationReplies.get(lang, "appChangeServiceAsk")
+        } else {
+            ConversationReplies.get(lang, "appChangeCannotDeploy").replace("{title}", spec.title) + "\n" +
+                ConversationReplies.get(lang, "appChangeConfirmAsk")
+        }
+        val text = "$intro\n${spec.detail}\n\n$ask"
+        return LocalReply(text, "app_change_spec", appChangeSpec = spec)
+    }
+
+    /** UPDATE 20 (final directive) — the honest limitation for an
+     *  external action (UIDAI / portal). Names the requested action,
+     *  states plainly that the AI has no access and cannot submit on
+     *  the user's behalf, and offers what BizKhata CAN do. */
+    private fun externalLimitText(meaning: Meaning, lang: AiLanguage): String {
+        val q = meaning.canonicalText
+        val action = when {
+            q.contains("uidai") && q.contains("aadhaar") -> when (lang) {
+                AiLanguage.ENGLISH -> "update Aadhaar on the UIDAI portal"
+                AiLanguage.HINDI -> "UIDAI portal पर Aadhaar update"
+                AiLanguage.GUJARATI -> "UIDAI portal par Aadhaar update"
+                else -> "UIDAI portal par Aadhaar update"
+            }
+            q.contains("portal") && (q.contains("regist") || q.contains("registration")) -> when (lang) {
+                AiLanguage.ENGLISH -> "register on the portal"
+                AiLanguage.HINDI -> "portal पर registration"
+                AiLanguage.GUJARATI -> "portal par registration"
+                else -> "portal par registration"
+            }
+            else -> when (lang) {
+                AiLanguage.ENGLISH -> "do this work on the portal"
+                AiLanguage.HINDI -> "ये काम portal पर"
+                AiLanguage.GUJARATI -> "aa kaam portal par"
+                else -> "ye kaam portal par"
+            }
+        }
+        return when (lang) {
+            AiLanguage.ENGLISH -> "I cannot $action — I have no access to UIDAI or any government portal, and I cannot submit anything on your behalf. What I can do is track your shop's work in BizKhata — ask me for the module and I will make a spec and save a development request for it."
+            AiLanguage.HINDI -> "मैं $action नहीं कर सकता — मेरे पास UIDAI या किसी government portal का access नहीं है, और मैं तुम्हारे behalf पर submit नहीं कर सकता। जो मैं कर सकता हूँ: तुम्हारे दुकान के काम को BizKhata में track करना — उसके लिए module request करो तो मैं spec बना कर development request save कर दूँगा।"
+            AiLanguage.GUJARATI -> "Hu $action nahi kari shaku — mara paase UIDAI ke kai government portal no access nathi, ane hu tamara behalf par submit nahi kari shaku. Je hu kari shaku chhu: tamara dukaan nu kaam BizKhata ma track karvu — tena mate module request karo to hu spec banavi ne development request save kari daish."
+            else -> "Main $action nahi kar sakta — mere paas UIDAI ya kisi government portal ka access nahi hai, aur main tumhare behalf par submit nahi kar sakta. Jo main kar sakta hoon: tumhare dukaan ke kaam ko BizKhata mein track karna — uske liye module request karo to main spec bana kar development request save kar dunga."
         }
     }
 
@@ -1245,7 +2401,17 @@ object ConversationEngine {
             return LocalReply(text, "plan_website")
         }
         val opener = ConversationReplies.get(lang, "planOpener")
-        val offer = ConversationReplies.get(lang, "planOffer")
+        // UPDATE 21 — a countable-service plan (PAN / Aadhaar / Voter
+        // / Ayushman) asks the count question ("Kitne applications
+        // hain?") and offers the checklist with BOTH options
+        // ("checklist bana do" or just "haan"), mirroring the
+        // website's PLAN_OFFER. Any other plan gets the general offer.
+        val offer = when (meaning.topic) {
+            "pan" -> ConversationReplies.get(lang, "planOfferPan")
+            "aadhaar", "aadhar", "voter", "ayushman" ->
+                ConversationReplies.get(lang, "planOfferCount").replace("{label}", label)
+            else -> ConversationReplies.get(lang, "planOffer")
+        }
         val text = if (meaning.timeRef == "tomorrow") {
             val whenWord = ConversationReplies.get(lang, "tomorrowWord")
             val phrase = ConversationReplies.get(lang, "planPhrase")
@@ -1270,12 +2436,12 @@ object ConversationEngine {
         "website" -> "Website"
         "csc" -> "CSC centre"
         "aadhaar", "aadhar" -> "Aadhaar"
-        "voter" -> "Voter ID"
+        "voter", "voter_id" -> "Voter ID"
         "ayushman" -> "Ayushman Card"
         "xerox" -> "Xerox"
         "printing" -> "Printing"
         "money_transfer" -> "Money Transfer"
-        "work" -> when (lang) {
+        "work", "shop_day" -> when (lang) {
             AiLanguage.ENGLISH -> "work"
             AiLanguage.HINDI -> "काम"
             else -> "kaam"
@@ -1727,6 +2893,107 @@ object ConversationMemory {
                 lastPlanTopic = meaning.topic,
                 lastPlanDayEpoch = LocalDate.now(ZoneOffset.UTC).toEpochDay() + 1
             )
+        }
+        // Offer / question / app-change lifecycle (UPDATE 20/21/22).
+        // The offer lives ONE turn. Consumption intents (CHECKLIST /
+        // ACCEPT_OFFER / OFFER_DECLINED / APP_CHANGE-confirmed) must
+        // NOT clear the pending state here: parse() re-runs understand()
+        // with this updated context, and clearing early would make the
+        // second parse miss (bare "Ha" -> STATEMENT). The ViewModel
+        // clears the pending state at delivery, when the reply is real.
+        when (meaning.intent) {
+            ConversationIntent.PLAN -> {
+                // A plan offers a checklist (except the website plan,
+                // which asks a question instead) and, for PAN, asks the
+                // count question. A new plan replaces any pending
+                // app-change spec.
+                if (meaning.topic != "website") {
+                    ctx = ctx.copy(
+                        pendingChecklistOffer = AiAssistantParser.PendingChecklistOffer(
+                            topic = meaning.topic ?: "work",
+                            whenLabel = if (meaning.timeRef == "tomorrow") "kal" else "aaj"
+                        ),
+                        pendingAppChange = null
+                    )
+                }
+                if (meaning.topic in setOf("pan", "aadhaar", "aadhar", "voter", "ayushman")) {
+                    val topic = if (meaning.topic == "aadhar") "aadhaar" else meaning.topic!!
+                    val label = when (topic) {
+                        "pan" -> "PAN"
+                        "aadhaar" -> "Aadhaar"
+                        "voter" -> "Voter ID"
+                        else -> "Ayushman"
+                    }
+                    ctx = ctx.copy(pendingQuestion = AiAssistantParser.PendingQuestion("count", topic, "Kitne $label applications hain?"))
+                }
+            }
+            ConversationIntent.QUESTION_GENERAL -> {
+                // "Kal mujhe kya kya kaam karna chahiye?" — the
+                // tomorrow-work question offers the shop-day checklist.
+                if (meaning.topic == "tomorrow_plan") {
+                    ctx = ctx.copy(
+                        pendingChecklistOffer = AiAssistantParser.PendingChecklistOffer(topic = "shop_day", whenLabel = "kal"),
+                        pendingAppChange = null
+                    )
+                } else if (meaning.topic in setOf(
+                        "pan_documents", "aadhaar_documents",
+                        "voter_documents", "ayushman_documents",
+                        "pending_question"
+                    )
+                ) {
+                    // A topic follow-up ("Documents bhi batao", a
+                    // re-asked question) keeps the offer AND the
+                    // question — the website's KEEP_OFFER /
+                    // KEEP_QUESTION both include topic_followup.
+                } else {
+                    // Any other general question is a new topic: the
+                    // one-turn offer/question expire (website done():
+                    // only plan / topic_followup / app_change keep
+                    // the offer).
+                    ctx = ctx.copy(
+                        pendingChecklistOffer = null, pendingQuestion = null,
+                        pendingAppChange = null
+                    )
+                }
+            }
+            ConversationIntent.LANGUAGE_REQUEST -> {
+                // A translate (active checklist) keeps the pending
+                // question (website KEEP_QUESTION includes
+                // checklist_translate); the offer itself expires. A
+                // real language switch clears everything.
+                ctx = if (context.activeChecklist != null) {
+                    ctx.copy(pendingChecklistOffer = null, pendingAppChange = null)
+                } else {
+                    ctx.copy(
+                        pendingChecklistOffer = null, pendingQuestion = null,
+                        pendingAppChange = null
+                    )
+                }
+            }
+            ConversationIntent.APP_CHANGE -> {
+                // Unconfirmed: remember the spec for the confirm step.
+                // Confirmed: keep it — the ViewModel clears it after
+                // the queued / performed reply is delivered.
+                if (!meaning.appChangeConfirmed) {
+                    ctx = ctx.copy(
+                        pendingAppChange = meaning.appChangeSpec,
+                        pendingChecklistOffer = null, pendingQuestion = null
+                    )
+                }
+            }
+            ConversationIntent.CHECKLIST, ConversationIntent.ACCEPT_OFFER,
+            ConversationIntent.OFFER_DECLINED -> {
+                // Consumption — keep the offer/question for parse()'s
+                // re-run; the ViewModel clears them at delivery. A
+                // pending app-change spec is a DIFFERENT state and this
+                // message is not its confirm, so it expires.
+                ctx = ctx.copy(pendingAppChange = null)
+            }
+            else -> {
+                // Any other message expires the one-turn offer/question
+                // and any pending app-change spec.
+                ctx = ctx.copy(pendingChecklistOffer = null, pendingQuestion = null, pendingAppChange = null)
+            }
         }
         return ctx
     }

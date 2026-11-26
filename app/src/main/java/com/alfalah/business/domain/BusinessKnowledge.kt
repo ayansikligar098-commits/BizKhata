@@ -260,12 +260,12 @@ object BusinessKnowledge {
         if (isMaintenanceQuestion(q)) return maintenanceAnswer(snap, q, range)
         if (isExpenseQuestion(q)) return expenseAnswer(snap, q, range, service, serviceLabel)
         if (isMoneyTransferQuestion(q)) return moneyTransferAnswer(snap, q, range)
-        if (isCustomerQuestion(q)) return customerAnswer(snap, q, range, today, last)
-        if (isAgentQuestion(q)) return agentAnswer(snap, q, range, last)
+        if (isCustomerQuestion(q, snap)) return customerAnswer(snap, q, range, today, last)
+        if (isAgentQuestion(q, snap)) return agentAnswer(snap, q, range, last)
         if (isServiceQuestion(q)) return serviceAnswer(snap, range, period, service, serviceLabel)
         if (isReceiptQuestion(q)) return receiptAnswer(snap)
         if (isDocumentQuestion(q)) return documentAnswer(snap)
-        if (isCountQuestion(q)) return countAnswer(snap, range, today)
+        if (isCountQuestion(q, service)) return countAnswer(snap, range, today, service, serviceLabel)
         return null
     }
 
@@ -310,12 +310,19 @@ object BusinessKnowledge {
         q.contains("money transfer") || q.contains("commission") || Regex("\\bmt\\b").containsMatchIn(q) ||
             q.contains("fund")
 
-    private fun isCustomerQuestion(q: String) =
+    private fun isCustomerQuestion(q: String, snap: KnowledgeSnapshot) =
         q.contains("customer") || q.contains("grahak") || q.contains("due") ||
-            q.contains("udhaar") || q.contains("pending payment") || q.contains("lena hai")
+            q.contains("udhaar") || q.contains("baki") || q.contains("baaki") ||
+            q.contains("pending payment") || q.contains("lena hai") ||
+            // A named customer ("Rahul ka baki kitna hai?") is a customer
+            // question even without the word "customer" in it.
+            snap.customers.any { q.contains(it.name.lowercase()) }
 
-    private fun isAgentQuestion(q: String) =
-        q.contains("agent")
+    private fun isAgentQuestion(q: String, snap: KnowledgeSnapshot) =
+        q.contains("agent") ||
+            // A named agent ("Ramesh ko kitna dena hai?") is an agent
+            // question even without the word "agent" in it.
+            snap.agents.any { q.contains(it.name.lowercase()) }
 
     private fun isServiceQuestion(q: String) =
         q.contains("service") || AiAssistantParser.detectService(q) != null
@@ -329,9 +336,15 @@ object BusinessKnowledge {
     private fun isDocumentQuestion(q: String) =
         q.contains("document") || q.contains("dastavej") || q.contains("kagaz")
 
-    private fun isCountQuestion(q: String) =
+    // UPDATE 20 — a service count question ("Kitne PAN Card banaye
+    // aaj?") is a business question, not an explainer: the service
+    // + "kitne" + a done-word ("banaye"/"bana"/"hue"/"kiye") counts
+    // jobs of that service in the period.
+    private fun isCountQuestion(q: String, service: ServiceType?) =
         q.contains("kitne customer") || q.contains("kitne jobs") || q.contains("kitne naye") ||
-            q.contains("how many")
+            q.contains("how many") ||
+            (service != null && q.contains("kitne") &&
+                (q.contains("banaye") || q.contains("bana") || q.contains("hue") || q.contains("kiye")))
 
     // --- Answers ----------------------------------------------------------
     // UPDATE 14 — honest zero figures on an empty store: a summary /
@@ -728,15 +741,32 @@ object BusinessKnowledge {
             deepLinkRoute = "khata", deepLinkLabel = "Customer Khata kholo"
         )
 
-    private fun countAnswer(snap: KnowledgeSnapshot, range: PeriodRange, today: Long): KnowledgeAnswer {
+    private fun countAnswer(snap: KnowledgeSnapshot, range: PeriodRange, today: Long, service: ServiceType?, serviceLabel: String?): KnowledgeAnswer {
         val startMs = LocalDate.ofEpochDay(range.startDay).atStartOfDay().toEpochSecond(ZoneOffset.UTC) * 1000
         val endMs = LocalDate.ofEpochDay(range.endDay).plusDays(1).atStartOfDay().toEpochSecond(ZoneOffset.UTC) * 1000
         val fresh = snap.customers.count { it.createdAtEpochMs in startMs until endMs }
         val jobsToday = snap.jobs.count {
             it.submissionDateEpochDay in range.startDay..range.endDay
         }
+        val serviceJobs = service?.let { svc ->
+            snap.jobs.count { it.service == svc && it.submissionDateEpochDay in range.startDay..range.endDay }
+        }
+        val totalServiceJobs = service?.let { svc -> snap.jobs.count { it.service == svc } }
+        val text = buildString {
+            appendLine("${range.label}:")
+            if (service != null && serviceLabel != null) {
+                appendLine("• $serviceLabel jobs: $serviceJobs")
+                appendLine("• Kul $serviceLabel jobs: $totalServiceJobs")
+            }
+            appendLine("• Naye customers: $fresh")
+            appendLine("• Jobs: $jobsToday")
+            appendLine("• Kul customers: ${snap.customers.size}")
+            append("• Kul jobs: ${snap.jobs.size}")
+            // UPDATE 14 — honest zero figures on an empty store.
+            if (!snap.hasAnyData) append("\n${emptyNote()}")
+        }
         return KnowledgeAnswer(
-            "${range.label}:\n• Naye customers: $fresh\n• Jobs: $jobsToday\n• Kul customers: ${snap.customers.size}\n• Kul jobs: ${snap.jobs.size}",
+            text,
             deepLinkRoute = "khata", deepLinkLabel = "Customer Khata kholo"
         )
     }
@@ -1086,8 +1116,13 @@ object AppHelpKnowledge {
 object AiNavigation {
     fun routeFor(text: String): Pair<String, String>? {
         val q = AiAssistantParser.normalise(text)
+        // UPDATE 21 — a message asking to SHOW a checklist ("PAN wali
+        // checklist phir dikhao") is a checklist action, never a screen
+        // open: "dikhao" must not navigate it to the PAN screen.
+        if (q.contains("checklist")) return null
         val open = q.contains("kholo") || q.contains("open") || q.contains("dikhao") ||
-            q.contains("khol") || q.contains("jao") || q.contains("chalo")
+            q.contains("khol") || q.contains("jao") || q.contains("chalo") ||
+            q.contains("show")
         if (!open) return null
         return when {
             q.contains("cash book") -> "cash_book" to "Cash Book"

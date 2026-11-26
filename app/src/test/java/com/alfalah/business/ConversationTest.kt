@@ -1005,4 +1005,449 @@ class StreamingTest {
     fun migrationLogic_documentedInMirror() {
         assertTrue(true)
     }
+
+    // ------------------------------------------------------------------
+    // UPDATE 20 / 21 / 22 — video bugs, follow-ups, app-change.
+    // A threaded conversation: the same context flows through every
+    // turn exactly as ChatbotViewModel.handleMessage does (understand
+    // → updateContext → parse). The ViewModel's delivery bookkeeping
+    // (active checklist, offer clearing, dev-request save, service
+    // add + verify) is verified in the mirror Session tests; here the
+    // parser + conversation layer is asserted. Android has no JDK on
+    // this VM, so these tests run in Android Studio, not here.
+    // ------------------------------------------------------------------
+    private class ThreadedChat(val today: Long) {
+        var context = AiAssistantParser.AiConversationContext(dayEpoch = today)
+        private val agents = listOf("Ramesh", "Suresh")
+        private val customers = listOf("Rahul", "Sana")
+        fun send(text: String): AiAssistantParser.AiParseResult {
+            val lang = Multilingual.detectLanguage(text).language
+            val meaning = ConversationEngine.understand(text, context, lang)
+            context = ConversationMemory.updateContext(context, text, meaning)
+            return AiAssistantParser.parse(text, context, agents, customers)
+        }
+        fun conversational(text: String): AiAssistantParser.AiParseResult.Conversational {
+            val result = send(text)
+            assertTrue("expected Conversational for: $text (got $result)", result is AiAssistantParser.AiParseResult.Conversational)
+            return result as AiAssistantParser.AiParseResult.Conversational
+        }
+    }
+
+    @Test
+    fun videoSequence_exactFourMessages() {
+        val chat = ThreadedChat(today)
+        val plan = chat.conversational("Kal Pan Card Banane Hai")
+        assertEquals("plan", plan.intent)
+        assertTrue("plan offers a checklist: ${plan.text}", plan.text.contains("checklist", ignoreCase = true))
+        val accepted = chat.conversational("Ha")
+        assertEquals("checklist", accepted.intent)
+        assertTrue("accepting the offer builds a real checklist", accepted.checklist.isNotEmpty())
+        val explicit = chat.conversational("Kal Pan Card Banane Hai Checklist Bana Do")
+        assertEquals("checklist", explicit.intent)
+        assertTrue("an explicit checklist request builds it, never repeats the plan", explicit.checklist.isNotEmpty())
+    }
+
+    @Test
+    fun phrasings_checklistBanaDoForms() {
+        val forms = listOf(
+            "Checklist bana do", "Checklist bana de", "Checklist bana dena",
+            "Checklist banake do", "Checklist bana dijiye", "Checklist bana do na",
+            "Checklist banakar do", "list banao", "list bana do", "checklist banao"
+        )
+        for (form in forms) {
+            val chat = ThreadedChat(today)
+            chat.conversational("Kal Pan Card Banane Hai")
+            val reply = chat.conversational(form)
+            assertEquals("'$form' must build the checklist, got ${reply.intent}", "checklist", reply.intent)
+            assertTrue("'$form' must return items", reply.checklist.isNotEmpty())
+        }
+    }
+
+    @Test
+    fun bareNumberAnswersPendingCountQuestion() {
+        val chat = ThreadedChat(today)
+        chat.conversational("Kal mujhe PAN Card banane hain.")
+        val reply = chat.conversational("5.")
+        assertEquals("checklist", reply.intent)
+        assertEquals(5, reply.checklistCount)
+        assertEquals("pan", reply.checklistTopic)
+    }
+
+    @Test
+    fun correctionReplacesStoredCount() {
+        val chat = ThreadedChat(today)
+        chat.conversational("Kal mujhe PAN Card banane hain.")
+        chat.conversational("5.")
+        val reply = chat.conversational("Nahi, 3 the, 5 nahi")
+        assertEquals("checklist", reply.intent)
+        assertEquals(3, reply.checklistCount)
+        assertTrue("the correction is acknowledged: ${reply.text}", reply.text.contains("3"))
+    }
+
+    @Test
+    fun documentsStayInTopic() {
+        val chat = ThreadedChat(today)
+        chat.conversational("Kal mujhe PAN Card banane hain.")
+        chat.conversational("5.")
+        val reply = chat.conversational("Documents bhi batao.")
+        assertEquals("pan_documents", reply.intent)
+        assertTrue("the documents are listed: ${reply.text}", reply.text.contains("Aadhaar", ignoreCase = true))
+    }
+
+    @Test
+    fun englishConversionPreservesChecklist() {
+        val chat = ThreadedChat(today)
+        chat.conversational("Kal mujhe PAN Card banane hain.")
+        chat.conversational("5.")
+        val reply = chat.conversational("Aur English mein likho.")
+        assertEquals("checklist", reply.intent)
+        assertEquals(5, reply.checklistCount)
+        assertTrue("the same items, now in English: ${reply.text}", reply.text.contains("Aadhaar card"))
+    }
+
+    @Test
+    fun checklistEditAddsDocuments() {
+        val chat = ThreadedChat(today)
+        chat.conversational("Kal mujhe PAN Card banane hain.")
+        val before = chat.conversational("5.")
+        val edited = chat.conversational("Isme documents bhi add karo.")
+        assertEquals("checklist", edited.intent)
+        assertTrue("the edit grows the list", edited.checklist.size > before.checklist.size)
+        assertTrue("the documents join it: ${edited.text}", edited.text.contains("Aadhaar card"))
+    }
+
+    @Test
+    fun showChecklistAgain() {
+        val chat = ThreadedChat(today)
+        chat.conversational("Kal mujhe PAN Card banane hain.")
+        chat.conversational("5.")
+        val reply = chat.conversational("PAN wali checklist phir dikhao")
+        assertEquals("checklist", reply.intent)
+        assertTrue("the same checklist is re-shown", reply.checklist.isNotEmpty())
+    }
+
+    @Test
+    fun doSummaryFormsReachRealSummary() {
+        for (form in listOf("summary bana do", "summary bana de", "hisab bana do", "report banao")) {
+            val reply = conversational(form)
+            assertEquals("'$form' must reach the real summary", "summary", reply.intent)
+        }
+    }
+
+    @Test
+    fun offerClearsOnTopicChange() {
+        val chat = ThreadedChat(today)
+        chat.conversational("Kal Pan Card Banane Hai")
+        val entry = chat.send("Aaj Xerox ke 300 cash hue")
+        assertTrue("the entry is a financial action", entry is AiAssistantParser.AiParseResult.Action)
+        val reply = chat.send("Ha")
+        assertTrue("after the topic change 'Ha' is the entry confirm, not a checklist",
+            reply !is AiAssistantParser.AiParseResult.Conversational ||
+                (reply as AiAssistantParser.AiParseResult.Conversational).checklist.isEmpty())
+    }
+
+    @Test
+    fun bareHaWithNoOfferIsNotChecklistOrAction() {
+        val result = parse("Ha")
+        assertTrue("a bare 'Ha' with nothing pending is not an action", result !is AiAssistantParser.AiParseResult.Action)
+        if (result is AiAssistantParser.AiParseResult.Conversational) {
+            assertTrue("a bare 'Ha' builds no checklist", result.checklist.isEmpty())
+        }
+    }
+
+    @Test
+    fun appChange_aadhaarModuleSpecThenQueued() {
+        val chat = ThreadedChat(today)
+        val spec = chat.conversational("Aadhaar Mobile Number Update ka module bana do")
+        assertEquals("app_change_spec", spec.intent)
+        assertEquals("Aadhaar Mobile Number Update", spec.appChangeSpec?.title)
+        assertEquals("module", spec.appChangeSpec?.kind)
+        assertFalse("never deflects to a portal: ${spec.text}", spec.text.contains("portal", ignoreCase = true))
+        assertTrue("the UIDAI distinction is stated: ${spec.text}", spec.text.contains("UIDAI"))
+        assertFalse("never claims the module exists: ${spec.text}", spec.text.contains("ban gaya", ignoreCase = true))
+        val queued = chat.conversational("Haan, banao")
+        assertEquals("app_change_queued", queued.intent)
+        assertTrue("the confirm resolves against the pending request", queued.appChangeConfirmed)
+        assertEquals("module", queued.appChangeSpec?.kind)
+        assertTrue("the queued reply says the in-app AI cannot deploy code: ${queued.text}",
+            queued.text.contains("code deploy nahi kar sakta", ignoreCase = true))
+    }
+
+    @Test
+    fun appChange_addFieldModifyReportServiceCategory() {
+        val field = ThreadedChat(today)
+        val fieldSpec = field.conversational("PAN Card module mein ek naya field add karo — customer ka email")
+        assertEquals("app_change_spec", fieldSpec.intent)
+        assertEquals("field", fieldSpec.appChangeSpec?.kind)
+        assertEquals("app_change_queued", field.conversational("Haan, banao").intent)
+
+        val modify = ThreadedChat(today)
+        val modifySpec = modify.conversational("Cash Book module ko modify karo — usme UPI filter bhi chahiye")
+        assertEquals("modify", modifySpec.appChangeSpec?.kind)
+        assertEquals("app_change_queued", modify.conversational("Haan, banao").intent)
+
+        val report = ThreadedChat(today)
+        val reportSpec = report.conversational("Ek naya monthly expense report banao")
+        assertEquals("report", reportSpec.appChangeSpec?.kind)
+        assertEquals("app_change_queued", report.conversational("Haan, banao").intent)
+
+        val service = ThreadedChat(today)
+        val serviceSpec = service.conversational("Add a new service: Passport Photo")
+        assertEquals("service", serviceSpec.appChangeSpec?.kind)
+        assertEquals("Passport Photo", serviceSpec.appChangeSpec?.title)
+        assertEquals("app_change_service", service.conversational("Haan, banao").intent)
+
+        val category = ThreadedChat(today)
+        val categorySpec = category.conversational("Ek nayi business category banao — Stationery")
+        assertEquals("category", categorySpec.appChangeSpec?.kind)
+        assertEquals("app_change_queued", category.conversational("Haan, banao").intent)
+    }
+
+    @Test
+    fun appChange_commaInServiceNamePreserved() {
+        val chat = ThreadedChat(today)
+        val spec = chat.conversational("Add a new service: Photo, Printing")
+        assertEquals("service", spec.appChangeSpec?.kind)
+        assertTrue("the comma survives title extraction so the name check can fire: ${spec.appChangeSpec?.title}",
+            spec.appChangeSpec?.title?.contains(",") == true)
+    }
+
+    @Test
+    fun appChange_declineCancelsTheRequest() {
+        val chat = ThreadedChat(today)
+        chat.conversational("Aadhaar Mobile Number Update ka module bana do")
+        val reply = chat.conversational("Nahi")
+        assertEquals("offer_declined", reply.intent)
+        assertTrue("the decline names the cancelled request: ${reply.text}", reply.text.contains("Aadhaar Mobile Number Update"))
+    }
+
+    @Test
+    fun appChange_quotedNameIsTheTitle() {
+        // Website appChangeNameFor: a quoted name wins over the
+        // surrounding words.
+        val chat = ThreadedChat(today)
+        val spec = chat.conversational("Add a 'GST Number' field to customers")
+        assertEquals("app_change_spec", spec.intent)
+        assertEquals("field", spec.appChangeSpec?.kind)
+        assertEquals("GST Number", spec.appChangeSpec?.title)
+        assertEquals("app_change_queued", chat.conversational("Haan, banao").intent)
+    }
+
+    @Test
+    fun appChange_calledAndForNameTheThing() {
+        val called = ThreadedChat(today)
+        val service = called.conversational("Add a new service called Courier")
+        assertEquals("service", service.appChangeSpec?.kind)
+        assertEquals("Courier", service.appChangeSpec?.title)
+
+        val forName = ThreadedChat(today)
+        val module = forName.conversational("Create a new module for Passport services")
+        assertEquals("module", module.appChangeSpec?.kind)
+        assertEquals("Passport", module.appChangeSpec?.title)
+    }
+
+    @Test
+    fun appChange_modifyNamedAreaIsNotNavigation() {
+        // Website order (classifyIntent 1b beats 2d): "Modify the
+        // Cash Book to show weekly totals" is a change request, not
+        // "open Cash Book".
+        val chat = ThreadedChat(today)
+        val spec = chat.conversational("Modify the Cash Book to show weekly totals")
+        assertEquals("app_change_spec", spec.intent)
+        assertEquals("modify", spec.appChangeSpec?.kind)
+        assertEquals("Cash Book", spec.appChangeSpec?.title)
+        assertEquals("app_change_queued", chat.conversational("Haan, banao").intent)
+    }
+
+    @Test
+    fun appChange_locationIsNotAName() {
+        // "Cash Book mein ek field add karo" — the field is unnamed;
+        // the location is not its name.
+        val chat = ThreadedChat(today)
+        val spec = chat.conversational("Cash Book mein ek field add karo")
+        assertEquals("field", spec.appChangeSpec?.kind)
+        assertEquals("Naya Field", spec.appChangeSpec?.title)
+    }
+
+    @Test
+    fun appChange_bareAddServiceAndReportAndDashboard() {
+        val service = ThreadedChat(today)
+        val serviceSpec = service.conversational("Add a service")
+        assertEquals("service", serviceSpec.appChangeSpec?.kind)
+        assertEquals("Naya Service", serviceSpec.appChangeSpec?.title)
+
+        val report = ThreadedChat(today)
+        val reportSpec = report.conversational("ek aur report banao")
+        assertEquals("report", reportSpec.appChangeSpec?.kind)
+        val report2 = ThreadedChat(today)
+        assertEquals("report", report2.conversational("Add a report").appChangeSpec?.kind)
+
+        val dashboard = ThreadedChat(today)
+        val dashSpec = dashboard.conversational("Create a new dashboard")
+        assertEquals("feature", dashSpec.appChangeSpec?.kind)
+        assertEquals("Dashboard", dashSpec.appChangeSpec?.title)
+    }
+
+    @Test
+    fun offerExpiresAfterAGeneralQuestion() {
+        // Website done(): only plan / topic_followup / app_change keep
+        // the offer. A general question ("PAN Card kya hai?") is a new
+        // topic, so a later "Ha" builds nothing.
+        val chat = ThreadedChat(today)
+        chat.conversational("Kal mujhe PAN Card banane hain.")
+        chat.conversational("PAN Card kya hai?")
+        assertNull("the offer expired with the new topic", chat.context.pendingChecklistOffer)
+        val reply = chat.conversational("Ha")
+        assertTrue("a bare yes after expiry is not a checklist: ${reply.intent}",
+            reply.intent != "checklist" && reply.checklist.isEmpty())
+        assertNull("no active checklist is stored from an expired offer", chat.context.activeChecklist)
+    }
+
+    @Test
+    fun documentsFollowUpKeepsTheOffer() {
+        // The website's KEEP_OFFER includes topic_followup: asking for
+        // the documents does NOT spend the checklist offer, so "Ha"
+        // afterwards still builds it.
+        val chat = ThreadedChat(today)
+        chat.conversational("Kal mujhe PAN Card banane hain.")
+        chat.conversational("Documents bhi batao.")
+        assertNotNull("the offer survives a documents follow-up", chat.context.pendingChecklistOffer)
+        val reply = chat.conversational("Ha")
+        assertEquals("checklist", reply.intent)
+        assertTrue("the checklist is built from the surviving offer: ${reply.text}",
+            reply.text.contains("Aadhaar card"))
+    }
+
+    @Test
+    fun translateChecklistClaimsNoLanguageSwitch() {
+        // Website checklist_translate returns ONLY the converted list.
+        // The conversation does NOT switch to English, so the reply
+        // must not claim otherwise.
+        val chat = ThreadedChat(today)
+        chat.conversational("Kal mujhe PAN Card banane hain.")
+        chat.conversational("5.")
+        val reply = chat.conversational("Aur English mein likho.")
+        assertEquals("checklist", reply.intent)
+        assertFalse("no false 'from now on I will talk in English' claim: ${reply.text}",
+            reply.text.contains("From now on") || reply.text.contains("Ab se main"))
+        assertTrue("the same checklist, in English: ${reply.text}",
+            reply.text.contains("Take the customer's Aadhaar card"))
+    }
+
+    @Test
+    fun explainerRouting_panAadhaarConversion() {
+        val pan = conversational("PAN Card kya hai?")
+        assertTrue("an explainer is a general answer, not a figures question: ${pan.intent}",
+            pan.intent == "general" || pan.intent == "pan_explainer")
+        val conversion = conversational("5 km mein kitne metre hote hain?")
+        assertTrue("the conversion is computed: ${conversion.text}", conversion.text.contains("5000"))
+        val advice = conversational("Dukaan ka business kaise badhaye?")
+        assertFalse("advice never gets the placeholder excuse: ${advice.text}",
+            advice.text.contains("abhi taiyaar hai", ignoreCase = true))
+    }
+
+    @Test
+    fun mtPrincipalIsNotCommission() {
+        val result = parse("Money Transfer 10000 rupaye cash bheje, commission 50")
+        assertTrue("MT is an action: $result", result is AiAssistantParser.AiParseResult.Action)
+        val action = (result as AiAssistantParser.AiParseResult.Action).action
+        assertTrue("MT action: $action", action is AiAssistantParser.AiAction.MoneyTransfer)
+        val mt = action as AiAssistantParser.AiAction.MoneyTransfer
+        assertEquals(1000000L, mt.principalPaise)
+        assertEquals(5000L, mt.commissionPaise)
+    }
+
+    @Test
+    fun dueTotalAndReceivedSplit() {
+        val asking = parse("Rahul ka PAN Card ka kaam hai, 500 rupaye, 200 mile")
+        assertTrue("the received part needs its mode first: $asking", asking is AiAssistantParser.AiParseResult.Clarify)
+        val result = parse("Rahul ka PAN Card ka kaam hai, 500 rupaye, 200 mile cash")
+        assertTrue("the due is an action: $result", result is AiAssistantParser.AiParseResult.Action)
+        val action = (result as AiAssistantParser.AiParseResult.Action).action
+        assertTrue("due action: $action", action is AiAssistantParser.AiAction.RecordCustomerDue)
+        val due = action as AiAssistantParser.AiAction.RecordCustomerDue
+        assertEquals(50000L, due.amountPaise)
+        assertEquals(20000L, due.receivedPaise)
+        assertEquals("Rahul", due.customerName)
+    }
+
+    @Test
+    fun countableServices_aadhaarVoterAyushman() {
+        for ((planText, number) in listOf(
+            "Kal Aadhaar update karna hai." to 3,
+            "Kal Voter ID banane hain." to 2,
+            "Kal Ayushman Card banane hain." to 4
+        )) {
+            val chat = ThreadedChat(today)
+            val plan = chat.conversational(planText)
+            assertEquals("plan", plan.intent)
+            assertTrue("the count question is asked: ${plan.text}", plan.text.contains("Kitne applications hain?"))
+            val reply = chat.conversational("$number.")
+            assertEquals("checklist", reply.intent)
+            assertEquals(number, reply.checklistCount)
+        }
+    }
+
+    @Test
+    fun englishPlanAndShowMe() {
+        val plan = conversational("I have to make PAN cards tomorrow")
+        assertEquals("plan", plan.intent)
+        val route = AiNavigation.routeFor("Show me the Cash Book")
+        assertNotNull("Show me navigates to the real Cash Book", route)
+        assertEquals("cash_book", route!!.first)
+        val joke = conversational("Show me a joke")
+        assertTrue("Show me a joke is a joke, not a statement: ${joke.intent}", joke.intent.contains("joke", ignoreCase = true))
+    }
+
+    @Test
+    fun denaHaiQuestionIsNotAPlan() {
+        val result = parse("Ramesh ko kitna dena hai?")
+        assertTrue("a due question is factual, never a plan: $result", result is AiAssistantParser.AiParseResult.Factual)
+        val snapWithAgent = KnowledgeSnapshot(
+            profileId = 1, profileName = "Shop", profileCategory = "CSC",
+            agents = listOf(
+                com.alfalah.business.data.entity.AgentEntity(
+                    id = 5, profileId = 1, name = "Ramesh", mobile = "",
+                    type = com.alfalah.business.domain.AgentType.OTHER
+                )
+            )
+        )
+        val answer = BusinessKnowledge.answer("Ramesh ko kitna dena hai?", snapWithAgent, today)
+        assertNotNull("the agent answer exists", answer)
+        assertTrue("the agent answer names the payable: ${answer!!.text}", answer.text.contains("payable", ignoreCase = true))
+    }
+
+    @Test
+    fun countInsidePlanMessageIsStillAPlan() {
+        val reply = conversational("Kal ke liye 5 PAN Card banane hain")
+        assertEquals("plan", reply.intent)
+        assertTrue("the count question is the follow-up: ${reply.text}", reply.text.contains("Kitne applications hain?"))
+    }
+
+    @Test
+    fun gibberishIsHonestLimitation() {
+        val result = parse("Xyzqwv blorp flibberty gibbet")
+        assertTrue("gibberish is unknown, never a statement: $result", result is AiAssistantParser.AiParseResult.Unknown)
+    }
+
+    @Test
+    fun uidaiPortalRequestIsExternalLimit() {
+        val reply = conversational("Mujhe UIDAI portal par Aadhaar update kar do")
+        assertEquals("external_limit", reply.intent)
+        assertFalse("no fake success: ${reply.text}", reply.text.contains("save ho gaya", ignoreCase = true))
+    }
+
+    @Test
+    fun aadhaarSubmissionIsExternalLimitButPlanIsNot() {
+        val submission = conversational("Mera Aadhaar update kar do")
+        assertEquals("external_limit", submission.intent)
+        val plan = conversational("Kal Aadhaar update karna hai.")
+        assertEquals("plan", plan.intent)
+    }
+
+    @Test
+    fun serviceCountQuestionFromLedger() {
+        val answer = knowledgeAnswer("Kitne PAN Card banaye aaj?")
+        assertTrue("the count comes from the ledger: $answer", answer.contains("PAN Card jobs: 0"))
+    }
 }
