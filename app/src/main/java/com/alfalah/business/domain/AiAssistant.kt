@@ -534,7 +534,13 @@ object AiAssistantParser {
         // in voice-to-text output) is still an entry, as long as no known
         // customer name appears (that would make it a job payment, not a
         // walk-in entry, and must not be guessed).
-        val bareEntry = detectService(q) != null && mainAmount(q) != null && detectMode(q) != null &&
+        // UPDATE 18 — the same holds for a fragment WITHOUT a mode
+        // ("Xerox 300"): it enters parseDailyEntries, which asks ONE
+        // short question ("₹300 Cash mein mila ya UPI mein?") instead
+        // of returning Unknown. The mode is never defaulted silently
+        // (parseDailyEntries keeps a CASH placeholder only until the
+        // clarification completes it).
+        val bareEntry = detectService(q) != null && mainAmount(q) != null &&
             knownCustomers.none { q.contains(it.lowercase()) }
         if (hasIncomeSignal(q) || bareEntry) return parseDailyEntries(q, context, lang)
 

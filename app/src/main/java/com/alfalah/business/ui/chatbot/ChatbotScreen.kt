@@ -2,6 +2,12 @@ package com.alfalah.business.ui.chatbot
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.infiniteTransition
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -12,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -27,10 +34,11 @@ import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -40,6 +48,7 @@ import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -50,8 +59,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.alfalah.business.data.ChatHistoryStore
@@ -59,6 +75,7 @@ import com.alfalah.business.data.SettingsStore
 import com.alfalah.business.data.repository.BusinessRepository
 import com.alfalah.business.domain.AppLanguage
 import com.alfalah.business.domain.PaymentMode
+import com.alfalah.business.domain.VoiceState
 import com.alfalah.business.ui.components.BizCard
 import com.alfalah.business.ui.components.formatRupees
 import com.alfalah.business.ui.components.parseRupeesToPaise
@@ -80,15 +97,19 @@ private fun formatTime(ms: Long): String =
  *
  * Native Compose only, no WebView. Message list (user bubbles right in
  * purple, assistant bubbles left) with timestamps, suggestion chips,
- * voice input (mic — text goes into the input field, never auto-sent),
- * text input + send, typing indicator, transaction preview cards with
- * Confirm & Save / Edit / Cancel, comparison tables, deep-link buttons
- * that open the real screen, New Chat, chat-history search, clear
- * history. Answers come from the real Room ledgers of the active
- * profile; when there is no record the assistant says so instead of
- * inventing a figure. Nothing is saved until the user confirms the
- * preview — and the success message only appears after the backend
- * confirms the write.
+ * two-way voice (UPDATE 18: mic -> spoken transcript -> the same
+ * conversation pipeline as typed text -> reply spoken aloud, with
+ * listening / thinking / speaking indicators, interruption, continuous
+ * mode and a visible Stop), text input + send, typing indicator,
+ * transaction preview cards with Confirm & Save / Edit / Cancel,
+ * comparison tables, deep-link buttons that open the real screen, New
+ * Chat, chat-history search, clear history. Answers come from the real
+ * Room ledgers of the active profile; when there is no record the
+ * assistant says so instead of inventing a figure. Nothing is saved
+ * until the user confirms the preview — and the success message only
+ * appears after the backend confirms the write. The user speaks in
+ * his own way — no fixed commands to memorise; an uncertain
+ * transcript gets one short clarification instead of a guess.
  */
 @Composable
 fun ChatbotScreen(
@@ -106,25 +127,67 @@ fun ChatbotScreen(
     val messages by vm.messages.collectAsState()
     val isLoading by vm.isLoading.collectAsState()
     val aiEnabled by vm.aiEnabled.collectAsState()
+    // UPDATE 17 — streaming state for the thinking indicator, the
+    // blinking cursor and the Stop / Regenerate / Copy / Retry controls.
+    val isThinking by vm.isThinking.collectAsState()
+    val isStreaming by vm.isStreaming.collectAsState()
+    val canRetry by vm.canRetry.collectAsState()
+    val lastUserMessage by vm.lastUserMessage.collectAsState()
+    val clipboardManager = LocalClipboardManager.current
+    val lastBotMessage = messages.lastOrNull { !it.fromUser }
     val pendingPreviewId by vm.pendingPreviewId.collectAsState()
     // UPDATE 13: voice recogniser language follows the chat language
     // (detected per message, or the Settings preference).
     val voiceLanguageTag by vm.voiceLanguageTag.collectAsState()
+    // UPDATE 18: voice session state (listening / thinking / speaking),
+    // continuous mode and the mute toggle.
+    val voiceState by vm.voiceState.collectAsState()
+    val voiceSessionActive by vm.voiceSessionActive.collectAsState()
+    val voiceResponsesEnabled by vm.voiceResponsesEnabled.collectAsState()
+    val speechRate by vm.speechRate.collectAsState()
+    val speechPitch by vm.speechPitch.collectAsState()
+    val continuousMode by vm.continuousMode.collectAsState()
     val searchQuery by vm.searchQuery.collectAsState()
     var input by remember { mutableStateOf("") }
     var showSearch by remember { mutableStateOf(false) }
     var showClearConfirm by remember { mutableStateOf(false) }
     var voiceError by remember { mutableStateOf<String?>(null) }
     var listening by remember { mutableStateOf(false) }
+    var speaking by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val context = LocalContext.current
 
+    // UPDATE 18: final transcripts go straight into the conversation
+    // pipeline (vm.onVoiceTranscript — same as typed text, same
+    // preview -> confirm -> backend save). Partial results only fill
+    // the input field as a live preview; they are never sent.
     val voiceHelper = remember {
         VoiceInputHelper(
             context = context,
-            onResult = { heard -> input = if (input.isBlank()) heard else "$input $heard" },
+            onResult = { heard -> vm.onVoiceTranscript(heard, -1f) },
             onError = { voiceError = it },
-            onListeningChanged = { listening = it }
+            onListeningChanged = { listening = it },
+            onPartial = { partial -> input = partial },
+            onResultWithConfidence = { heard, confidence ->
+                input = ""
+                vm.onVoiceTranscript(heard, confidence)
+            }
+        )
+    }
+    // UPDATE 18: spoken replies (native TTS). The text is already in
+    // chat; the voice only reads it aloud, in the reply language.
+    val voiceSpeaker = remember {
+        VoiceSpeaker(
+            context = context,
+            onSpeechStarted = {
+                speaking = true
+                vm.setVoiceState(VoiceState.SPEAKING)
+            },
+            onSpeechEnded = {
+                speaking = false
+                vm.setVoiceState(VoiceState.IDLE)
+            },
+            onSpeechError = { voiceError = it }
         )
     }
     val micPermission = rememberLauncherForActivityResult(
@@ -135,6 +198,69 @@ fun ChatbotScreen(
             voiceHelper.startListening(voiceLanguageTag)
         } else {
             voiceError = "Microphone ki permission nahi mili — type karke bhej sakte hain."
+            vm.setVoiceSessionActive(false)
+        }
+    }
+
+    /** Start a voice turn: mark the session active and ask for the
+     *  mic permission (the recogniser starts from the callback). */
+    fun startListening() {
+        voiceError = null
+        vm.setVoiceSessionActive(true)
+        vm.setVoiceState(VoiceState.LISTENING)
+        micPermission.launch(android.Manifest.permission.RECORD_AUDIO)
+    }
+
+    /** End the whole voice session: stop listening + stop speaking. */
+    fun stopVoice() {
+        voiceHelper.stopListening()
+        voiceSpeaker.stop()
+        speaking = false
+        vm.stopVoiceSession()
+    }
+
+    // UPDATE 18: speak assistant replies + stop speech on demand.
+    // The reply text is already in the chat list; speaking never
+    // creates or changes a message.
+    LaunchedEffect(Unit) {
+        vm.speakEvents.collect { request ->
+            if (!vm.voiceResponsesEnabled.value) return@collect
+            voiceSpeaker.setLanguage(request.languageTag)
+            voiceSpeaker.speechRate = vm.speechRate.value
+            voiceSpeaker.speechPitch = vm.speechPitch.value
+            voiceSpeaker.speak(request.text)
+        }
+    }
+    LaunchedEffect(Unit) {
+        vm.stopSpeakingEvents.collect {
+            voiceSpeaker.stop()
+            speaking = false
+        }
+    }
+    // Voice speed / pitch from Settings apply live to the speaker.
+    LaunchedEffect(speechRate, speechPitch) {
+        voiceSpeaker.speechRate = speechRate
+        voiceSpeaker.speechPitch = speechPitch
+    }
+    // UPDATE 18: continuous mode — after a reply finishes (or a
+    // generation ends with nothing spoken, e.g. voice replies are
+    // muted), listen again WITHOUT re-tapping the mic, but only
+    // while the session is still active and the user has not pressed
+    // Stop. The mic is never secretly active: the listening
+    // indicator + the Stop button stay visible throughout.
+    LaunchedEffect(isLoading, speaking) {
+        if (!isLoading && !speaking && continuousMode && voiceSessionActive && !listening) {
+            startListening()
+        }
+    }
+    // UPDATE 18: never leave the mic or the speaker running when the
+    // screen goes away (back press / profile switch / app pause).
+    DisposableEffect(Unit) {
+        onDispose {
+            voiceHelper.stopListening()
+            voiceSpeaker.stop()
+            voiceSpeaker.shutdown()
+            vm.stopVoiceSession()
         }
     }
 
@@ -143,9 +269,14 @@ fun ChatbotScreen(
         vm.navigationEvents.collect { route -> onOpenRoute(route) }
     }
 
-    // Keep the newest message visible.
-    LaunchedEffect(messages.size, isLoading) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+    // Keep the newest message visible — but ONLY when the user is
+    // already near the bottom, so reading an older message never
+    // jumps. As the reply types out, the list follows smoothly.
+    LaunchedEffect(messages) {
+        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+        if (messages.isNotEmpty() && lastVisible >= messages.size - 2) {
+            listState.scrollToItem(messages.size - 1)
+        }
     }
 
     fun send(text: String) {
@@ -247,7 +378,11 @@ fun ChatbotScreen(
                     onOpenRoute = onOpenRoute
                 )
             }
-            if (isLoading) {
+            if (isThinking) {
+                // UPDATE 17 — thinking indicator: three animated dots
+                // + the exact text "BizKhata AI is thinking...". Shown
+                // only until the first displayable text arrives; the
+                // streaming message replaces it, never both at once.
                 item {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
                         Box(
@@ -256,13 +391,9 @@ fun ChatbotScreen(
                                 .padding(horizontal = 14.dp, vertical = 10.dp)
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                CircularProgressIndicator(
-                                    color = BizColors.Purple,
-                                    modifier = Modifier.size(18.dp),
-                                    strokeWidth = 2.dp
-                                )
+                                ThinkingDots()
                                 Text(
-                                    "Jawab likh raha hai…",
+                                    "BizKhata AI is thinking...",
                                     style = MaterialTheme.typography.bodyMedium,
                                     modifier = Modifier.padding(start = 8.dp)
                                 )
@@ -271,6 +402,50 @@ fun ChatbotScreen(
                     }
                 }
             }
+        }
+        // UPDATE 17 — generation controls, all functional (no
+        // decorative buttons). Stop Generating cancels the stream and
+        // keeps the text shown so far; Regenerate re-asks the same
+        // last message with the same context; Copy copies the complete
+        // final response; Retry re-sends after a failure.
+        Row(
+            Modifier.fillMaxWidth().padding(bottom = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (isStreaming || isThinking) {
+                TextButton(onClick = { vm.stopGeneration() }) { Text("Stop Generating", color = MaterialTheme.colorScheme.error) }
+            } else {
+                if (lastUserMessage != null) {
+                    TextButton(onClick = { vm.regenerate() }) { Text("Regenerate", color = BizColors.Purple) }
+                }
+                if (lastBotMessage != null && lastBotMessage.text.isNotBlank() && !lastBotMessage.streaming) {
+                    TextButton(
+                        onClick = { clipboardManager.setText(AnnotatedString(lastBotMessage.text)) }
+                    ) { Text("Copy", color = BizColors.Purple) }
+                }
+                if (canRetry) {
+                    TextButton(onClick = { vm.retryLast() }) { Text("Retry", color = BizColors.Purple) }
+                }
+            }
+        }
+        // UPDATE 18 — voice controls (always visible, never hidden
+        // state): continuous conversation on/off, and spoken replies
+        // on/off (mute). The mic is only active while the listening
+        // indicator below is shown.
+        Row(
+            Modifier.fillMaxWidth().padding(bottom = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilterChip(
+                selected = continuousMode,
+                onClick = { vm.setContinuousMode(!continuousMode) },
+                label = { Text(if (continuousMode) "Continuous: ON" else "Continuous: OFF") }
+            )
+            FilterChip(
+                selected = voiceResponsesEnabled,
+                onClick = { vm.setVoiceResponsesEnabled(!voiceResponsesEnabled) },
+                label = { Text(if (voiceResponsesEnabled) "Voice replies: ON" else "Voice replies: OFF") }
+            )
         }
         if (messages.size <= 1) {
             Row(
@@ -294,9 +469,40 @@ fun ChatbotScreen(
             }
             Spacer(Modifier.height(8.dp))
         }
+        // UPDATE 18 — voice status, always visible while a voice
+        // session is active: listening / thinking / speaking, with a
+        // Stop button that ends listening AND speaking at once. The
+        // mic is never active without this indicator on screen.
         if (listening) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Sun raha hoon… boliye, apne hisab se boliye. (Entry tabhi save hogi jab aap preview confirm karenge.)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = BizColors.Purple,
+                    modifier = Modifier.weight(1f).padding(bottom = 4.dp)
+                )
+                TextButton(onClick = { stopVoice() }) { Text("Stop", color = MaterialTheme.colorScheme.error) }
+            }
+        } else if (speaking || voiceState == VoiceState.SPEAKING) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Bol raha hoon… (mic dabakar beech mein rokein, ya \"Bas, short mein batao\" boliye.)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = BizColors.Purple,
+                    modifier = Modifier.weight(1f).padding(bottom = 4.dp)
+                )
+                TextButton(onClick = { stopVoice() }) { Text("Stop", color = MaterialTheme.colorScheme.error) }
+            }
+        } else if (isThinking && voiceSessionActive) {
             Text(
-                "Sun raha hoon… boliye. (Voice se entry tabhi save hogi jab aap preview confirm karenge.)",
+                "Soch raha hoon…",
+                style = MaterialTheme.typography.bodySmall,
+                color = BizColors.Purple,
+                modifier = Modifier.padding(bottom = 4.dp)
+            )
+        } else if (voiceSessionActive && continuousMode) {
+            Text(
+                "Continuous mode ON — agla sawal boliye, mic khud chalu hoga. Stop dabakar band karein.",
                 style = MaterialTheme.typography.bodySmall,
                 color = BizColors.Purple,
                 modifier = Modifier.padding(bottom = 4.dp)
@@ -309,19 +515,45 @@ fun ChatbotScreen(
             Modifier.fillMaxWidth().padding(bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // UPDATE 18 — mic behaviour: idle -> start listening;
+            // listening -> stop the session; speaking -> interrupt
+            // the spoken reply (and the typing generation) and start
+            // listening for the new instruction.
             IconButton(
                 onClick = {
-                    if (listening) voiceHelper.stopListening()
-                    else micPermission.launch(android.Manifest.permission.RECORD_AUDIO)
+                    when {
+                        speaking || voiceState == VoiceState.SPEAKING -> {
+                            vm.interruptSpeaking()
+                            startListening()
+                        }
+                        listening -> stopVoice()
+                        else -> startListening()
+                    }
                 },
                 modifier = Modifier.size(48.dp)
                     .clip(RoundedCornerShape(24.dp))
-                    .background(if (listening) BizColors.ExpenseRed else BizColors.PurpleSoft)
+                    .background(if (listening || speaking) BizColors.ExpenseRed else BizColors.PurpleSoft)
             ) {
                 Icon(
                     Icons.Filled.Mic,
-                    contentDescription = if (listening) "Stop listening" else "Voice input",
-                    tint = if (listening) Color.White else BizColors.Purple
+                    contentDescription = when {
+                        speaking || voiceState == VoiceState.SPEAKING -> "Interrupt and listen"
+                        listening -> "Stop listening"
+                        else -> "Voice input"
+                    },
+                    tint = if (listening || speaking) Color.White else BizColors.Purple
+                )
+            }
+            // Mute toggle next to the mic (same setting as the chip
+            // above and as Settings -> Voice Assistant).
+            IconButton(
+                onClick = { vm.setVoiceResponsesEnabled(!voiceResponsesEnabled) },
+                modifier = Modifier.padding(start = 4.dp)
+            ) {
+                Icon(
+                    if (voiceResponsesEnabled) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
+                    contentDescription = if (voiceResponsesEnabled) "Mute voice replies" else "Unmute voice replies",
+                    tint = BizColors.Purple
                 )
             }
             OutlinedTextField(
@@ -335,7 +567,9 @@ fun ChatbotScreen(
             )
             IconButton(
                 onClick = { send(input) },
-                enabled = input.isNotBlank() && !isLoading,
+                // Input stays usable while streaming: sending stops the
+                // current generation cleanly first (UPDATE 17).
+                enabled = input.isNotBlank() && (!isLoading || isStreaming || isThinking),
                 modifier = Modifier.padding(start = 8.dp)
                     .size(48.dp)
                     .clip(RoundedCornerShape(24.dp))
@@ -394,13 +628,28 @@ private fun MessageBubble(
                 )
                 .padding(horizontal = 14.dp, vertical = 10.dp)
         ) {
-            Text(
-                message.text,
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (message.fromUser) Color.White
-                else if (message.isError) MaterialTheme.colorScheme.error
-                else MaterialTheme.colorScheme.onSurface
-            )
+            // UPDATE 17 — bot messages render Markdown; user messages
+            // stay plain. While a reply is still streaming, a blinking
+            // cursor sits at the end of the shown text and is removed
+            // smoothly when the reply completes.
+            if (message.fromUser) {
+                Text(
+                    message.text,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White
+                )
+            } else {
+                Row {
+                    MarkdownText(
+                        text = message.text,
+                        color = if (message.isError) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurface
+                    )
+                    if (message.streaming) {
+                        BlinkingCursor(color = MaterialTheme.colorScheme.onSurface)
+                    }
+                }
+            }
             if (message.table.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 ComparisonTable(message)
@@ -414,14 +663,18 @@ private fun MessageBubble(
                     modifier = Modifier.padding(top = 6.dp)
                 )
             }
-            Text(
-                formatTime(message.timestampMs) +
-                    if (message.isAiSummary) " • AI summary" else "",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (message.fromUser) Color.White.copy(alpha = 0.7f)
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp)
-            )
+            // UPDATE 17 — the timestamp appears only AFTER the
+            // response completes (never on a still-streaming message).
+            if (!message.streaming) {
+                Text(
+                    formatTime(message.timestampMs) +
+                        if (message.isAiSummary) " • AI summary" else "",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (message.fromUser) Color.White.copy(alpha = 0.7f)
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
             message.deepLinkRoute?.let { route ->
                 Spacer(Modifier.height(8.dp))
                 Button(
@@ -588,5 +841,215 @@ private fun PreviewCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+}
+
+/**
+ * UPDATE 17 — thinking indicator: three dots that rise and fade in
+ * turn (infiniteTransition), next to "BizKhata AI is thinking...".
+ * Shown only until the first displayable text arrives.
+ */
+@Composable
+private fun ThinkingDots() {
+    val transition = rememberInfiniteTransition(label = "thinking-dots")
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+        for (i in 0..2) {
+            val alpha by transition.animateFloat(
+                initialValue = 0.3f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 500, delayMillis = i * 170),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "dot-$i"
+            )
+            val offsetY by transition.animateFloat(
+                initialValue = 0f,
+                targetValue = -4f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 500, delayMillis = i * 170),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "dot-offset-$i"
+            )
+            Box(
+                Modifier.offset(y = offsetY.dp).size(7.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(BizColors.Purple.copy(alpha = alpha))
+            )
+        }
+    }
+}
+
+/** UPDATE 17 — blinking cursor at the end of a streaming reply.
+ *  Removed (not rendered) the moment streaming ends. */
+@Composable
+private fun BlinkingCursor(color: Color) {
+    val transition = rememberInfiniteTransition(label = "typing-cursor")
+    val alpha by transition.animateFloat(
+        initialValue = 1f,
+        targetValue = 0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 530),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "cursor-alpha"
+    )
+    Text(
+        "▍",
+        style = MaterialTheme.typography.bodyMedium,
+        color = color.copy(alpha = alpha)
+    )
+}
+
+/**
+ * UPDATE 17 — small, dependency-free Markdown renderer for bot
+ * replies (the app has no Markdown library — adding a heavy one for
+ * this was not justified). Handles the constructs the assistant
+ * actually produces: headings (# / ## / ###), bold (**x**), italic
+ * (*x*), inline code (`x`), fenced code blocks (```), bullet lists
+ * (- / * / •), numbered lists (1. ...), and simple pipe tables
+ * (| a | b |). Anything unrecognised renders as plain text — never
+ * dropped, never crashed on. Multilingual text passes through
+ * untouched; the parser only looks at ASCII Markdown markers, so
+ * Devanagari / Gujarati / Tamil vowel signs are never split.
+ */
+@Composable
+private fun MarkdownText(text: String, color: Color) {
+    if (text.isEmpty()) return
+    val lines = text.lines()
+    var i = 0
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        while (i < lines.size) {
+            val line = lines[i]
+            when {
+                line.trimStart().startsWith("```") -> {
+                    val code = ArrayList<String>()
+                    i++
+                    while (i < lines.size && !lines[i].trimStart().startsWith("```")) {
+                        code.add(lines[i])
+                        i++
+                    }
+                    i++
+                    if (code.isNotEmpty()) {
+                        Box(
+                            Modifier.fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.surface)
+                                .padding(8.dp)
+                        ) {
+                            Text(
+                                code.joinToString("\n"),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = color
+                            )
+                        }
+                    }
+                }
+                line.trimStart().startsWith("### ") -> {
+                    Text(
+                        markdownInline(line.trimStart().removePrefix("### ").trim()),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = color
+                    )
+                    i++
+                }
+                line.trimStart().startsWith("## ") -> {
+                    Text(
+                        markdownInline(line.trimStart().removePrefix("## ").trim()),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = color
+                    )
+                    i++
+                }
+                line.trimStart().startsWith("# ") -> {
+                    Text(
+                        markdownInline(line.trimStart().removePrefix("# ").trim()),
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = color
+                    )
+                    i++
+                }
+                line.trimStart().startsWith("|") && line.trimEnd().endsWith("|") -> {
+                    val cells = line.trim().trim('|').split("|").map { it.trim() }
+                    if (cells.all { it.all { c -> c == '-' || c == ':' || c == ' ' } }) {
+                        i++
+                    } else {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            cells.forEach { cell ->
+                                Text(
+                                    markdownInline(cell),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = color,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                        i++
+                    }
+                }
+                line.trimStart().startsWith("- ") ||
+                    line.trimStart().startsWith("* ") ||
+                    line.trimStart().startsWith("• ") -> {
+                    val body = line.trimStart().drop(2).trim()
+                    Row {
+                        Text("• ", style = MaterialTheme.typography.bodyMedium, color = color)
+                        Text(markdownInline(body), style = MaterialTheme.typography.bodyMedium, color = color)
+                    }
+                    i++
+                }
+                Regex("^\\d+\\.\\s").containsMatchIn(line.trimStart()) -> {
+                    val trimmed = line.trimStart()
+                    val marker = trimmed.substringBefore(" ")
+                    Row {
+                        Text("$marker ", style = MaterialTheme.typography.bodyMedium, color = color)
+                        Text(
+                            markdownInline(trimmed.substringAfter(" ").trim()),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = color
+                        )
+                    }
+                    i++
+                }
+                line.isBlank() -> {
+                    Spacer(Modifier.height(4.dp))
+                    i++
+                }
+                else -> {
+                    Text(markdownInline(line), style = MaterialTheme.typography.bodyMedium, color = color)
+                    i++
+                }
+            }
+        }
+    }
+}
+
+/** Inline Markdown (**bold**, *italic*, `code`) to AnnotatedString. */
+private fun markdownInline(text: String): AnnotatedString {
+    val pattern = Regex("(\\*\\*[^*]+\\*\\*)|(\\*[^*]+\\*)|(`[^`]+`)")
+    return buildAnnotatedString {
+        var pos = 0
+        for (match in pattern.findAll(text)) {
+            if (match.range.first > pos) append(text.substring(pos, match.range.first))
+            val raw = match.value
+            when {
+                raw.startsWith("**") -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                    append(raw.removePrefix("**").removeSuffix("**"))
+                }
+                raw.startsWith("`") -> withStyle(
+                    SpanStyle(fontFamily = FontFamily.Monospace)
+                ) { append(raw.removePrefix("`").removeSuffix("`")) }
+                raw.startsWith("*") -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
+                    append(raw.removePrefix("*").removeSuffix("*"))
+                }
+                else -> append(raw)
+            }
+            pos = match.range.last + 1
+        }
+        if (pos < text.length) append(text.substring(pos))
     }
 }

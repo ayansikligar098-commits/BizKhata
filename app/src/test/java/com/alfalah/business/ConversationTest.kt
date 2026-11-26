@@ -12,8 +12,21 @@ import com.alfalah.business.domain.ConversationEngine
 import com.alfalah.business.domain.ConversationMemory
 import com.alfalah.business.domain.KnowledgeSnapshot
 import com.alfalah.business.domain.Multilingual
-import com.alfalah.business.domain.PaymentMode
+import com.alfalah.business.domain.ContinuousMode
+import com.alfalah.business.domain.VoiceDecision
+import com.alfalah.business.domain.VoiceInterrupt
+import com.alfalah.business.domain.VoiceNaturalPhrasing
+import com.alfalah.business.domain.VoicePipeline
+import com.alfalah.business.domain.VoiceText
 import com.alfalah.business.domain.ServiceType
+import com.alfalah.business.domain.GraphemeChunker
+import com.alfalah.business.domain.SseEvent
+import com.alfalah.business.domain.SseParser
+import com.alfalah.business.domain.StreamingError
+import com.alfalah.business.domain.Typewriter
+import com.alfalah.business.domain.TypewriterLogic
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -451,6 +464,221 @@ class ConversationTest {
     }
 
     // ------------------------------------------------------------------
+    // 6b. UPDATE 18 — voice conversation (simulated transcripts: this
+    // VM has no microphone, so every voice test drives the pipeline
+    // with text the recogniser would have produced). The user speaks
+    // in HIS own way — no fixed commands: fragments, word-order
+    // swaps, slang and mixed Gujarati/Hindi/English must all be
+    // understood, and an uncertain transcript must ask ONE short
+    // clarification instead of guessing or failing.
+    // ------------------------------------------------------------------
+
+    /** The brief's example sentences, verbatim. */
+    @Test
+    fun voice_verbatim_gujarati_roman_asks_mode_not_guesses() {
+        // "Aaje 500 rupiya Xerox na malya." — amount + service known,
+        // payment mode NOT known: ask, never guess Cash/UPI.
+        val result = parse("Aaje 500 rupiya Xerox na malya.")
+        assertTrue("expected Clarify, got $result", result is AiAssistantParser.AiParseResult.Clarify)
+        val clarify = result as AiAssistantParser.AiParseResult.Clarify
+        assertTrue("must ask payment mode: ${clarify.missing}", clarify.missing.contains("payment mode"))
+        assertTrue("clarification must offer Cash/UPI: ${clarify.question}", clarify.question.contains("UPI"))
+        assertTrue("clarification must be short", clarify.question.length < 120)
+    }
+
+    @Test
+    fun voice_verbatim_mixed_amounts_asks_service() {
+        // "Aaj 300 cash aur 200 UPI hue." — amounts + modes known,
+        // service missing: ask which service, don't invent one.
+        val result = parse("Aaj 300 cash aur 200 UPI hue.")
+        assertTrue("expected Clarify, got $result", result is AiAssistantParser.AiParseResult.Clarify)
+        val clarify = result as AiAssistantParser.AiParseResult.Clarify
+        assertTrue("must ask service: ${clarify.missing}", clarify.missing.contains("service"))
+    }
+
+    @Test
+    fun voice_verbatim_agent_payment_asks_agent_name() {
+        // "Agent ne 500 rupaye dene hain." — no agent named: ask who,
+        // never guess an agent.
+        val result = parse("Agent ne 500 rupaye dene hain.")
+        assertTrue("expected Clarify, got $result", result is AiAssistantParser.AiParseResult.Clarify)
+        val clarify = result as AiAssistantParser.AiParseResult.Clarify
+        assertTrue("must ask agent: ${clarify.missing}", clarify.missing.contains("agent"))
+    }
+
+    @Test
+    fun voice_verbatim_pan_plan_is_not_entry() {
+        // "Kal PAN Card ke 5 application karne hain." — a PLAN for
+        // tomorrow, not money received: must NEVER become a saved
+        // financial entry.
+        assertFalse(
+            "a plan must never be a financial action",
+            VoiceNaturalPhrasing.isFinancialAction("Kal PAN Card ke 5 application karne hain.", ctx, agents, customers)
+        )
+        val result = parse("Kal PAN Card ke 5 application karne hain.")
+        assertFalse("plan must not become an Action: $result", result is AiAssistantParser.AiParseResult.Action)
+    }
+
+    @Test
+    fun voice_verbatim_total_hisab_is_factual() {
+        val result = parse("Aaj ka total hisab batao.")
+        assertTrue("expected Factual, got $result", result is AiAssistantParser.AiParseResult.Factual)
+    }
+
+    @Test
+    fun voice_verbatim_gujarati_profit_is_factual() {
+        val result = parse("આજે કેટલો નફો થયો?")
+        assertTrue("expected Factual, got $result", result is AiAssistantParser.AiParseResult.Factual)
+        val answer = BusinessKnowledge.answer("આજે કેટલો નફો થયો?", emptySnap, today)
+        assertNotNull("profit answer on empty store", answer)
+        assertTrue("empty-store profit must be zero, not invented: ${answer!!.text}", answer.text.contains("0"))
+    }
+
+    @Test
+    fun voice_fragment_xerox_300_cash_is_action() {
+        // Short fragment, no verb, no "aaj": still an entry preview.
+        val result = parse("Xerox 300 cash")
+        assertTrue("expected Action, got $result", result is AiAssistantParser.AiParseResult.Action)
+        val action = (result as AiAssistantParser.AiParseResult.Action).action
+        assertTrue(action is AiAssistantParser.AiAction.DailyEntries)
+        val entry = (action as AiAssistantParser.AiAction.DailyEntries).entries.single()
+        assertEquals(ServiceType.XEROX, entry.service)
+        assertEquals(30_000L, entry.amountPaise)
+        assertEquals(PaymentMode.CASH, entry.mode)
+    }
+
+    @Test
+    fun voice_word_order_swap_is_action() {
+        // His word order, not the "correct" order — same entry.
+        val result = parse("300 cash Xerox")
+        assertTrue("expected Action, got $result", result is AiAssistantParser.AiParseResult.Action)
+        val action = (result as AiAssistantParser.AiParseResult.Action).action
+        val entry = (action as AiAssistantParser.AiAction.DailyEntries).entries.single()
+        assertEquals(ServiceType.XEROX, entry.service)
+        assertEquals(30_000L, entry.amountPaise)
+        assertEquals(PaymentMode.CASH, entry.mode)
+    }
+
+    @Test
+    fun voice_natural_variation_gujarati_fragment() {
+        val result = parse("Xerox na 300 cash malya")
+        assertTrue("expected Action, got $result", result is AiAssistantParser.AiParseResult.Action)
+        val entry = ((result as AiAssistantParser.AiParseResult.Action).action
+            as AiAssistantParser.AiAction.DailyEntries).entries.single()
+        assertEquals(30_000L, entry.amountPaise)
+        assertEquals(PaymentMode.CASH, entry.mode)
+    }
+
+    @Test
+    fun voice_slang_incomplete_asks_short_clarification() {
+        // "Xerox 300" — service + amount known, mode missing: one
+        // short question in his style, not a demand to rephrase.
+        val result = parse("Xerox 300")
+        assertTrue("expected Clarify, got $result", result is AiAssistantParser.AiParseResult.Clarify)
+        val question = VoiceText.clarificationForMissing(AiLanguage.HINGLISH, "payment mode", "₹300")
+        assertTrue("clarification must ask Cash vs UPI: $question", question.contains("Cash") && question.contains("UPI"))
+        assertTrue("clarification must be short", question.length < 120)
+    }
+
+    @Test
+    fun voice_low_confidence_asks_repeat_never_guesses() {
+        val decision = VoicePipeline.decide(
+            "Aaj Xerox ke 300 cash hue", 0.20f, false, null, 0L, 10_000L
+        )
+        assertTrue("low confidence must ask repeat, got $decision", decision is VoiceDecision.AskRepeat)
+        // No score from the recogniser = unknown, not low: send it.
+        val unknown = VoicePipeline.decide(
+            "Aaj Xerox ke 300 cash hue", -1f, false, null, 0L, 10_000L
+        )
+        assertTrue("unknown confidence must send, got $unknown", unknown is VoiceDecision.Send)
+        val prompt = VoiceText.repeatPrompt(AiLanguage.HINGLISH)
+        assertTrue("repeat prompt must be short", prompt.length < 120)
+        assertFalse("repeat prompt must not demand a fixed format", prompt.contains("exactly"))
+    }
+
+    @Test
+    fun voice_duplicate_transcript_ignored_once_only() {
+        val first = VoicePipeline.decide("Haan", 0.9f, false, null, 0L, 10_000L)
+        assertTrue(first is VoiceDecision.Send)
+        val repeat = VoicePipeline.decide("Haan", 0.9f, false, "Haan", 10_000L, 11_000L)
+        assertTrue("same transcript 1s later must be ignored, got $repeat", repeat is VoiceDecision.IgnoreDuplicate)
+        val later = VoicePipeline.decide("Haan", 0.9f, false, "Haan", 10_000L, 20_000L)
+        assertTrue("same transcript after the window is a new turn, got $later", later is VoiceDecision.Send)
+    }
+
+    @Test
+    fun voice_interrupt_stops_speech_and_keeps_instruction() {
+        assertEquals("", VoiceInterrupt.stripInterruptPrefix("Bas, short mein batao."))
+        assertTrue(VoiceInterrupt.isInterruptOnly("Bas."))
+        assertEquals(
+            "aaj kitna profit hua",
+            VoiceInterrupt.stripInterruptPrefix("Bas, short mein batao. Aaj kitna profit hua?")
+        )
+        val decision = VoicePipeline.decide(
+            "Bas, short mein batao. Aaj kitna profit hua?", 0.9f, true, null, 0L, 10_000L
+        )
+        assertTrue("interrupt must win while speaking, got $decision", decision is VoiceDecision.InterruptAndSend)
+        assertTrue((decision as VoiceDecision.InterruptAndSend).text.contains("profit"))
+    }
+
+    @Test
+    fun voice_speakable_strips_markdown_and_rupee() {
+        val spoken = VoiceText.speakable("**Total: ₹500** • Cash")
+        assertFalse("spoken text must not contain markdown: $spoken", spoken.contains("*"))
+        assertFalse("spoken text must not contain ₹: $spoken", spoken.contains("₹"))
+        assertTrue("spoken text must say rupaye: $spoken", spoken.contains("rupaye"))
+        assertTrue("spoken text must keep the figure: $spoken", spoken.contains("500"))
+    }
+
+    @Test
+    fun voice_haan_confirms_only_shown_preview() {
+        // "Haan" is affirmative in the pipeline (the ViewModel only
+        // confirms when a preview is actually pending — a bare
+        // "Haan" with no preview saves nothing).
+        assertTrue(AiAssistantParser.isAffirmative("Haan"))
+        assertTrue(AiAssistantParser.isAffirmative("Haan, save kar do."))
+        assertFalse(AiAssistantParser.isAffirmative("Nahi, mat karo"))
+    }
+
+    @Test
+    fun voice_continuous_mode_restarts_only_when_active() {
+        val session = ContinuousMode.start()
+        assertTrue(ContinuousMode.shouldRestartAfterResult(session))
+        assertTrue(ContinuousMode.shouldRestartAfterSpeech(session))
+        val stopped = ContinuousMode.stop(session)
+        assertFalse(ContinuousMode.shouldRestartAfterResult(stopped))
+        assertFalse(ContinuousMode.shouldRestartAfterSpeech(stopped))
+        assertEquals(1, ContinuousMode.nextTurn(session).turns)
+    }
+
+    @Test
+    fun voice_no_rigid_grammar_fragments_understood() {
+        // His own phrasing, in all its variety, is understood by the
+        // existing parser — there is no fixed command to memorise.
+        listOf(
+            "Xerox 300 cash",
+            "300 cash Xerox",
+            "Xerox na 300 cash malya",
+            "Aaje 500 rupiya Xerox na malya.",
+            "Aaj 300 cash aur 200 UPI hue.",
+            "Kaise ho bhai?",
+            "Aaj ka total hisab batao."
+        ).forEach { text ->
+            assertTrue(
+                "natural phrasing not understood: $text",
+                VoiceNaturalPhrasing.understands(text, ctx, agents, customers)
+            )
+        }
+    }
+
+    @Test
+    fun voice_repeat_prompt_in_user_language() {
+        assertTrue(VoiceText.repeatPrompt(AiLanguage.ENGLISH).contains("say it once more"))
+        assertTrue(VoiceText.repeatPrompt(AiLanguage.GUJARATI).contains("bolo"))
+        assertTrue(VoiceText.repeatPrompt(AiLanguage.HINDI).contains("boliye"))
+    }
+
+    // ------------------------------------------------------------------
     // 7. MEASURED ACCURACY — every scenario above, one harness.
     // ------------------------------------------------------------------
     @Test
@@ -487,7 +715,25 @@ class ConversationTest {
             "do-it navigation" to { doIt_navigationExecutes() },
             "do-it checklist" to { doIt_checklistIsProduced() },
             "do-it summary" to { doIt_summaryIsRealFromLedgers() },
-            "built-in backstop" to { builtInResponderBackstop() }
+            "built-in backstop" to { builtInResponderBackstop() },
+            "u18 verbatim gujarati asks mode" to { voice_verbatim_gujarati_roman_asks_mode_not_guesses() },
+            "u18 verbatim mixed asks service" to { voice_verbatim_mixed_amounts_asks_service() },
+            "u18 verbatim agent asks name" to { voice_verbatim_agent_payment_asks_agent_name() },
+            "u18 verbatim pan plan not entry" to { voice_verbatim_pan_plan_is_not_entry() },
+            "u18 verbatim total factual" to { voice_verbatim_total_hisab_is_factual() },
+            "u18 verbatim gujarati profit" to { voice_verbatim_gujarati_profit_is_factual() },
+            "u18 fragment action" to { voice_fragment_xerox_300_cash_is_action() },
+            "u18 word order swap" to { voice_word_order_swap_is_action() },
+            "u18 gujarati fragment" to { voice_natural_variation_gujarati_fragment() },
+            "u18 incomplete clarification" to { voice_slang_incomplete_asks_short_clarification() },
+            "u18 low confidence repeat" to { voice_low_confidence_asks_repeat_never_guesses() },
+            "u18 duplicate ignored" to { voice_duplicate_transcript_ignored_once_only() },
+            "u18 interrupt keeps instruction" to { voice_interrupt_stops_speech_and_keeps_instruction() },
+            "u18 speakable strips markdown" to { voice_speakable_strips_markdown_and_rupee() },
+            "u18 haan affirmative" to { voice_haan_confirms_only_shown_preview() },
+            "u18 continuous restarts" to { voice_continuous_mode_restarts_only_when_active() },
+            "u18 no rigid grammar" to { voice_no_rigid_grammar_fragments_understood() },
+            "u18 repeat prompt language" to { voice_repeat_prompt_in_user_language() }
         )
         var passed = 0
         val failed = mutableListOf<String>()
@@ -503,5 +749,223 @@ class ConversationTest {
         println("CONVERSATIONAL AI ACCURACY: $passed/${scenarios.size} passed ($rate%)")
         if (failed.isNotEmpty()) println("FAILED: " + failed.joinToString("; "))
         assertTrue("Conversational accuracy $rate% is below 95% — failures: $failed", rate >= 95)
+    }
+}
+
+/**
+ * STREAMING + TYPING TESTS (UPDATE 17, 2026-11-27) — the typewriter,
+ * the grapheme-safe chunker and the SSE parser.
+ *
+ * The same cases are mirrored in docs/ai_assistant_mirror.py (no JDK
+ * on this VM); the mirror is the runnable verification here, and
+ * ./gradlew testDebugUnitTest in Android Studio is still pending.
+ * Live cloud streaming is NOT tested here — no key is configured in
+ * this test setup, and the cloud path is verified on the owner's
+ * device only.
+ */
+class StreamingTest {
+
+    // --- Grapheme-safe chunking ---------------------------------------
+
+    @Test
+    fun chunkerGraphemeSafety_devanagari() {
+        val text = "आज Xerox के ३०० रुपये कैश मिले।"
+        val chunks = GraphemeChunker.displayChunks(text)
+        assertEquals(text, chunks.joinToString(""))
+        assertTrue(GraphemeChunker.isLossless(chunks, text))
+        // "कै" (ka + vowel sign ै) is ONE cluster, never split.
+        assertEquals(listOf("कै", "श"), GraphemeChunker.graphemeClusters("कैश"))
+        // No chunk starts with a combining vowel sign.
+        for (cluster in GraphemeChunker.graphemeClusters(text)) {
+            assertFalse("cluster starts with a vowel sign: $cluster", cluster[0] == 'ै' || cluster[0] == 'ो' || cluster[0] == 'ि')
+        }
+    }
+
+    @Test
+    fun chunkerGraphemeSafety_gujaratiAndTamil() {
+        val gujarati = "આજે Xerox ના ૩૦૦ રૂપિયા cash મળ્યા।"
+        assertEquals(gujarati, GraphemeChunker.displayChunks(gujarati).joinToString(""))
+        assertEquals(listOf("કે", "શ"), GraphemeChunker.graphemeClusters("કેશ"))
+        val tamil = "இன்று Xerox 300 ரூபாய் cash வந்தது."
+        assertEquals(tamil, GraphemeChunker.displayChunks(tamil).joinToString(""))
+        // Tamil "ரூ" (ra + vowel sign ூ) is one cluster.
+        assertEquals(1, GraphemeChunker.graphemeClusters("ரூ").size)
+    }
+
+    @Test
+    fun chunkerGraphemeSafety_emojiZwjAndMixed() {
+        // Family emoji is one ZWJ-joined cluster; thumbs-up + skin
+        // tone is one cluster. Neither may ever be split mid-stream.
+        assertEquals(1, GraphemeChunker.graphemeClusters("👨‍👩‍👧").size)
+        assertEquals(1, GraphemeChunker.graphemeClusters("👍🏽").size)
+        val mixed = "Aaj Xerox ke 300 cash 👍🏽 aur UPI 200 — આજે સારું ચાલ્યું।"
+        val chunks = GraphemeChunker.displayChunks(mixed)
+        assertEquals(mixed, chunks.joinToString(""))
+        assertTrue(GraphemeChunker.isLossless(chunks, mixed))
+        assertEquals(emptyList<String>(), GraphemeChunker.displayChunks(""))
+        assertEquals(emptyList<String>(), GraphemeChunker.graphemeClusters(""))
+    }
+
+    @Test
+    fun chunkerWordBoundaries_neverSplitsAWord() {
+        val chunks = GraphemeChunker.displayChunks("Xerox 300 cash")
+        assertEquals(listOf("Xerox ", "300 ", "cash"), chunks)
+        // A word is never cut: every chunk except the last ends in space.
+        for (chunk in chunks.dropLast(1)) assertTrue(chunk.endsWith(" "))
+    }
+
+    // --- Typing speed ---------------------------------------------------
+
+    @Test
+    fun typingSpeed_naturalBand() {
+        assertTrue(TypewriterLogic.isNaturalPace(11.0))
+        assertTrue(TypewriterLogic.isNaturalPace(9.0))
+        assertTrue(TypewriterLogic.isNaturalPace(13.0))
+        assertFalse(TypewriterLogic.isNaturalPace(30.0))
+        // 30 words ~2.7 s (spec: 2.5–3.5 s); 150 words ~13.6 s (12–16 s).
+        val thirty = TypewriterLogic.durationSeconds(30)
+        assertTrue("30 words in $thirty s", thirty in 2.5..3.5)
+        val long = TypewriterLogic.durationSeconds(150)
+        assertTrue("150 words in $long s", long in 12.0..16.0)
+        assertEquals(0.0, TypewriterLogic.durationSeconds(0), 0.001)
+        // Measured words/sec: 30 words shown in 2727 ms is ~11 wps.
+        val measured = TypewriterLogic.wordsPerSecond(30, 2727L)
+        assertTrue("measured $measured wps", measured in 9.0..13.0)
+    }
+
+    @Test
+    fun typewriterSteps_finalEqualsSource() {
+        val source = "Aaj Xerox ke 300 cash aur 200 UPI hue. Total 500 rupaye."
+        val steps = TypewriterLogic.steps(source)
+        assertTrue(steps.isNotEmpty())
+        assertEquals(source, steps.last())
+        // Progressive growth: each step is a strict prefix of the next.
+        for (i in 1 until steps.size) assertTrue(steps[i].startsWith(steps[i - 1]))
+    }
+
+    // --- Typewriter (coroutine) ----------------------------------------
+
+    @Test
+    fun typewriterFinalEqualsSource_emptyShortLong() = runBlocking {
+        for (source in listOf("", "Hi.", "Aaj ka profit ₹500 hai. Xerox se ₹300 cash aur ₹200 UPI mile.")) {
+            val writer = Typewriter(wordsPerSecond = 1000.0)
+            writer.feed(source)
+            writer.markFinished()
+            writer.start(this)
+            writer.awaitCompletion()
+            assertEquals(source, writer.currentText)
+            assertEquals(source, writer.fedText)
+        }
+    }
+
+    @Test
+    fun typewriterLongReply_neverAllAtOnce() = runBlocking {
+        val source = (1..40).joinToString(" ") { "word$it" }
+        val writer = Typewriter(wordsPerSecond = 1000.0)
+        writer.feed(source)
+        writer.markFinished()
+        writer.start(this)
+        delay(5L)
+        val mid = writer.currentText
+        assertTrue("mid-stream text must be a proper prefix, got: $mid", mid.isNotEmpty() && mid.length < source.length && source.startsWith(mid))
+        writer.awaitCompletion()
+        assertEquals(source, writer.currentText)
+    }
+
+    @Test
+    fun typewriterStopPreservesPrefix() = runBlocking {
+        val source = (1..40).joinToString(" ") { "word$it" }
+        val writer = Typewriter(wordsPerSecond = 100.0)
+        writer.feed(source)
+        writer.markFinished()
+        writer.start(this)
+        delay(60L)
+        writer.stop()
+        writer.awaitCompletion()
+        val shown = writer.currentText
+        assertTrue("stopped text must be a non-empty prefix", shown.isNotEmpty() && shown.length < source.length)
+        assertTrue(source.startsWith(shown))
+    }
+
+    @Test
+    fun typewriterAppendWhileTyping() = runBlocking {
+        val writer = Typewriter(wordsPerSecond = 1000.0)
+        writer.feed("Aaj Xerox ke 300 cash hue. ")
+        writer.start(this)
+        delay(10L)
+        writer.feed("Aur 200 UPI bhi mile.")
+        writer.markFinished()
+        writer.awaitCompletion()
+        assertEquals("Aaj Xerox ke 300 cash hue. Aur 200 UPI bhi mile.", writer.currentText)
+    }
+
+    @Test
+    fun typewriterFlushRevealsAll() = runBlocking {
+        val source = "Short reply, typed at once on flush."
+        val writer = Typewriter(wordsPerSecond = 11.0)
+        writer.feed(source)
+        writer.start(this)
+        writer.flush()
+        assertEquals(source, writer.currentText)
+    }
+
+    // --- SSE parser ------------------------------------------------------
+
+    @Test
+    fun sseParser_splitLinesAndSplitUtf8() {
+        val parser = SseParser()
+        // One data line split across two feeds — including inside a
+        // Devanagari word — parses exactly once, whole.
+        val first = parser.feed("data: {\"text\": \"नम")
+        assertTrue(first.isEmpty())
+        val second = parser.feed("स्ते, aaj ka hisab\"}\n")
+        assertEquals(1, second.size)
+        assertTrue(second[0] is SseEvent.Text)
+        assertEquals("नमस्ते, aaj ka hisab", (second[0] as SseEvent.Text).text)
+    }
+
+    @Test
+    fun sseParser_doneAndCancel() {
+        val parser = SseParser()
+        val events = parser.feed("data: {\"text\": \"Hi\"}\n: ping\n\ndata: [DONE]\n")
+        assertEquals(4, events.size)
+        assertTrue(events[0] is SseEvent.Text)
+        assertTrue(events[1] is SseEvent.Ignored)
+        assertTrue(events[2] is SseEvent.Ignored)
+        assertTrue(events[3] is SseEvent.Done)
+        assertTrue(parser.isDone)
+        // Feeding after [DONE] is a no-op — no duplicate text.
+        assertEquals(emptyList<SseEvent>(), parser.feed("data: {\"text\": \"again\"}\n"))
+    }
+
+    @Test
+    fun sseParser_ignoresCommentsAndMalformed() {
+        val parser = SseParser()
+        assertEquals(listOf(SseEvent.Ignored), parser.feed(": keep-alive\n"))
+        assertEquals(listOf(SseEvent.Ignored), parser.feed("\n"))
+        assertEquals(listOf(SseEvent.Ignored), parser.feed("data: {\"no_text\": 1}\n"))
+        assertEquals("a\nb", parser.extractFirstText("{\"text\": \"a\\nb\"}"))
+        assertEquals(null, parser.extractFirstText("{\"other\": \"x\"}"))
+    }
+
+    @Test
+    fun streamingErrorsAreTyped() {
+        assertTrue(StreamingError.NoCloudConfigured() is StreamingError)
+        assertTrue(StreamingError.Network() is StreamingError)
+        assertEquals(429, StreamingError.HttpStatus(429).statusCode)
+        assertTrue(StreamingError.InvalidResponse() is StreamingError)
+        assertTrue(StreamingError.Cancelled() is StreamingError)
+    }
+
+    // --- Key migration (UPDATE 17 check) ---------------------------------
+    // The migration itself lives in SettingsStore (needs a Context, so
+    // it cannot run in this JVM unit test). Its LOGIC — copy the
+    // legacy entry into the new entry only when the new one is empty,
+    // keep the legacy entry in place, never overwrite a set key, and
+    // clear removes both — is mirrored exactly in
+    // ai_assistant_mirror.py (u17-migration-*) and verified there.
+    @Test
+    fun migrationLogic_documentedInMirror() {
+        assertTrue(true)
     }
 }

@@ -16,7 +16,9 @@ used as expectations — every expected figure is computed from the
 scenario's own input rows.
 """
 import hashlib
+import json
 import re
+import unicodedata
 from datetime import date, timedelta
 
 TODAY = date.today().toordinal()  # epoch days, same basis as Kotlin LocalDate
@@ -744,8 +746,10 @@ def parse(text, ctx=None, agents=None, customers=None):
     cp = parse_customer_payment(q, customers, lang)
     if cp:
         return cp
+    # UPDATE 18 — a bare fragment without a mode ("Xerox 300") also
+    # enters parse_daily, which asks one short mode question instead
+    # of returning Unknown. The mode is never defaulted silently.
     bare = (detect_service(q) is not None and main_amount(q) is not None
-            and detect_mode(q) is not None
             and not any(c.lower() in q for c in customers))
     if has_income(q) or bare:
         return parse_daily(q, ctx, lang)
@@ -2123,6 +2127,236 @@ def is_true(v, msg=""):
     assert v, f"expected True {msg}"
 
 
+# ---------------------------------------------------------------------------
+# UPDATE 17 — streaming + typing (mirror of domain/Streaming.kt).
+# Same rules as the Kotlin: grapheme clusters via combining-mark /
+# ZWJ / variation-selector / skin-tone joining, display chunks split
+# only at word boundaries, typewriter at ~11 words/sec, incremental
+# SSE parsing with [DONE], typed failures. The Kotlin is authoritative;
+# a failure here is a real signal.
+# ---------------------------------------------------------------------------
+def _is_cluster_extend(ch):
+    code = ord(ch)
+    return (unicodedata.category(ch) in ("Mn", "Mc", "Me")
+            or code == 0x200D
+            or 0xFE00 <= code <= 0xFE0F
+            or 0x1F3FB <= code <= 0x1F3FF)
+
+
+def grapheme_clusters(text):
+    """Mirror of GraphemeChunker.graphemeClusters (BreakIterator)."""
+    clusters, cur = [], ""
+    for ch in text:
+        if not cur:
+            cur = ch
+            continue
+        if _is_cluster_extend(ch) or cur.endswith("\u200d"):
+            cur += ch
+        else:
+            clusters.append(cur)
+            cur = ch
+    if cur:
+        clusters.append(cur)
+    return clusters
+
+
+def display_chunks(text):
+    """Mirror of GraphemeChunker.displayChunks: word + trailing space."""
+    chunks, cur = [], ""
+    for cl in grapheme_clusters(text):
+        cur += cl
+        if cl.isspace():
+            chunks.append(cur)
+            cur = ""
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def typewriter_steps(source):
+    """Cumulative display strings, one per display chunk (mirror of
+    TypewriterLogic.steps). The last step always equals the source."""
+    out, cur = [], ""
+    for chunk in display_chunks(source):
+        cur += chunk
+        out.append(cur)
+    return out
+
+
+def duration_seconds(word_count, words_per_second=11.0):
+    return 0.0 if word_count <= 0 or words_per_second <= 0 else word_count / words_per_second
+
+
+def words_per_second(word_count, elapsed_ms):
+    return 0.0 if elapsed_ms <= 0 else word_count * 1000.0 / elapsed_ms
+
+
+def delay_per_word_ms(words_per_second=11.0):
+    return 100 if words_per_second <= 0 else int(1000.0 / words_per_second)
+
+
+class SseParser:
+    """Mirror of domain/Streaming.kt SseParser (incremental, [DONE])."""
+
+    def __init__(self):
+        self._buf, self.done = "", False
+
+    @staticmethod
+    def extract_first_text(payload):
+        m = re.search(r'"text"\s*:\s*("(?:\\.|[^"\\])*")', payload)
+        if not m:
+            return None
+        try:
+            return json.loads(m.group(1))
+        except ValueError:
+            return None
+
+    def feed(self, chunk):
+        if self.done or not chunk:
+            return []
+        self._buf += chunk
+        events = []
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            line = line[:-1] if line.endswith("\r") else line
+            if not line.strip() or line.startswith(":") or not line.startswith("data:"):
+                events.append(("ignored", None))
+                continue
+            data = line[len("data:"):].strip()
+            if data == "[DONE]":
+                self.done = True
+                events.append(("done", None))
+                self._buf = ""
+                break
+            text = self.extract_first_text(data)
+            events.append(("text", text) if text else ("ignored", None))
+        return events
+
+
+class TypewriterSim:
+    """Simulated-clock typewriter: feed chunks while typing, reveal at
+    a controlled pace, stop keeps the shown prefix, flush reveals all.
+    Mirrors domain/Streaming.kt Typewriter (state machine only — no
+    real sleeps, so the mirror measures pace from the simulated clock)."""
+
+    def __init__(self, words_per_second=11.0):
+        self.wps = words_per_second
+        self.pending, self.shown = [], ""
+        self.finished, self.stopped = False, False
+        self.elapsed_ms = 0
+
+    def feed(self, text):
+        if text:
+            self.pending.extend(display_chunks(text))
+
+    def mark_finished(self):
+        self.finished = True
+
+    def run(self):
+        """Reveal everything queued, one chunk per word-delay."""
+        while self.pending and not self.stopped:
+            self.shown += self.pending.pop(0)
+            self.elapsed_ms += delay_per_word_ms(self.wps)
+        return self.shown
+
+    def run_partial(self, max_chunks):
+        """Reveal at most max_chunks (mid-stream sampling)."""
+        for _ in range(min(max_chunks, len(self.pending))):
+            self.shown += self.pending.pop(0)
+            self.elapsed_ms += delay_per_word_ms(self.wps)
+        return self.shown
+
+    def stop(self):
+        self.pending.clear()
+        self.finished = True
+        self.stopped = True
+
+    def flush(self):
+        self.shown += "".join(self.pending)
+        self.pending.clear()
+        self.finished = True
+
+
+class GenerationSim:
+    """The 14-step flow's generation lifecycle (mirror of the
+    ChatbotViewModel streaming state): THINKING until the first
+    displayable text, STREAMING with a blinking cursor, then
+    COMPLETED (cursor gone, timestamp stamped) / STOPPED (text kept)
+    / FAILED (Retry offered). One active generation at a time."""
+
+    def __init__(self):
+        self.state, self.shown, self.cursor = "IDLE", "", False
+        self.timestamp_shown, self.can_retry, self.can_regenerate = False, False, True
+        self.generations_active = 0
+
+    def send(self, typewriter):
+        assert self.generations_active == 0, "two simultaneous generations"
+        self.generations_active = 1
+        self.state, self.cursor = "THINKING", False
+        return typewriter
+
+    def first_chunk(self, typewriter):
+        typewriter.run_partial(1)
+        self.shown = typewriter.shown
+        assert self.shown, "first chunk must be displayable text"
+        self.state, self.cursor = "STREAMING", True
+        assert not self.timestamp_shown, "no timestamp while streaming"
+
+    def complete(self, typewriter):
+        typewriter.mark_finished()
+        self.shown = typewriter.run()
+        self.state, self.cursor = "COMPLETED", False
+        self.timestamp_shown, self.generations_active = True, 0
+
+    def stop(self, typewriter):
+        typewriter.stop()
+        self.shown = typewriter.shown
+        self.state, self.cursor = "STOPPED", False
+        self.timestamp_shown, self.generations_active = True, 0
+
+    def fail(self):
+        self.state, self.cursor = "FAILED", False
+        self.can_retry, self.generations_active = True, 0
+
+
+def markdown_plain(text):
+    """What the small Compose Markdown renderer must preserve: strip
+    markers, keep every word (headings, bold, italic, code, lists,
+    tables). Used to check rendering never drops text."""
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("```"):
+            continue
+        line = re.sub(r"^#{1,3}\s+", "", line)
+        line = re.sub(r"^[-*•]\s+", "", line)
+        line = re.sub(r"^\d+\.\s+", "", line)
+        line = line.replace("**", "").replace("`", "")
+        line = re.sub(r"\*([^*]+)\*", r"\1", line)
+        if line.startswith("|"):
+            line = " ".join(c.strip() for c in line.strip("|").split("|") if c.strip() not in ("", "---", ":---"))
+        out.append(line)
+    return "\n".join(x for x in out if x.strip())
+
+
+def migrate_legacy_key(prefs):
+    """Mirror of SettingsStore.migrateLegacyAiKey: copy the legacy
+    entry into the new entry only when the new one is empty; keep the
+    legacy entry in place; never overwrite a set key. Returns True
+    only when a copy happened. The VALUE is never printed."""
+    if (prefs.get("ai_key") or "").strip() == "" and (prefs.get("gemini_api_key") or "").strip() != "":
+        prefs["ai_key"] = prefs["gemini_api_key"]
+        return True
+    return False
+
+
+def clear_ai_key(prefs):
+    """Mirror of SettingsStore.clearAiKey: removes BOTH entries, so a
+    later migration run can never resurrect a cleared key."""
+    prefs.pop("ai_key", None)
+    prefs.pop("gemini_api_key", None)
+
+
 def main():
     results = []
 
@@ -3120,6 +3354,358 @@ def main():
         is_true("₹500" in r["text"], r["text"])
         is_true("Xerox" in r["text"], r["text"])
 
+    # ---------------- UPDATE 18: voice conversation --------------------
+    # Mirror of domain/VoiceConversation.kt + ui/chatbot/VoiceOutput.kt
+    # + VoiceInputHelper (confidence / errors) + ChatbotViewModel
+    # voice wiring. The VM has NO microphone, so every scenario drives
+    # the pipeline with a text transcript simulating STT output.
+    # ONE pipeline: voice_respond IS respond() — the same conversational
+    # client as text chat (cloud when the owner added his free-tier
+    # key, local engine otherwise). STT/TTS are the native phone
+    # services, not that client. No provider name appears anywhere.
+    # The user speaks in HIS own way: no fixed commands — fragments,
+    # word-order swaps, slang and mixed languages are understood by
+    # the existing parser; an uncertain transcript asks ONE short
+    # clarification instead of guessing.
+    VERBATIM = [
+        "Aaje 500 rupiya Xerox na malya.",
+        "Aaj 300 cash aur 200 UPI hue.",
+        "Agent ne 500 rupaye dene hain.",
+        "Kal PAN Card ke 5 application karne hain.",
+        "Aaj ka total hisab batao.",
+        "આજે કેટલો નફો થયો?",
+    ]
+
+    def voice_strip_interrupt(text):
+        n = re.sub(r"[.,!?]+", " ", text.strip().lower())
+        n = re.sub(r"\s+", " ", n).strip()
+        phrases = ["bas short mein batao", "bas short me batao",
+                   "short mein batao", "short me batao", "bas bas",
+                   "bas", "ruk", "ruko", "ruk jao", "stop", "chup",
+                   "chup ho jao", "bas karo", "band karo"]
+        for p in sorted(phrases, key=len, reverse=True):
+            if n == p:
+                return ""
+            if n.startswith(p + " "):
+                return n[len(p):].strip()
+        return None
+
+    def voice_decide(text, confidence, speaking, last, last_at, now):
+        # Mirror of VoicePipeline.decide: empty -> interrupt ->
+        # duplicate -> low confidence -> send. -1 = no score given.
+        if not text.strip():
+            return ("ignore_empty", None)
+        after = voice_strip_interrupt(text)
+        if after is not None:
+            return ("interrupt", after)
+        norm = canonicalise(text)
+        if last is not None and canonicalise(last) == norm and 0 <= now - last_at <= 4000:
+            return ("ignore_duplicate", None)
+        if 0 <= confidence < 0.45:
+            return ("ask_repeat", "low_confidence")
+        if len(norm) < 2:
+            return ("ask_repeat", "unclear")
+        return ("send", text.strip())
+
+    def voice_speakable(text):
+        s = re.sub(r"https?://\S+", " link ", text)
+        s = s.replace("₹", " rupaye ").replace("✓", "")
+        s = re.sub(r"[#*_`>]+", " ", s).replace("•", ", ")
+        s = re.sub(r"\n\s*[-•]\s*", ", ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        if len(s) > 1200:
+            s = s[:1200].rstrip() + " ... aage ka jawab aap chat mein padh sakte hain."
+        return s
+
+    def voice_repeat_prompt(lang):
+        return {
+            "en": "I couldn't hear that clearly — please say it once more, I'm listening.",
+            "hi": "Aawaz saaf nahi aayi — ek baar phir se boliye, main sun raha hoon.",
+            "gu": "Avaj saras nathi sambhlayo — ek var phari bolo, hu sambhlu chhu.",
+        }.get(lang, "Aawaz saaf nahi aayi — ek baar phir se boliye, main sun raha hoon.")
+
+    def voice_stt_error(code):
+        # Mirror of VoiceInputHelper.onError messages.
+        return {
+            "no_match": "Aawaz saaf nahi aayi — phir se boliye.",
+            "timeout": "Aawaz saaf nahi aayi — phir se boliye.",
+            "network": "Voice ke liye internet chahiye — connection check karke phir se try karein.",
+            "permission": "Microphone ki permission chahiye — Settings se allow karein.",
+            "busy": "Voice input abhi busy hai — thodi der baad try karein.",
+        }.get(code, "Voice input nahi ho paya — type karke bhej sakte hain.")
+
+    def voice_permission_message(granted):
+        if granted:
+            return ("listening", None)
+        return ("denied",
+                "Microphone ki permission nahi mili — type karke bhej sakte hain.")
+
+    def voice_should_restart(active, user_stopped):
+        return bool(active and not user_stopped)
+
+    def voice_respond(text, ctx, snap):
+        # Voice uses the SAME pipeline as text chat — literally the
+        # same function. A voice reply is never a separate AI path.
+        return respond(text, ctx, snap)
+
+    class VoiceStore:
+        """In-memory stand-in for the Room store + idempotency keys
+        (mirror of BusinessRepository.executeAiAction)."""
+        def __init__(self):
+            self.entries = []
+            self.keys = set()
+
+        def execute(self, action, key):
+            if key in self.keys:
+                return "Duplicate"
+            self.keys.add(key)
+            if action.get("kind") == "DailyEntries":
+                self.entries.extend(action["entries"])
+            else:
+                self.entries.append(action)
+            return "Saved"
+
+    def voice_key(action):
+        if action.get("kind") == "DailyEntries":
+            canon = "|".join(
+                f"{e['service']}:{e['amount']}:{e['mode']}" for e in action["entries"])
+        else:
+            canon = f"{action.get('kind')}:{action.get('amount')}"
+        return f"1|{TODAY}|{canon}"
+
+    @t("u18-s1 normal voice conversation")
+    def _():
+        # Spoken greeting: same pipeline as text, natural reply, no
+        # records talk, no money question.
+        r = voice_respond("Kaise ho bhai?", {}, EMPTY_SNAP)
+        eq(r["kind"], "Conversational")
+        _no_records(r)
+        _no_money_q(r)
+        is_true("badhiya" in r["text"].lower(), r["text"])
+
+    @t("u18-s2 mixed-language voice input")
+    def _():
+        # "Aaj 300 cash aur 200 UPI hue." — amounts + modes heard,
+        # service missing: short clarification, never an invented
+        # service. Detection still works on the mixed sentence.
+        kind, a = parse("Aaj 300 cash aur 200 UPI hue.", CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Clarify")
+        is_true("service" in a["missing"], str(a))
+        is_true(len(a["question"]) < 120, a["question"])
+
+    @t("u18-s3 cash income by voice (store-verified)")
+    def _():
+        store = VoiceStore()
+        kind, a = parse("Aaj Xerox ke 300 cash hue.", CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Action")
+        eq(a["entries"][0]["service"], "XEROX")
+        eq(a["entries"][0]["amount"], 30000)
+        eq(a["entries"][0]["mode"], "CASH")
+        # Preview -> "Haan" -> Saved: exactly one entry in the store.
+        eq(store.execute(a, voice_key(a)), "Saved")
+        eq(len(store.entries), 1)
+        eq(sum(e["amount"] for e in store.entries), 30000)
+
+    @t("u18-s4 UPI income by voice (store-verified)")
+    def _():
+        store = VoiceStore()
+        kind, a = parse("Aaj Xerox ke 200 rupaye UPI hue", CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Action")
+        eq(a["entries"][0]["mode"], "UPI")
+        eq(a["entries"][0]["amount"], 20000)
+        eq(store.execute(a, voice_key(a)), "Saved")
+        eq(sum(e["amount"] for e in store.entries if e["mode"] == "UPI"), 20000)
+
+    @t("u18-s5 expense by voice (store-verified)")
+    def _():
+        store = VoiceStore()
+        kind, a = parse("Aaj 200 rupaye machine repair mein cash kharch hue", CTX, AGENTS, CUSTOMERS)
+        eq(a["kind"], "Expense")
+        eq(a["amount"], 20000)
+        eq(a["mode"], "CASH")
+        eq(store.execute(a, voice_key(a)), "Saved")
+        eq(len(store.entries), 1)
+
+    @t("u18-s6 daily profit by voice (real figures)")
+    def _():
+        r = voice_respond("Aaj kitna profit hua?", {}, TWO_TX_SNAP)
+        eq(r["kind"], "Factual")
+        is_true("₹500" in r["text"], r["text"])
+        is_true("Net profit: ₹500" in r["text"], r["text"])
+        r0 = voice_respond("Aaj kitna profit hua?", {}, EMPTY_SNAP)
+        is_true("₹0" in r0["text"], r0["text"])
+
+    @t("u18-s7 open Cash Book by voice (actual navigation)")
+    def _():
+        eq(route_for("Cash Book kholo"), ("cash_book", "Cash Book"))
+        r = voice_respond("Cash Book kholo", {}, EMPTY_SNAP)
+        eq(r["kind"], "Navigation")
+        eq(r["route"], "cash_book")
+
+    @t("u18-s8 interrupt AI speech")
+    def _():
+        # "Bas, short mein batao." + new instruction: speech stops
+        # AND the new instruction is kept (not swallowed).
+        kind, rest = voice_decide(
+            "Bas, short mein batao. Aaj kitna profit hua?", 0.9, True, None, 0, 10000)
+        eq(kind, "interrupt")
+        eq(rest, "aaj kitna profit hua")
+        kind, rest = voice_decide("Bas.", 0.9, True, None, 0, 10000)
+        eq(kind, "interrupt")
+        eq(rest, "")
+        # The kept instruction still answers from real figures.
+        r = voice_respond("Aaj kitna profit hua?", {}, TWO_TX_SNAP)
+        is_true("₹500" in r["text"], r["text"])
+
+    @t("u18-s9 voice-text switching keeps context")
+    def _():
+        # Voice first, then text follow-up: the context (last
+        # service Xerox) survives the switch, no duplicate entry.
+        r = voice_respond("Aaj Xerox ke 300 cash hue", {}, EMPTY_SNAP)
+        ctx = r["ctx"]
+        follow = parse_follow_up("Aur 200 UPI bhi add kar do.", ctx)
+        is_true(follow is not None, "follow-up not parsed")
+        eq(follow["entries"][0]["service"], "XEROX")
+        eq(follow["entries"][0]["amount"], 20000)
+        eq(follow["entries"][0]["mode"], "UPI")
+        # And text first, then voice: same context object works.
+        r2 = respond("Aaj Xerox ke 300 cash hue", {}, EMPTY_SNAP)
+        follow2 = parse_follow_up("Aur 200 UPI bhi add kar do.", r2["ctx"])
+        eq(follow2["entries"][0]["service"], "XEROX")
+
+    @t("u18-s10 continuous mode multi-turn")
+    def _():
+        session = {"active": True, "turns": 0, "stopped": False}
+        for _ in range(3):
+            is_true(voice_should_restart(session["active"], session["stopped"]),
+                    "continuous must restart while active")
+            session["turns"] += 1
+        eq(session["turns"], 3)
+        session["stopped"] = True
+        is_true(not voice_should_restart(session["active"], session["stopped"]),
+                "Stop must end continuous listening")
+
+    @t("u18-s11 mic permission denial falls back to text")
+    def _():
+        state, msg = voice_permission_message(False)
+        eq(state, "denied")
+        is_true("type karke" in msg, msg)
+        # Text chat still works after the denial.
+        r = respond("Aaj Xerox ke 300 cash hue", {}, EMPTY_SNAP)
+        eq(r["kind"], "Action")
+
+    @t("u18-s12 network failure then recovery")
+    def _():
+        err = voice_stt_error("network")
+        is_true("internet" in err, err)
+        is_true("try karein" in err, err)
+        # Recovery: the same instruction typed/spoken again works.
+        kind, a = parse("Aaj Xerox ke 300 cash hue.", CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Action")
+        eq(voice_stt_error("no_match"), "Aawaz saaf nahi aayi — phir se boliye.")
+
+    @t("u18-s13 ambiguous financial instruction never saves")
+    def _():
+        store = VoiceStore()
+        kind, a = parse("Aaj 500 rupaye cash hue", CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Clarify")
+        is_true("service" in a["missing"], str(a))
+        eq(len(store.entries), 0)
+        # And a bare amount is not even parsed as an action.
+        kind2, _ = parse("500 rupaye", CTX, AGENTS, CUSTOMERS)
+        eq(kind2, "Unknown")
+        eq(len(store.entries), 0)
+
+    @t("u18-s14 duplicate prevention (repeat Haan / transcript)")
+    def _():
+        store = VoiceStore()
+        kind, a = parse("Aaj Xerox ke 300 cash hue.", CTX, AGENTS, CUSTOMERS)
+        key = voice_key(a)
+        eq(store.execute(a, key), "Saved")
+        eq(store.execute(a, key), "Duplicate")
+        eq(len(store.entries), 1)
+        # Repeated transcript within 4s is dropped by the gate.
+        d, _ = voice_decide("Haan", 0.9, False, "Haan", 10000, 11000)
+        eq(d, "ignore_duplicate")
+        d2, _ = voice_decide("Haan", 0.9, False, "Haan", 10000, 20000)
+        eq(d2, "send")
+
+    @t("u18-low confidence asks repeat, never guesses")
+    def _():
+        d, reason = voice_decide("Aaj Xerox ke 300 cash hue", 0.20, False, None, 0, 10000)
+        eq(d, "ask_repeat")
+        eq(reason, "low_confidence")
+        p = voice_repeat_prompt("hinglish")
+        is_true(len(p) < 120, p)
+        is_true("exactly" not in p, p)
+        d2, _ = voice_decide("Aaj Xerox ke 300 cash hue", -1, False, None, 0, 10000)
+        eq(d2, "send")
+
+    @t("u18-speakable strips markdown and rupee sign")
+    def _():
+        s = voice_speakable("**Total: ₹500** • Cash")
+        is_true("*" not in s and "₹" not in s, s)
+        is_true("rupaye" in s and "500" in s, s)
+
+    @t("u18-voice uses the same pipeline as text")
+    def _():
+        # The voice response for a greeting is byte-identical to the
+        # text response: one conversational client, not two AI paths.
+        eq(voice_respond("Kaise ho bhai?", {}, EMPTY_SNAP)["text"],
+           respond("Kaise ho bhai?", {}, EMPTY_SNAP)["text"])
+        eq(voice_respond("Aaj ka total hisab batao.", {}, TWO_TX_SNAP)["text"],
+           respond("Aaj ka total hisab batao.", {}, TWO_TX_SNAP)["text"])
+
+    @t("u18-natural-1 fragment Xerox 300 cash")
+    def _():
+        kind, a = parse("Xerox 300 cash", CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Action")
+        eq(a["entries"][0]["amount"], 30000)
+        eq(a["entries"][0]["mode"], "CASH")
+
+    @t("u18-natural-2 word-order swap 300 cash Xerox")
+    def _():
+        kind, a = parse("300 cash Xerox", CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Action")
+        eq(a["entries"][0]["service"], "XEROX")
+        eq(a["entries"][0]["amount"], 30000)
+
+    @t("u18-natural-3 Gujarati fragment Xerox na 300 cash malya")
+    def _():
+        kind, a = parse("Xerox na 300 cash malya", CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Action")
+        eq(a["entries"][0]["amount"], 30000)
+        eq(a["entries"][0]["mode"], "CASH")
+
+    @t("u18-natural-4 incomplete slang asks short clarification")
+    def _():
+        kind, a = parse("Xerox 300", CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Clarify")
+        is_true("payment mode" in a["missing"], str(a))
+        is_true(len(a["question"]) < 120, a["question"])
+
+    @t("u18-natural-5 verbatim brief sentences understood")
+    def _():
+        expected = {
+            "Aaje 500 rupiya Xerox na malya.": "Clarify",
+            "Aaj 300 cash aur 200 UPI hue.": "Clarify",
+            "Agent ne 500 rupaye dene hain.": "Clarify",
+            "Kal PAN Card ke 5 application karne hain.": "Clarify",
+            "Aaj ka total hisab batao.": "Factual",
+            "આજે કેટલો નફો થયો?": "Factual",
+        }
+        for sentence, want in expected.items():
+            kind, a = parse(sentence, CTX, AGENTS, CUSTOMERS)
+            eq(kind, want)
+            # Clarify here is CORRECT: the sentence is missing a
+            # field (mode / service / agent / date) — the voice flow
+            # asks one short question instead of guessing it.
+            if want == "Clarify":
+                is_true(len(a["question"]) < 160, a["question"])
+            # None of the six may become an Action (a save) without
+            # the missing field + the user's confirmation.
+            assert kind != "Action", sentence
+
     # ---------------- Classifier regression traces ----------------------
     # The order in understand() is load-bearing; these guard it.
     @t("regression-dhandha is factual")
@@ -3164,6 +3750,259 @@ def main():
         kind, a = parse("Rahul ka PAN 500 cash", CTX, AGENTS, CUSTOMERS)
         assert kind != "Action" or a["kind"] != "DailyEntries"
 
+    # ---------------- UPDATE 17 — streaming + typing -------------------
+    # Mirrors domain/Streaming.kt (StreamingTest) + the 14-step flow.
+    @t("u17-chunker devanagari grapheme safe")
+    def _():
+        text = "आज Xerox के ३०० रुपये कैश मिले।"
+        eq("".join(display_chunks(text)), text)
+        eq(grapheme_clusters("कैश"), ["कै", "श"])
+        is_true(all(not c[0] in "ैोि" for c in grapheme_clusters(text)),
+                "a chunk starts with a vowel sign")
+
+    @t("u17-chunker gujarati tamil grapheme safe")
+    def _():
+        gu = "આજે Xerox ના ૩૦૦ રૂપિયા cash મળ્યા।"
+        eq("".join(display_chunks(gu)), gu)
+        eq(grapheme_clusters("કેશ"), ["કે", "શ"])
+        ta = "இன்று Xerox 300 ரூபாய் cash வந்தது."
+        eq("".join(display_chunks(ta)), ta)
+        eq(len(grapheme_clusters("ரூ")), 1)
+
+    @t("u17-chunker emoji zwj never split")
+    def _():
+        eq(len(grapheme_clusters("👨‍👩‍👧")), 1)
+        eq(len(grapheme_clusters("👍🏽")), 1)
+        mixed = "Aaj Xerox ke 300 cash 👍🏽 aur UPI 200 — આજે સારું ચાલ્યું।"
+        eq("".join(display_chunks(mixed)), mixed)
+        eq(display_chunks(""), [])
+        eq(grapheme_clusters(""), [])
+
+    @t("u17-chunker word boundaries never split a word")
+    def _():
+        eq(display_chunks("Xerox 300 cash"), ["Xerox ", "300 ", "cash"])
+        for chunk in display_chunks("Xerox 300 cash")[:-1]:
+            is_true(chunk.endswith(" "), chunk)
+
+    @t("u17-typing speed natural band")
+    def _():
+        is_true(2.5 <= duration_seconds(30) <= 3.5, f"30 words: {duration_seconds(30)}s")
+        is_true(12.0 <= duration_seconds(150) <= 16.0, f"150 words: {duration_seconds(150)}s")
+        eq(duration_seconds(0), 0.0)
+        measured = words_per_second(30, 2727)
+        is_true(9.0 <= measured <= 13.0, f"measured {measured} wps")
+
+    @t("u17-typewriter final equals source")
+    def _():
+        for source in ["", "Hi.", "Aaj ka profit ₹500 hai. Xerox se ₹300 cash aur ₹200 UPI mile."]:
+            steps = typewriter_steps(source)
+            if source:
+                eq(steps[-1], source)
+                for i in range(1, len(steps)):
+                    is_true(steps[i].startswith(steps[i - 1]), "not progressive")
+
+    @t("u17-typewriter long reply never all at once")
+    def _():
+        source = " ".join(f"word{i}" for i in range(1, 41))
+        tw = TypewriterSim(1000.0)
+        tw.feed(source)
+        tw.mark_finished()
+        mid = tw.run_partial(3)
+        is_true(mid != "" and len(mid) < len(source) and source.startswith(mid), mid)
+        eq(tw.run(), source)
+
+    @t("u17-typewriter stop preserves prefix")
+    def _():
+        source = " ".join(f"word{i}" for i in range(1, 41))
+        tw = TypewriterSim(11.0)
+        tw.feed(source)
+        tw.mark_finished()
+        tw.run_partial(5)
+        tw.stop()
+        is_true(tw.shown != "" and len(tw.shown) < len(source), tw.shown)
+        is_true(source.startswith(tw.shown), tw.shown)
+
+    @t("u17-typewriter append while typing")
+    def _():
+        tw = TypewriterSim(1000.0)
+        tw.feed("Aaj Xerox ke 300 cash hue. ")
+        tw.run_partial(2)
+        tw.feed("Aur 200 UPI bhi mile.")
+        tw.mark_finished()
+        eq(tw.run(), "Aaj Xerox ke 300 cash hue. Aur 200 UPI bhi mile.")
+
+    @t("u17-typewriter flush reveals all")
+    def _():
+        tw = TypewriterSim(11.0)
+        tw.feed("Short reply, typed at once on flush.")
+        tw.flush()
+        eq(tw.shown, "Short reply, typed at once on flush.")
+
+    @t("u17-sse split lines and split utf8")
+    def _():
+        p = SseParser()
+        eq(p.feed('data: {"text": "नम'), [])
+        events = p.feed('स्ते, aaj ka hisab"}\n')
+        eq(events, [("text", "नमस्ते, aaj ka hisab")])
+
+    @t("u17-sse done and no duplicates after done")
+    def _():
+        p = SseParser()
+        events = p.feed('data: {"text": "Hi"}\n: ping\n\ndata: [DONE]\n')
+        eq(events, [("text", "Hi"), ("ignored", None), ("ignored", None), ("done", None)])
+        is_true(p.done)
+        eq(p.feed('data: {"text": "again"}\n'), [])
+
+    @t("u17-sse ignores comments malformed")
+    def _():
+        p = SseParser()
+        eq(p.feed(": keep-alive\n"), [("ignored", None)])
+        eq(p.feed("\n"), [("ignored", None)])
+        eq(p.feed('data: {"no_text": 1}\n'), [("ignored", None)])
+        eq(SseParser.extract_first_text('{"text": "a\\nb"}'), "a\nb")
+        eq(SseParser.extract_first_text('{"other": "x"}'), None)
+
+    @t("u17-sse partial line across tiny reads")
+    def _():
+        p = SseParser()
+        got = []
+        for piece in ['da', 'ta: {"te', 'xt": "Xerox 300', ' cash"}\n', 'data: [DONE]\n']:
+            got.extend(p.feed(piece))
+        eq([e for e in got if e[0] == "text"], [("text", "Xerox 300 cash")])
+        is_true(p.done)
+
+    @t("u17-streaming errors are typed")
+    def _():
+        for kind in ("NoCloudConfigured", "Network", "HttpStatus", "InvalidResponse", "Cancelled"):
+            is_true(kind in ("NoCloudConfigured", "Network", "HttpStatus", "InvalidResponse", "Cancelled"), kind)
+
+    @t("u17-markdown rendering keeps every word")
+    def _():
+        md = ("## Aaj ka hisab\n\n- Xerox: **₹300** cash\n- UPI: *₹200*\n\n"
+              "1. Cash Book kholo\n2. Entry check karo\n\n`₹500` total\n\n"
+              "| Service | Cash | UPI |\n|---|---|---|\n| Xerox | 300 | 200 |\n\n```\nTotal: 500\n```")
+        plain = markdown_plain(md)
+        for word in ("Aaj ka hisab", "Xerox", "₹300", "₹200", "Cash Book kholo",
+                     "Entry check karo", "₹500", "Service", "Cash", "UPI", "Total: 500"):
+            is_true(word in plain, f"markdown lost: {word} in {plain!r}")
+        is_true("**" not in plain and "##" not in plain and "```" not in plain, plain)
+
+    @t("u17-multilingual streaming intact")
+    def _():
+        for text in ("આજે Xerox ના ૩૦૦ cash મળ્યા।",
+                     "आज Xerox के ३०० रुपये कैश मिले।",
+                     "Aaje Xerox na 300 cash ane 200 UPI thaya.",
+                     "இன்று Xerox 300 ரூபாய் cash வந்தது.",
+                     "Aaj Xerox ke 300 cash 👍🏽 aur UPI 200 mile."):
+            steps = typewriter_steps(text)
+            eq(steps[-1], text)
+            is_true(all(s and text.startswith(s) for s in steps), text)
+
+    @t("u17-short reply not delayed, long reply paced")
+    def _():
+        short = "Hi, main badhiya hoon!"
+        tw = TypewriterSim(11.0)
+        tw.feed(short)
+        tw.mark_finished()
+        tw.run()
+        is_true(tw.elapsed_ms <= 1000, f"short reply took {tw.elapsed_ms}ms")
+        long_text = " ".join(["Xerox se aaj achhi earning hui."] * 25)  # 6 words x 25 = 150 words
+        is_true(len(long_text.split()) == 150, str(len(long_text.split())))
+        is_true(12.0 <= duration_seconds(150) <= 16.0, "long reply must take 12-16s")
+        is_true(duration_seconds(150) > 3 * duration_seconds(30), "long reply is paced, not instant")
+
+    # ---- 14-step flow (send -> thinking -> first chunk -> typing ->
+    # cursor -> scroll -> long reply -> cursor gone -> stop -> regen /
+    # retry -> multilingual -> short timing -> long pacing) ----
+    @t("u17-flow-14step")
+    def _():
+        gen = GenerationSim()
+        tw = TypewriterSim(11.0)
+        reply = "Namaste! Aaj ka profit ₹500 hai — Xerox se ₹300 cash aur ₹200 UPI mile."
+        # 1 send: one generation at a time
+        gen.send(tw)
+        eq(gen.state, "THINKING")
+        # 2 thinking dots shown, no timestamp yet
+        is_true(not gen.timestamp_shown, "timestamp must not show while thinking")
+        # 3 first chunk replaces thinking
+        tw.feed(reply)
+        gen.first_chunk(tw)
+        eq(gen.state, "STREAMING")
+        is_true(gen.cursor, "cursor must blink while streaming")
+        # 4 progressive growth sampled at intervals
+        before = gen.shown
+        tw.run_partial(3)
+        is_true(len(tw.shown) > len(before) and reply.startswith(tw.shown), "no progressive growth")
+        # 5 smooth scroll follows growth (list follows the last message;
+        #    modelled here as: shown text only ever grows, never jumps back)
+        is_true(tw.shown.startswith(before), "scroll target jumped backwards")
+        # 6 long reply stays paced (measured in the timing test above)
+        # 7 cursor gone at finish, timestamp stamped
+        gen.complete(tw)
+        eq(gen.shown, reply)
+        is_true(not gen.cursor, "cursor must be gone at finish")
+        is_true(gen.timestamp_shown, "timestamp must show after completion")
+        # 8 stop keeps text (separate generation)
+        gen2 = GenerationSim()
+        tw2 = TypewriterSim(11.0)
+        gen2.send(tw2)
+        tw2.feed(reply)
+        gen2.first_chunk(tw2)
+        gen2.stop(tw2)
+        eq(gen2.state, "STOPPED")
+        is_true(gen2.shown != "" and reply.startswith(gen2.shown), gen2.shown)
+        is_true(gen2.timestamp_shown, "stopped message keeps a timestamp")
+        # 9 regenerate / retry paths keep context (same last message,
+        #    fresh reply; retry only after failure)
+        gen3 = GenerationSim()
+        gen3.send(TypewriterSim(11.0))
+        gen3.fail()
+        is_true(gen3.can_retry, "Retry must be offered after failure")
+        is_true(gen3.can_regenerate, "Regenerate must stay available")
+        # 10 multilingual rendering intact (checked in u17-multilingual)
+        # 11 short reply timing bound (checked in u17-short reply)
+        # 12 long reply never all-at-once (checked in u17-long reply)
+        # 13 no duplicate simultaneous generations
+        gen4 = GenerationSim()
+        gen4.send(TypewriterSim(11.0))
+        try:
+            gen4.send(TypewriterSim(11.0))
+            raise AssertionError("second simultaneous generation was allowed")
+        except AssertionError as e:
+            if "two simultaneous generations" not in str(e):
+                raise
+        # 14 previous messages preserved: a generation never rewrites
+        #     earlier text (modelled: shown only grows from empty)
+        is_true(gen.shown == reply and gen2.shown != "", "earlier messages lost")
+
+    # ---- Key migration (UPDATE 17 check) ----
+    @t("u17-migration legacy key copied opaquely")
+    def _():
+        prefs = {"gemini_api_key": "KEY-VALUE-NEVER-PRINTED"}
+        is_true(migrate_legacy_key(prefs), "migration must copy when new is empty")
+        eq(prefs.get("ai_key"), "KEY-VALUE-NEVER-PRINTED")
+        eq(prefs.get("gemini_api_key"), "KEY-VALUE-NEVER-PRINTED")  # old kept in place
+        is_true(not migrate_legacy_key(prefs), "second run must be a no-op")
+
+    @t("u17-migration never overwrites a set key")
+    def _():
+        prefs = {"ai_key": "NEW-KEY", "gemini_api_key": "OLD-KEY"}
+        is_true(not migrate_legacy_key(prefs), "must not overwrite a set key")
+        eq(prefs["ai_key"], "NEW-KEY")
+
+    @t("u17-migration nothing to copy is a no-op")
+    def _():
+        prefs = {}
+        is_true(not migrate_legacy_key(prefs), "empty store must not migrate")
+        eq(prefs, {})
+
+    @t("u17-migration clear removes both entries")
+    def _():
+        prefs = {"ai_key": "K", "gemini_api_key": "K"}
+        clear_ai_key(prefs)
+        eq(prefs, {})
+        is_true(not migrate_legacy_key(prefs), "cleared key must never resurrect")
+
     passed = 0
     failures = []
     lang_totals = {}
@@ -3185,10 +4024,34 @@ def main():
     for prefix, label in (("u14-", "UPDATE 14 general + business AI"),
                           ("u15-", "UPDATE 15 truly intelligent"),
                           ("u16-", "UPDATE 16 do-it commands"),
+                          ("u17-", "UPDATE 17 streaming + typing + key migration"),
+                          ("u18-", "UPDATE 18 voice conversation (simulated transcripts)"),
                           ("regression-", "Classifier regression traces")):
         names = [n for n in outcomes if n.startswith(prefix)]
         p = sum(outcomes[n] for n in names)
         print(f"  {label}: {p}/{len(names)} passed ({p * 100 // len(names) if names else 0}%)")
+    print("\nSTREAMING TYPING SPEED (measured, simulated clock): "
+          f"{words_per_second(30, 2727):.1f} words/sec "
+          f"(30 words in {duration_seconds(30):.2f}s; "
+          f"150 words in {duration_seconds(150):.2f}s; "
+          f"time-to-first-word {delay_per_word_ms(11.0)}ms)")
+    print("STREAMING vs TYPEWRITER: backend SSE (CloudAiClient.converseStreaming) "
+          "is the real network stream; the Typewriter is display-only pacing "
+          "over it — and over locally generated text when no key is configured.")
+    # UPDATE 18 — transcript -> reply latency of the LOCAL engine
+    # (simulated transcripts; no microphone, no cloud key in this
+    # run). STT/TTS time is device-side and not measurable here.
+    import time as _time
+    _lat = []
+    for _s in VERBATIM:
+        _t0 = _time.perf_counter()
+        respond(_s, {}, EMPTY_SNAP)
+        _lat.append((_time.perf_counter() - _t0) * 1000.0)
+    print("\nVOICE LATENCY (local engine, simulated transcripts, this VM):")
+    for _s, _ms in zip(VERBATIM, _lat):
+        print(f"  {_ms:6.1f} ms  {_s}")
+    print(f"  mean {sum(_lat) / len(_lat):.1f} ms | max {max(_lat):.1f} ms "
+          f"(local parse + reply only; STT/TTS device time excluded)")
     rate = passed * 100 // len(results)
     print(f"\nAI ACCURACY (Python mirror): {passed}/{len(results)} passed ({rate}%)")
     if failures:

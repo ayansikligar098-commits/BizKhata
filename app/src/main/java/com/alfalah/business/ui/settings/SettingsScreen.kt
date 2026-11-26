@@ -58,7 +58,17 @@ fun SettingsScreen(
     onSaveAiKey: (String) -> Unit = {},
     onClearAiKey: () -> Unit = {},
     aiLanguagePref: String = "AUTO",
-    onAiLanguagePref: (String) -> Unit = {}
+    onAiLanguagePref: (String) -> Unit = {},
+    // UPDATE 18 — voice: spoken replies on/off, speech rate, and
+    // continuous conversation mode. Voice uses the phone's own speech
+    // services; the conversational intelligence is the same as text
+    // chat. No audio is ever stored.
+    voiceResponsesEnabled: Boolean = true,
+    onVoiceResponsesEnabled: (Boolean) -> Unit = {},
+    voiceSpeechRate: Float = 1.0f,
+    onVoiceSpeechRate: (Float) -> Unit = {},
+    voiceContinuousMode: Boolean = false,
+    onVoiceContinuousMode: (Boolean) -> Unit = {}
 ) {
     var showLanguage by remember { mutableStateOf(false) }
     var showTheme by remember { mutableStateOf(false) }
@@ -68,6 +78,7 @@ fun SettingsScreen(
     var showSecurity by remember { mutableStateOf(false) }
     var showAiKey by remember { mutableStateOf(false) }
     var showAiLanguage by remember { mutableStateOf(false) }
+    var showVoice by remember { mutableStateOf(false) }
     var aiKeyInput by remember { mutableStateOf("") }
 
     LazyColumn(
@@ -111,6 +122,16 @@ fun SettingsScreen(
             val aiLangLabel = if (aiLanguagePref == "AUTO") "Auto — detects your language"
                 else AiLanguage.fromCode(aiLanguagePref).displayName
             SettingsRow("AI Assistant Language", "Current: $aiLangLabel") { showAiLanguage = true }
+            // UPDATE 18 — voice settings: spoken replies, speed,
+            // continuous mode. Mic permission is asked in the chat
+            // screen when the mic is tapped, never here.
+            val voiceLabel = (if (voiceResponsesEnabled) "Spoken replies ON" else "Spoken replies OFF (mute)") +
+                ", speed " + when (voiceSpeechRate) {
+                    0.8f -> "Slow"
+                    1.25f -> "Fast"
+                    else -> "Normal"
+                } + if (voiceContinuousMode) ", continuous ON" else ""
+            SettingsRow("Voice Assistant", voiceLabel) { showVoice = true }
             SettingsRow("Audit Log", "Old → new values for every change") { onOpen(Routes.AUDIT_LOG) }
             SettingsRow("Recycle Bin", "Deleted jobs — restore them here") { onOpen(Routes.RECYCLE_BIN) }
             SettingsRow("Data & Backup", "CSV export, local backup") { onOpen(Routes.REPORTS) }
@@ -164,6 +185,61 @@ fun SettingsScreen(
             },
             confirmButton = {},
             dismissButton = { TextButton(onClick = { showAiLanguage = false }) { Text("Cancel") } }
+        )
+    }
+
+    if (showVoice) {
+        AlertDialog(
+            onDismissRequest = { showVoice = false },
+            title = { Text("Voice Assistant") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Bol kar baat karein — apne hisab se boliye, koi fixed command yaad rakhne ki zaroorat nahi hai. " +
+                            "Mic sirf tab chalu hota hai jab chat mein 'Sun raha hoon' dikh raha ho; koi audio save nahi hoti. " +
+                            "Voice se entry tab bhi sirf preview confirm karne par save hoti hai."
+                    )
+                    Text("Spoken replies (jawab bol kar sunana)", fontWeight = FontWeight.SemiBold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { onVoiceResponsesEnabled(true) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text(if (voiceResponsesEnabled) "✓ ON" else "ON") }
+                        Button(
+                            onClick = { onVoiceResponsesEnabled(false) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text(if (!voiceResponsesEnabled) "✓ OFF (mute)" else "OFF (mute)") }
+                    }
+                    Text("Bolne ki speed", fontWeight = FontWeight.SemiBold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(0.8f to "Slow", 1.0f to "Normal", 1.25f to "Fast").forEach { (rate, label) ->
+                            Button(
+                                onClick = { onVoiceSpeechRate(rate) },
+                                modifier = Modifier.weight(1f)
+                            ) { Text(if (voiceSpeechRate == rate) "✓ $label" else label) }
+                        }
+                    }
+                    Text("Continuous conversation", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "ON rahe to mic har jawab ke baad khud chalu ho jayega — dobara mic dabane ki zaroorat nahi. " +
+                            "Chat mein Stop dabakar kabhi bhi band kar sakte hain.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { onVoiceContinuousMode(true) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text(if (voiceContinuousMode) "✓ ON" else "ON") }
+                        Button(
+                            onClick = { onVoiceContinuousMode(false) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text(if (!voiceContinuousMode) "✓ OFF" else "OFF") }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { showVoice = false }) { Text("Done") } }
         )
     }
 

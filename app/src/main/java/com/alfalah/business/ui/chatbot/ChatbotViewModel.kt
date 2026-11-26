@@ -9,7 +9,6 @@ import com.alfalah.business.data.StoredChatSession
 import com.alfalah.business.data.repository.BusinessRepository
 import com.alfalah.business.domain.AccountingEngine
 import com.alfalah.business.domain.AiAssistantParser
-import com.alfalah.business.domain.AiFeatures
 import com.alfalah.business.domain.AiLanguage
 import com.alfalah.business.domain.AiNavigation
 import com.alfalah.business.domain.AppHelpKnowledge
@@ -27,11 +26,19 @@ import com.alfalah.business.domain.LastKnowledge
 import com.alfalah.business.domain.MeaningParser
 import com.alfalah.business.domain.Multilingual
 import com.alfalah.business.domain.MultilingualReplies
-import com.alfalah.business.domain.PaymentMode
+import com.alfalah.business.domain.VoiceDecision
+import com.alfalah.business.domain.VoicePipeline
+import com.alfalah.business.domain.VoiceState
+import com.alfalah.business.domain.VoiceText
 import com.alfalah.business.domain.ServiceIncome
 import com.alfalah.business.domain.ServiceType
 import com.alfalah.business.domain.formatPaise
 import com.alfalah.business.domain.snapshotFacts
+import com.alfalah.business.domain.GenerationState
+import com.alfalah.business.domain.Typewriter
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -61,7 +68,16 @@ data class ChatMessage(
     val deepLinkLabel: String? = null,
     /** UPDATE 16 — a real checklist produced by a "checklist banao"
      *  command (rendered from [text] too; kept structured for the UI). */
-    val checklist: List<String> = emptyList()
+    val checklist: List<String> = emptyList(),
+    /** UPDATE 17 — streaming display: [streaming] while the reply is
+     *  still being typed out (timestamp is shown only after it
+     *  finishes), [streamingStopped] when the user stopped it (the
+     *  text shown so far is kept), [generationFailed] when the
+     *  generation failed and Retry should be offered. Streaming flags
+     *  are display-only — they are NOT persisted to chat history. */
+    val streaming: Boolean = false,
+    val streamingStopped: Boolean = false,
+    val generationFailed: Boolean = false
 )
 
 /** A financial action awaiting confirmation, rendered as a preview card
@@ -140,6 +156,41 @@ class ChatbotViewModel(
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
 
+    // --- UPDATE 17 — streaming generation state -----------------------
+    // One active generation at a time: a new send stops the current
+    // generation cleanly first (its text is kept, marked stopped).
+    // Thinking shows until the first displayable text arrives; the
+    // typewriter then reveals the reply progressively. The local
+    // engine generates on-device and is only DISPLAYED through the
+    // typewriter — local engine: typewriter display over locally
+    // generated text, no network stream.
+    private val _generationState = MutableStateFlow(GenerationState.IDLE)
+    val generationState: StateFlow<GenerationState> = _generationState
+
+    private val _isThinking = MutableStateFlow(false)
+    val isThinking: StateFlow<Boolean> = _isThinking
+
+    private val _isStreaming = MutableStateFlow(false)
+    val isStreaming: StateFlow<Boolean> = _isStreaming
+
+    /** The last user message, for Regenerate / Retry (same context,
+     *  same history — the reply is generated fresh, the user message
+     *  is NOT sent twice). */
+    private val _lastUserMessage = MutableStateFlow<String?>(null)
+    val lastUserMessage: StateFlow<String?> = _lastUserMessage
+
+    /** True after a generation failed, until a Retry / Regenerate /
+     *  new send succeeds. The screen shows Retry only then. */
+    private val _canRetry = MutableStateFlow(false)
+    val canRetry: StateFlow<Boolean> = _canRetry
+
+    private val _lastFailedMessageId = MutableStateFlow<Long?>(null)
+    val lastFailedMessageId: StateFlow<Long?> = _lastFailedMessageId
+
+    private var generationJob: Job? = null
+    private var typewriter: Typewriter? = null
+    private var streamingMessageId: Long? = null
+
     private val _aiEnabled = MutableStateFlow(false)
     val aiEnabled: StateFlow<Boolean> = _aiEnabled
 
@@ -153,6 +204,53 @@ class ChatbotViewModel(
     /** Manual AI-language preference ("AUTO" or an AiLanguage code). */
     private val _aiLanguagePref = MutableStateFlow("AUTO")
     val aiLanguagePref: StateFlow<String> = _aiLanguagePref
+
+    // --- Voice (UPDATE 18) ------------------------------------------------
+    // Two-way voice: transcripts from VoiceInputHelper arrive via
+    // onVoiceTranscript() and are routed through the SAME pipeline as
+    // typed text (send() -> handleMessage()). The intelligence behind
+    // the reply is the same conversational client as text chat
+    // (CloudAiClient.converse() when the owner added his AI
+    // key in Settings, local engine otherwise — the key is read
+    // exactly as the text chat reads it; voice changes nothing about
+    // how it is stored or read). Spoken replies go out through
+    // [speakEvents] (the screen's VoiceSpeaker speaks them); the
+    // text of every reply is already in [messages], so a spoken
+    // reply is never the only copy of an answer.
+    private val _voiceState = MutableStateFlow(VoiceState.IDLE)
+    val voiceState: StateFlow<VoiceState> = _voiceState
+
+    private val _voiceSessionActive = MutableStateFlow(false)
+    val voiceSessionActive: StateFlow<Boolean> = _voiceSessionActive
+
+    private val _voiceResponsesEnabled = MutableStateFlow(true)
+    val voiceResponsesEnabled: StateFlow<Boolean> = _voiceResponsesEnabled
+
+    private val _speechRate = MutableStateFlow(1.0f)
+    val speechRate: StateFlow<Float> = _speechRate
+
+    private val _speechPitch = MutableStateFlow(1.0f)
+    val speechPitch: StateFlow<Float> = _speechPitch
+
+    private val _continuousMode = MutableStateFlow(false)
+    val continuousMode: StateFlow<Boolean> = _continuousMode
+
+    /** One spoken reply, in the reply language. The screen collects
+     *  these and speaks them with VoiceSpeaker (native TTS). */
+    data class VoiceSpeakRequest(val text: String, val languageTag: String)
+
+    private val _speakEvents = MutableSharedFlow<VoiceSpeakRequest>(extraBufferCapacity = 8)
+    val speakEvents: SharedFlow<VoiceSpeakRequest> = _speakEvents
+
+    /** Emitted when speech must stop now (interruption / session end). */
+    private val _stopSpeakingEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    val stopSpeakingEvents: SharedFlow<Unit> = _stopSpeakingEvents
+
+    private var lastVoiceTranscript: String? = null
+    private var lastVoiceTranscriptAtMs: Long = 0L
+    /** A voice transcript that arrived while a reply was still being
+     *  processed: kept (not dropped) and sent when the reply ends. */
+    private var queuedVoiceTranscript: String? = null
 
     /** Language the assistant currently replies in (UPDATE 13): the
      *  manual Settings preference wins; otherwise the detected language
@@ -220,6 +318,11 @@ class ChatbotViewModel(
     private val today = LocalDate.now(ZoneOffset.UTC).toEpochDay()
 
     init {
+        // KEY MIGRATION (UPDATE 17): run the one-time legacy-key
+        // migration before the first aiKey read, so a key the owner
+        // entered early (under the old storage key) is visible to
+        // the cloud client and cloud streaming on this launch.
+        viewModelScope.launch { settings.migrateLegacyAiKey() }
         viewModelScope.launch { settings.aiKey.collect { key -> _aiEnabled.value = key.isNotBlank() } }
         viewModelScope.launch {
             settings.aiLanguagePref.collect { pref ->
@@ -227,6 +330,11 @@ class ChatbotViewModel(
                 if (pref != "AUTO") _voiceLanguageTag.value = AiLanguage.fromCode(pref).bcp47
             }
         }
+        // UPDATE 18: voice preferences (Settings -> voice section).
+        viewModelScope.launch { settings.voiceResponsesEnabled.collect { _voiceResponsesEnabled.value = it } }
+        viewModelScope.launch { settings.voiceSpeechRate.collect { _speechRate.value = it } }
+        viewModelScope.launch { settings.voiceSpeechPitch.collect { _speechPitch.value = it } }
+        viewModelScope.launch { settings.voiceContinuousMode.collect { _continuousMode.value = it } }
         viewModelScope.launch {
             val sessions = chatHistory.loadSessions(profileId)
             _allSessions.value = sessions
@@ -344,13 +452,48 @@ class ChatbotViewModel(
     // ------------------------------------------------------------------
     // Message plumbing (persisted per profile).
     // ------------------------------------------------------------------
-    private fun append(message: ChatMessage) {
+    private fun append(message: ChatMessage, persistNow: Boolean = true) {
         _messages.value = _messages.value + message
-        persist()
+        if (persistNow) persist()
+        maybeSpeak(message)
     }
 
-    private fun replaceMessage(id: Long, replacement: ChatMessage) {
+    private fun replaceMessage(id: Long, replacement: ChatMessage, persistNow: Boolean = true) {
         _messages.value = _messages.value.map { if (it.id == id) replacement else it }
+        if (persistNow) persist()
+        maybeSpeak(replacement)
+    }
+
+    /**
+     * UPDATE 18 — speak a finished assistant reply aloud while a
+     * voice session is active and voice responses are on. Called
+     * from append() (previews, clarifications, confirmations) and
+     * from replaceMessage() (a streamed reply's FINAL text — the
+     * per-word display updates are still streaming, so they are
+     * skipped, and a stopped generation is never spoken). The
+     * (id, text) guard means a message is spoken exactly once even
+     * though replaceMessage runs for every display update.
+     */
+    private var lastSpokenKey: String? = null
+
+    private fun maybeSpeak(message: ChatMessage) {
+        if (message.fromUser) return
+        if (!_voiceSessionActive.value || !_voiceResponsesEnabled.value) return
+        if (message.streaming || message.streamingStopped) return
+        val text = message.text.trim()
+        if (text.isBlank()) return
+        val key = "${message.id}:$text"
+        if (key == lastSpokenKey) return
+        lastSpokenKey = key
+        _speakEvents.tryEmit(
+            VoiceSpeakRequest(VoiceText.speakable(text), _voiceLanguageTag.value)
+        )
+    }
+
+    /** Persist the current message list now (used once, when a
+     *  streamed reply finishes — streaming updates do NOT persist
+     *  every word, or history would be rewritten per word). */
+    private fun persistNow() {
         persist()
     }
 
@@ -368,6 +511,7 @@ class ChatbotViewModel(
     }
 
     fun newChat() {
+        stopGeneration()
         pendingAction = null
         _pendingPreviewId.value = null
         clarification = null
@@ -401,26 +545,434 @@ class ChatbotViewModel(
     }
 
     // ------------------------------------------------------------------
+    // UPDATE 17 — streaming generation controls.
+    // ------------------------------------------------------------------
+    /** Stop the active generation: cancels the generation coroutine
+     *  (and the cloud call underneath it) and stops the typewriter.
+     *  The text shown so far is KEPT and the message is marked
+     *  stopped — nothing is deleted and no partial entry is saved. */
+    fun stopGeneration() {
+        typewriter?.stop()
+        generationJob?.cancel()
+        _isThinking.value = false
+        _isStreaming.value = false
+        _generationState.value = GenerationState.STOPPED
+    }
+
+    /** Regenerate: a fresh reply to the same last user message, with
+     *  the same conversation context and history. Disabled while a
+     *  generation is running (the screen enforces this). */
+    fun regenerate() {
+        val last = _lastUserMessage.value ?: return
+        if (_isStreaming.value || _isThinking.value) return
+        startGeneration(last, appendUser = false)
+    }
+
+    /** Retry: re-send the last user message after a generation
+     *  failure, with the context intact. Only offered when
+     *  [_canRetry] is true. */
+    fun retryLast() {
+        if (!_canRetry.value) return
+        val last = _lastUserMessage.value ?: return
+        if (_isStreaming.value || _isThinking.value) return
+        _canRetry.value = false
+        _lastFailedMessageId.value = null
+        startGeneration(last, appendUser = false)
+    }
+
+    override fun onCleared() {
+        // Cleanup: cancel any active stream + typewriter when the
+        // ViewModel goes away (screen left / profile switched).
+        typewriter?.stop()
+        generationJob?.cancel()
+        super.onCleared()
+    }
+
+    /** One generation at a time. A new send first cancels the active
+     *  generation cleanly (its shown text is kept, marked stopped),
+     *  then runs the new one. */
+    private fun startGeneration(userText: String, appendUser: Boolean) {
+        if (appendUser) {
+            _lastUserMessage.value = userText
+            _canRetry.value = false
+            _lastFailedMessageId.value = null
+        }
+        viewModelScope.launch {
+            generationJob?.cancelAndJoin()
+            finalizeStoppedGeneration()
+            _isLoading.value = true
+            _generationState.value = GenerationState.THINKING
+            val job = launch {
+                try {
+                    handleMessage(userText)
+                } catch (e: CancellationException) {
+                    finalizeStoppedGeneration()
+                    throw e
+                } catch (_: Exception) {
+                    markGenerationFailed()
+                    append(
+                        ChatMessage(
+                            text = "Kuch galat ho gaya — main aapka message process nahi kar paya. Koi entry save nahi hui hai. Phir se try karein.",
+                            fromUser = false, isError = true, generationFailed = true
+                        )
+                    )
+                } finally {
+                    _isLoading.value = false
+                    _isThinking.value = false
+                    _isStreaming.value = false
+                    if (_generationState.value == GenerationState.THINKING ||
+                        _generationState.value == GenerationState.STREAMING
+                    ) {
+                        _generationState.value = GenerationState.IDLE
+                    }
+                }
+            }
+            generationJob = job
+            job.join()
+        }
+    }
+
+    /** If a streaming message is mid-flight when generation stops,
+     *  keep its shown text, mark it stopped and stamp its timestamp
+     *  (timestamps appear only on completed / stopped messages). */
+    private fun finalizeStoppedGeneration() {
+        val id = streamingMessageId ?: return
+        val current = _messages.value.firstOrNull { it.id == id } ?: run {
+            streamingMessageId = null
+            return
+        }
+        if (!current.streaming) {
+            streamingMessageId = null
+            return
+        }
+        streamingMessageId = null
+        replaceMessage(
+            id,
+            current.copy(
+                streaming = false,
+                streamingStopped = true,
+                timestampMs = System.currentTimeMillis()
+            ),
+            persistNow = true
+        )
+    }
+
+    /** Mark the last bot message as failed so the screen can offer Retry. */
+    private fun markGenerationFailed() {
+        _canRetry.value = true
+        _generationState.value = GenerationState.FAILED
+        val lastBot = _messages.value.lastOrNull { !it.fromUser }
+        if (lastBot != null) {
+            _lastFailedMessageId.value = lastBot.id
+            replaceMessage(lastBot.id, lastBot.copy(generationFailed = true), persistNow = true)
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Main entry: send a message.
     // ------------------------------------------------------------------
     fun send(rawText: String) {
         val text = rawText.trim()
-        if (text.isEmpty() || _isLoading.value) return
+        if (text.isEmpty()) return
+        // Input stays usable while streaming: sending a new message
+        // stops the current generation cleanly first (startGeneration
+        // cancels it). Only a non-streaming load (e.g. Confirm & Save)
+        // blocks a new send.
+        if (_isLoading.value && !_isStreaming.value && !_isThinking.value) return
         append(ChatMessage(text = text, fromUser = true))
-        viewModelScope.launch {
-            _isLoading.value = true
-            try {
-                handleMessage(text)
-            } catch (_: Exception) {
+        startGeneration(text, appendUser = true)
+    }
+
+    // ------------------------------------------------------------------
+    // Voice entry point (UPDATE 18).
+    // ------------------------------------------------------------------
+    /** A recognised transcript (with its STT confidence, -1f when the
+     *  recogniser gave none) — routed through the SAME pipeline as
+     *  typed text (send() -> handleMessage() -> the shared
+     *  conversational client: cloud when the owner added his
+     *  AI key, local engine otherwise; the key is read exactly
+     *  as text chat reads it — voice changes nothing about how it is
+     *  stored or read). The gate (VoicePipeline.decide) runs first:
+     *  empty / duplicate firings are dropped, low-confidence
+     *  transcripts get one short "please repeat" prompt instead of
+     *  being guessed at, and an interrupt phrase stops the current
+     *  spoken reply before the new instruction is processed. A
+     *  transcript that arrives while a non-streaming save is running
+     *  is queued (not dropped) and sent when the save finishes. */
+    fun onVoiceTranscript(transcript: String, confidence: Float = -1f) {
+        val nowMs = System.currentTimeMillis()
+        val decision = VoicePipeline.decide(
+            transcript = transcript,
+            confidence = confidence,
+            isSpeaking = _voiceState.value == VoiceState.SPEAKING,
+            lastTranscript = lastVoiceTranscript,
+            lastTranscriptAtMs = lastVoiceTranscriptAtMs,
+            nowMs = nowMs
+        )
+        when (decision) {
+            is VoiceDecision.IgnoreEmpty, VoiceDecision.IgnoreDuplicate -> return
+            is VoiceDecision.AskRepeat -> {
+                _voiceSessionActive.value = true
+                _voiceState.value = VoiceState.LISTENING
                 append(
                     ChatMessage(
-                        text = "Kuch galat ho gaya — main aapka message process nahi kar paya. Koi entry save nahi hui hai. Phir se try karein.",
-                        fromUser = false, isError = true
+                        text = VoiceText.repeatPrompt(effectiveLanguage(transcript)),
+                        fromUser = false
                     )
                 )
-            } finally {
-                _isLoading.value = false
             }
+            is VoiceDecision.InterruptAndSend -> {
+                viewModelScope.launch { _stopSpeakingEvents.emit(Unit) }
+                stopGeneration()
+                _voiceState.value = VoiceState.LISTENING
+                if (decision.text.isBlank()) {
+                    _voiceSessionActive.value = true
+                    append(
+                        ChatMessage(
+                            text = VoiceText.interruptAck(effectiveLanguage(transcript)),
+                            fromUser = false
+                        )
+                    )
+                } else {
+                    lastVoiceTranscript = decision.text
+                    lastVoiceTranscriptAtMs = nowMs
+                    if (_isLoading.value && !_isStreaming.value && !_isThinking.value) {
+                        queuedVoiceTranscript = decision.text
+                    } else {
+                        send(decision.text)
+                    }
+                }
+            }
+            is VoiceDecision.Send -> {
+                _voiceSessionActive.value = true
+                lastVoiceTranscript = decision.text
+                lastVoiceTranscriptAtMs = nowMs
+                if (_isLoading.value && !_isStreaming.value && !_isThinking.value) {
+                    queuedVoiceTranscript = decision.text
+                } else {
+                    send(decision.text)
+                }
+            }
+        }
+    }
+
+    /** A voice transcript that arrived while a non-streaming save was
+     *  running is sent now, not lost. */
+    private fun drainQueuedVoiceTranscript() {
+        queuedVoiceTranscript?.let { queued ->
+            queuedVoiceTranscript = null
+            send(queued)
+        }
+    }
+
+    /** The user tapped the mic / Stop while the assistant was
+     *  speaking: stop the speech (and any typing reply) now. The
+     *  screen then starts listening for the new instruction. */
+    fun interruptSpeaking() {
+        viewModelScope.launch { _stopSpeakingEvents.emit(Unit) }
+        stopGeneration()
+        _voiceState.value = VoiceState.LISTENING
+    }
+
+    fun setVoiceState(state: VoiceState) {
+        _voiceState.value = state
+    }
+
+    /** A voice session starts (mic tapped, permission granted) or
+     *  ends (Stop / screen left). Ending a session always stops any
+     *  speech and never leaves the mic listening. */
+    fun setVoiceSessionActive(active: Boolean) {
+        _voiceSessionActive.value = active
+        if (!active) {
+            viewModelScope.launch { _stopSpeakingEvents.emit(Unit) }
+            _voiceState.value = VoiceState.IDLE
+        }
+    }
+
+    fun stopVoiceSession() = setVoiceSessionActive(false)
+
+    fun setVoiceResponsesEnabled(enabled: Boolean) {
+        viewModelScope.launch { settings.setVoiceResponsesEnabled(enabled) }
+        if (!enabled) viewModelScope.launch { _stopSpeakingEvents.emit(Unit) }
+    }
+
+    fun setSpeechRate(rate: Float) {
+        viewModelScope.launch { settings.setVoiceSpeechRate(rate) }
+    }
+
+    fun setSpeechPitch(pitch: Float) {
+        viewModelScope.launch { settings.setVoiceSpeechPitch(pitch) }
+    }
+
+    fun setContinuousMode(enabled: Boolean) {
+        viewModelScope.launch { settings.setVoiceContinuousMode(enabled) }
+    }
+
+    /**
+     * UPDATE 17 — stream one assistant reply into the chat.
+     *
+     * Creates an empty bot message ([ChatMessage.streaming] = true),
+     * shows the thinking indicator until the first displayable text
+     * arrives, then reveals the reply through the [Typewriter] at a
+     * controlled pace. The timestamp is stamped only when the reply
+     * completes, and history is persisted once at the end — never
+     * once per word.
+     *
+     * [cloudFlow] is a real backend SSE stream when the owner
+     * configured cloud AI; [localText] is the on-device reply.
+     * Cloud chunks are FED to the typewriter as they arrive (the
+     * typewriter buffers them, so a fast backend never dumps the
+     * whole reply at once). If the cloud stream fails after starting,
+     * the text shown so far is kept and the failure is reported
+     * plainly with Retry offered; if it fails before any text, the
+     * local reply is shown instead. When there is no cloud at all,
+     * the local text is typed out — local engine: typewriter display
+     * over locally generated text, no network stream.
+     *
+     * Returns true when a complete reply was delivered.
+     */
+    private suspend fun streamReply(
+        localText: String?,
+        cloudFlow: kotlinx.coroutines.flow.Flow<String>? = null,
+        note: String? = null,
+        isAiSummary: Boolean = false,
+        checklist: List<String> = emptyList(),
+        table: List<Triple<String, String, String>> = emptyList(),
+        tableHeaders: Triple<String, String, String>? = null,
+        deepLinkRoute: String? = null,
+        deepLinkLabel: String? = null
+    ): Boolean {
+        val messageId = System.nanoTime()
+        val writer = Typewriter()
+        typewriter = writer
+        streamingMessageId = messageId
+        _isThinking.value = true
+        _isStreaming.value = false
+        _generationState.value = GenerationState.THINKING
+        append(
+            ChatMessage(
+                id = messageId,
+                text = "",
+                fromUser = false,
+                isAiSummary = isAiSummary,
+                note = note,
+                checklist = checklist,
+                table = table,
+                tableHeaders = tableHeaders,
+                deepLinkRoute = deepLinkRoute,
+                deepLinkLabel = deepLinkLabel,
+                streaming = true
+            ),
+            persistNow = false
+        )
+        // Keep the message text in step with the typewriter, without
+        // persisting every word.
+        val displayJob = viewModelScope.launch {
+            writer.displayText.collect { shown ->
+                if (shown.isNotEmpty() && _isThinking.value) {
+                    _isThinking.value = false
+                    _isStreaming.value = true
+                    _generationState.value = GenerationState.STREAMING
+                }
+                val current = _messages.value.firstOrNull { it.id == messageId } ?: return@collect
+                if (current.text != shown) {
+                    replaceMessage(messageId, current.copy(text = shown), persistNow = false)
+                }
+            }
+        }
+        return try {
+            val typeJob = writer.start(viewModelScope)
+            var cloudFailed = false
+            if (cloudFlow != null) {
+                try {
+                    cloudFlow.collect { chunk -> writer.feed(chunk) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    cloudFailed = true
+                }
+                if (cloudFailed && writer.fedText.isEmpty() && localText != null) {
+                    writer.feed(localText)
+                }
+            } else if (localText != null) {
+                writer.feed(localText)
+            }
+            writer.markFinished()
+            // A short local reply must not be delayed: if the
+            // typewriter has nothing queued and nothing shown, there
+            // is nothing to type — finish at once.
+            if (writer.fedText.isEmpty()) {
+                writer.flush()
+            } else {
+                writer.awaitCompletion()
+            }
+            typeJob.join()
+            displayJob.cancel()
+            val finalText = writer.currentText
+            if (finalText.isEmpty()) {
+                // Nothing arrived at all (cloud failed, no local text).
+                _messages.value = _messages.value.filter { it.id != messageId }
+                markGenerationFailed()
+                append(
+                    ChatMessage(
+                        text = "AI se jawab nahi mila — internet ya AI key check karke Retry dabayein. Koi entry save nahi hui hai.",
+                        fromUser = false, isError = true, generationFailed = true
+                    )
+                )
+                false
+            } else {
+                streamingMessageId = null
+                _isThinking.value = false
+                _isStreaming.value = false
+                _generationState.value = GenerationState.COMPLETED
+                replaceMessage(
+                    messageId,
+                    _messages.value.first { it.id == messageId }.copy(
+                        text = finalText,
+                        streaming = false,
+                        timestampMs = System.currentTimeMillis()
+                    ),
+                    persistNow = true
+                )
+                true
+            }
+        } catch (e: CancellationException) {
+            displayJob.cancel()
+            // Keep the shown text: stop() already dropped the queue.
+            val shown = writer.currentText
+            streamingMessageId = null
+            _isThinking.value = false
+            _isStreaming.value = false
+            _generationState.value = GenerationState.STOPPED
+            val current = _messages.value.firstOrNull { it.id == messageId }
+            if (current != null) {
+                replaceMessage(
+                    messageId,
+                    current.copy(text = shown, streaming = false, streamingStopped = true, timestampMs = System.currentTimeMillis()),
+                    persistNow = true
+                )
+            }
+            throw e
+        } catch (_: Exception) {
+            displayJob.cancel()
+            val shown = writer.currentText
+            streamingMessageId = null
+            _isThinking.value = false
+            _isStreaming.value = false
+            if (shown.isEmpty()) {
+                _messages.value = _messages.value.filter { it.id != messageId }
+                markGenerationFailed()
+            } else {
+                replaceMessage(
+                    messageId,
+                    _messages.value.first { it.id == messageId }.copy(
+                        text = shown, streaming = false, streamingStopped = true,
+                        timestampMs = System.currentTimeMillis()
+                    ),
+                    persistNow = true
+                )
+            }
+            false
         }
     }
 
@@ -446,7 +998,7 @@ class ChatbotViewModel(
         pendingAction?.let { pending ->
             val norm = AiAssistantParser.normalise(text)
             if (AiAssistantParser.isAffirmative(norm)) {
-                confirmPending()
+                confirmPendingFromChat()
                 return
             }
             if (AiAssistantParser.isNegative(norm)) {
@@ -557,22 +1109,8 @@ class ChatbotViewModel(
         lang: AiLanguage
     ) {
         val key = settings.aiKey.first()
-        if (key.isNotBlank()) {
-            val cloud = tryCloudConverse(userText)
-            if (cloud != null) {
-                append(
-                    ChatMessage(
-                        text = withRealPlanData(cloud, result.intent),
-                        fromUser = false, isAiSummary = true,
-                        note = "AI jawab",
-                        checklist = result.checklist
-                    )
-                )
-                return
-            }
-            // Cloud failed — fall through to the local reply below.
-        }
-        if (result.needsCloud) {
+        val localText = withRealPlanData(result.text, result.intent)
+        if (result.needsCloud && key.isBlank()) {
             // No usable cloud reply and the local engine could not
             // genuinely answer: say so honestly, in the user language.
             val limitation = if (MeaningParser.isLiveInfo(AiAssistantParser.normalise(userText), userText.lowercase())) {
@@ -580,18 +1118,42 @@ class ChatbotViewModel(
             } else {
                 ConversationEngine.honestLimitation(lang)
             }
-            append(ChatMessage(text = limitation, fromUser = false))
+            streamReply(localText = limitation)
             return
         }
-        append(
-            ChatMessage(
-                text = withRealPlanData(result.text, result.intent),
-                fromUser = false,
-                checklist = result.checklist,
-                deepLinkRoute = result.deepLinkRoute,
-                deepLinkLabel = result.deepLinkLabel
-            )
+        // UPDATE 17 — cloud reply streams over real SSE when a key is
+        // configured; otherwise the local reply is typed out by the
+        // typewriter (local engine, no network stream). If the cloud
+        // stream fails before any text, the local reply is shown.
+        val cloudFlow = if (key.isNotBlank()) cloudConverseFlow(userText) else null
+        val delivered = streamReply(
+            localText = localText,
+            cloudFlow = cloudFlow,
+            isAiSummary = cloudFlow != null,
+            note = if (cloudFlow != null) "AI jawab" else null,
+            checklist = result.checklist,
+            deepLinkRoute = result.deepLinkRoute,
+            deepLinkLabel = result.deepLinkLabel
         )
+        if (!delivered && cloudFlow == null && result.needsCloud) {
+            val limitation = ConversationEngine.honestLimitation(lang)
+            streamReply(localText = limitation)
+        }
+    }
+
+    /** The cloud conversational reply as a REAL streaming Flow
+     *  (UPDATE 17): chunks arrive over SSE and are fed to the
+     *  typewriter as they arrive. Null when no key is configured. */
+    private suspend fun cloudConverseFlow(userText: String): kotlinx.coroutines.flow.Flow<String>? {
+        val key = settings.aiKey.first()
+        if (key.isBlank()) return null
+        val history = _messages.value.takeLast(10).joinToString("\n") { message ->
+            (if (message.fromUser) "User: " else "Assistant: ") + message.text
+        }
+        val contextText = "The user runs a CSC centre (Xerox, Printing, PAN Card, Aadhaar, Voter ID, Ayushman Card, Money Transfer, Passport Photo, Scanning). " +
+            "Reply in the same language and style as the user's latest message.\n\n" +
+            snapshotFacts(_snapshot.value) + "\nConversation so far:\n$history"
+        return CloudAiClient(key).converseStreaming(userText, contextText)
     }
 
     /** Cloud conversational reply: the prompt carries the user's
@@ -651,45 +1213,48 @@ class ChatbotViewModel(
                     agentName = ctx.lastAgentName
                 )
             }
-            append(
-                ChatMessage(
-                    // UPDATE 14/16 — CSC-aware enrichment (expense kinds
-                    // name the usual CSC expense categories). Facts still
-                    // come from the ledgers.
-                    text = ConversationMemory.enrichBusinessAnswer(
-                        knowledgeAnswer.text, context, lastKnowledge?.kind, effectiveLanguage(text)
-                    ),
-                    fromUser = false,
-                    table = knowledgeAnswer.table, tableHeaders = knowledgeAnswer.tableHeaders,
-                    deepLinkRoute = knowledgeAnswer.deepLinkRoute,
-                    deepLinkLabel = knowledgeAnswer.deepLinkLabel,
-                    note = if (knowledgeAnswer.hasEstimate) "Upar FACTS aapke real record se hain; SUGGESTION sirf salah hai, fact nahi." else null
-                )
+            // UPDATE 17 — knowledge answers are computed locally, so
+            // they are typed out by the typewriter (local engine, no
+            // network stream). Facts still come from the ledgers.
+            streamReply(
+                localText = ConversationMemory.enrichBusinessAnswer(
+                    knowledgeAnswer.text, context, lastKnowledge?.kind, effectiveLanguage(text)
+                ),
+                table = knowledgeAnswer.table, tableHeaders = knowledgeAnswer.tableHeaders,
+                deepLinkRoute = knowledgeAnswer.deepLinkRoute,
+                deepLinkLabel = knowledgeAnswer.deepLinkLabel,
+                note = if (knowledgeAnswer.hasEstimate) "Upar FACTS aapke real record se hain; SUGGESTION sirf salah hai, fact nahi." else null
             )
             return
         }
         val builtIn = BuiltInChatbotResponder.answer(text, _snapshot.value)
         val key = settings.aiKey.first()
         if (key.isBlank()) {
-            append(
-                ChatMessage(
-                    text = builtIn, fromUser = false,
-                    note = "Built-in jawab — aapke real record se. AI summary ke liye Settings me AI key add karein."
-                )
+            streamReply(
+                localText = builtIn,
+                note = "Built-in jawab — aapke real record se. AI summary ke liye Settings me AI key add karein."
             )
         } else {
-            when (val result = CloudAiClient(key).ask(text, snapshotFacts(_snapshot.value))) {
-                is AiFeatures.AiResult.Answer -> append(
-                    ChatMessage(
-                        text = result.text, fromUser = false, isAiSummary = true,
-                        note = "AI summary — figures aapke real record se hain."
-                    )
-                )
-                is AiFeatures.AiResult.NotAvailable -> append(
-                    ChatMessage(
-                        text = builtIn, fromUser = false,
-                        note = "AI abhi available nahi hai, isliye built-in jawab dikhaya gaya hai."
-                    )
+            // UPDATE 17 — the cloud summary streams over real SSE
+            // when configured; on stream failure the built-in reply
+            // is typed out instead (never a fake instant answer).
+            val history = _messages.value.takeLast(10).joinToString("\n") { message ->
+                (if (message.fromUser) "User: " else "Assistant: ") + message.text
+            }
+            val cloudFlow = CloudAiClient(key).converseStreaming(
+                text,
+                snapshotFacts(_snapshot.value) + "\nConversation so far:\n$history"
+            )
+            val delivered = streamReply(
+                localText = builtIn,
+                cloudFlow = cloudFlow,
+                isAiSummary = true,
+                note = "AI summary — figures aapke real record se hain."
+            )
+            if (!delivered) {
+                streamReply(
+                    localText = builtIn,
+                    note = "AI abhi available nahi hai, isliye built-in jawab dikhaya gaya hai."
                 )
             }
         }
@@ -953,31 +1518,58 @@ class ChatbotViewModel(
         _isLoading.value = true
         viewModelScope.launch {
             try {
-                val action = editedLines?.let { rebuildWithEdits(pending.action, it) } ?: pending.action
-                val key = if (editedLines != null) keyFor(action) else pending.key
-                val result = repository.executeAiAction(profileId, action, key)
-                when (result) {
-                    is BusinessRepository.AiExecuteResult.Saved -> {
-                        updateContextFrom(action)
-                        append(ChatMessage(text = "✓ ${result.message}", fromUser = false))
-                    }
-                    is BusinessRepository.AiExecuteResult.Duplicate -> {
-                        append(ChatMessage(text = result.message, fromUser = false))
-                    }
-                    is BusinessRepository.AiExecuteResult.Failed -> {
-                        append(ChatMessage(text = result.message, fromUser = false, isError = true))
-                    }
-                }
-            } catch (_: Exception) {
-                append(
-                    ChatMessage(
-                        text = "Save nahi ho paya — phir se try karein. Kuch bhi galat save nahi hua hai.",
-                        fromUser = false, isError = true
-                    )
-                )
+                executePending(pending, editedLines)
             } finally {
                 _isLoading.value = false
+                drainQueuedVoiceTranscript()
             }
+        }
+    }
+
+    /**
+     * Confirm from inside handleMessage ("Haan" typed or spoken).
+     * BUG FIX (UPDATE 18): the public confirmPending() refuses while
+     * _isLoading is true — but handleMessage itself runs inside a
+     * generation with _isLoading true, so a spoken/typed "Haan" was
+     * silently dropped and the preview never saved. This path
+     * executes the same backend-verified save without touching the
+     * generation's loading flag (the generation's own finally clears
+     * it). The idempotency key still guarantees one write: a second
+     * "Haan" finds no pending action and returns Duplicate / nothing.
+     */
+    private fun confirmPendingFromChat() {
+        val pending = pendingAction ?: return
+        pendingAction = null
+        _pendingPreviewId.value = null
+        viewModelScope.launch { executePending(pending, null) }
+    }
+
+    /** The backend-verified save itself (steps 10–12), shared by the
+     *  Confirm button and by a spoken/typed "Haan". */
+    private suspend fun executePending(pending: PendingAction, editedLines: List<AiPreviewLine>?) {
+        try {
+            val action = editedLines?.let { rebuildWithEdits(pending.action, it) } ?: pending.action
+            val key = if (editedLines != null) keyFor(action) else pending.key
+            val result = repository.executeAiAction(profileId, action, key)
+            when (result) {
+                is BusinessRepository.AiExecuteResult.Saved -> {
+                    updateContextFrom(action)
+                    append(ChatMessage(text = "✓ ${result.message}", fromUser = false))
+                }
+                is BusinessRepository.AiExecuteResult.Duplicate -> {
+                    append(ChatMessage(text = result.message, fromUser = false))
+                }
+                is BusinessRepository.AiExecuteResult.Failed -> {
+                    append(ChatMessage(text = result.message, fromUser = false, isError = true))
+                }
+            }
+        } catch (_: Exception) {
+            append(
+                ChatMessage(
+                    text = "Save nahi ho paya — phir se try karein. Kuch bhi galat save nahi hua hai.",
+                    fromUser = false, isError = true
+                )
+            )
         }
     }
 

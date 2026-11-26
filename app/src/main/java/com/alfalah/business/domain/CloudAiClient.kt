@@ -6,6 +6,11 @@ import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 
 /**
@@ -107,6 +112,99 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
             null
         }
     }
+
+    /** UPDATE 17 — GENUINE backend streaming (real SSE, not a timer).
+     *
+     *  Posts to the owner-configured endpoint with streaming requested
+     *  and returns a Flow of incremental text chunks as they arrive
+     *  over the wire: each `data:` event is parsed by [SseParser] and
+     *  its text is emitted immediately — the first chunk is emitted as
+     *  soon as it arrives, never after the whole reply is buffered.
+     *  The response is read through a UTF-8 reader, so a multi-byte
+     *  character split across two network reads is reassembled by the
+     *  reader before parsing — it can never surface half-cut.
+     *
+     *  Cancellation cancels the underlying HTTP connection: collecting
+     *  is done in the caller's coroutine, and cancelling it closes the
+     *  reader and disconnects the connection in the finally block.
+     *  Errors are typed [StreamingError] (network / HTTP status /
+     *  invalid response) — the caller turns them into one plain
+     *  friendly message; no raw HTTP text ever reaches the user.
+     *
+     *  When no key is configured there is NO backend stream: this
+     *  throws [StreamingError.NoCloudConfigured] and the caller falls
+     *  back to the local engine — local engine: typewriter display over locally generated text, no network stream.
+     *  That fallback is labelled honestly in code and in the UI note
+     *  ("built-in jawab"); it is never presented as a cloud stream. */
+    fun hasCloudStream(): Boolean = apiKey.isNotBlank()
+
+    fun converseStreaming(question: String, context: String): Flow<String> = flow {
+        if (apiKey.isBlank()) throw StreamingError.NoCloudConfigured()
+        val prompt = "You are BizKhata AI Assistant, a friendly personal and business assistant for a small shopkeeper in India. " +
+            "The user speaks to you in their own language and style — it may be Hinglish, English, Hindi, Gujarati, Marathi, Bengali, Punjabi, Tamil, Telugu, Kannada, Malayalam, Odia, Assamese, Urdu, Nepali or another Indian language, in native script or Roman letters. " +
+            "Reply in the SAME language and style as the user's latest message. Be natural, warm and varied — write like a helpful person, never like a form letter, and never repeat the same generic question. " +
+            "First understand the user's actual intention: a greeting, a statement about their day, a plan for tomorrow, a question, a request, or a business action. Answer THAT intention. " +
+            "If the user states a plan (for example they will do PAN Card work tomorrow), acknowledge the plan and offer relevant help such as a checklist — NEVER ask how much money was involved. " +
+            "If the user asks about their business, use ONLY the ledger facts given below — never invent a number, a name or a record; if there is no record, say so plainly and give the real figure (zero when nothing is recorded). " +
+            "You never perform a financial action yourself: if the user wants an entry, a payment or a change, say what you understood and ask them to confirm — the app handles the actual save. " +
+            "If you do not know something (live prices, news, weather, or anything outside the facts below), say so honestly in plain words instead of inventing it. " +
+            "Keep replies short and simple, in plain words a shopkeeper understands.\n\n" +
+            context + "\n\nLatest message: " + question
+        val endpoint =
+            "https://generativelanguage.googleapis.com/v1beta/models/" +
+                AiFeatures.AI_MODEL + ":streamGenerateContent?alt=sse"
+        val body = "{\"contents\":[{\"parts\":[{\"text\":" + jsonString(prompt) + "}]}]}"
+        val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15000
+            readTimeout = 0
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("Accept", "text/event-stream")
+            setRequestProperty("X-goog-api-key", apiKey)
+        }
+        try {
+            OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { it.write(body) }
+            val code = connection.responseCode
+            if (code != HttpURLConnection.HTTP_OK) throw StreamingError.HttpStatus(code)
+            val parser = SseParser()
+            var sawAnyText = false
+            var streamDone = false
+            BufferedReader(InputStreamReader(connection.inputStream, Charsets.UTF_8)).use { reader ->
+                val buffer = CharArray(2048)
+                while (!streamDone) {
+                    currentCoroutineContext().ensureActive()
+                    val read = try {
+                        reader.read(buffer)
+                    } catch (_: java.io.IOException) {
+                        throw StreamingError.Network()
+                    }
+                    if (read < 0) break
+                    val events = parser.feed(String(buffer, 0, read))
+                    for (event in events) {
+                        when (event) {
+                            is SseEvent.Text -> {
+                                sawAnyText = true
+                                emit(event.text)
+                            }
+                            is SseEvent.Done -> streamDone = true
+                            is SseEvent.Ignored -> Unit
+                        }
+                    }
+                    if (parser.isDone) streamDone = true
+                }
+            }
+            if (!sawAnyText) throw StreamingError.InvalidResponse()
+        } catch (e: StreamingError) {
+            throw e
+        } catch (_: kotlinx.coroutines.CancellationException) {
+            throw StreamingError.Cancelled()
+        } catch (_: java.io.IOException) {
+            throw StreamingError.Network()
+        } finally {
+            connection.disconnect()
+        }
+    }.flowOn(Dispatchers.IO)
 
     /** One HTTP call with a prompt; returns the reply text or null. */
     private fun postPrompt(prompt: String): String? {

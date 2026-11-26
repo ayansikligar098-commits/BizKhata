@@ -57,6 +57,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -148,7 +149,16 @@ class MainActivity : ComponentActivity() {
             val savedMobile by settings.mobile.collectAsState(initial = "")
             val aiKey by settings.aiKey.collectAsState(initial = "")
             val aiLanguagePref by settings.aiLanguagePref.collectAsState(initial = "AUTO")
+            val voiceResponsesEnabled by settings.voiceResponsesEnabled.collectAsState(initial = true)
+            val voiceSpeechRate by settings.voiceSpeechRate.collectAsState(initial = 1.0f)
+            val voiceContinuousMode by settings.voiceContinuousMode.collectAsState(initial = false)
             var unlocked by remember { mutableStateOf(false) }
+
+            // KEY MIGRATION (UPDATE 17, 2026-11-27): a key the owner
+            // entered early lives under the old DataStore key — copy
+            // it opaquely into "ai_key" once, before anything reads
+            // aiKey. Idempotent; no-op when there is nothing to copy.
+            LaunchedEffect(Unit) { settings.migrateLegacyAiKey() }
 
             // The active profile: the one the user picked, else the first one.
             // Profiles are strictly isolated — every screen gets this id.
@@ -545,7 +555,13 @@ class MainActivity : ComponentActivity() {
                                         onSaveAiKey = { key -> scope.launch { settings.setAiKey(key) } },
                                         onClearAiKey = { scope.launch { settings.clearAiKey() } },
                                         aiLanguagePref = aiLanguagePref,
-                                        onAiLanguagePref = { code -> scope.launch { settings.setAiLanguagePref(code) } }
+                                        onAiLanguagePref = { code -> scope.launch { settings.setAiLanguagePref(code) } },
+                                        voiceResponsesEnabled = voiceResponsesEnabled,
+                                        onVoiceResponsesEnabled = { enabled -> scope.launch { settings.setVoiceResponsesEnabled(enabled) } },
+                                        voiceSpeechRate = voiceSpeechRate,
+                                        onVoiceSpeechRate = { rate -> scope.launch { settings.setVoiceSpeechRate(rate) } },
+                                        voiceContinuousMode = voiceContinuousMode,
+                                        onVoiceContinuousMode = { enabled -> scope.launch { settings.setVoiceContinuousMode(enabled) } }
                                     )
                                 }
                             }

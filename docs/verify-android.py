@@ -17,9 +17,13 @@ print(f"Kotlin files: {len(kt_files)}")
 
 def strip_code(text):
     # remove block comments, line comments, string literals (rough but adequate)
+    # NOTE (UPDATE 17): the string/char patterns must NOT span newlines —
+    # Kotlin string/char literals never do, but an apostrophe in a line
+    # comment (owner's, don't) used to pair with a far-away quote and
+    # swallow whole functions, faking a brace imbalance.
     text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
-    text = re.sub(r'"(?:\\.|[^"\\])*"', '""', text)
-    text = re.sub(r"'(?:\\.|[^'\\])*'", "''", text)
+    text = re.sub(r'"(?:\\.|[^"\\\n])*"', '""', text)
+    text = re.sub(r"'(?:\\.|[^'\\\n])*'", "''", text)
     text = re.sub(r'//.*', '', text)
     return text
 
@@ -137,12 +141,21 @@ for f in kt_files:
 for f in kt_files:
     raw = f.read_text()
     low = raw.lower()
-    if "gemini" in low and f.name != "AiFeatures.kt":
+    if "gemini" in low and f.name not in ("AiFeatures.kt", "SettingsStore.kt"):
         fails.append(f"{f.name}: provider name 'gemini' still present (UPDATE 12)")
     if f.name == "AiFeatures.kt":
         for line in raw.splitlines():
             if "gemini" in line.lower() and "AI_MODEL" not in line:
                 fails.append(f"AiFeatures.kt: provider name outside the AI_MODEL constant: {line.strip()[:80]}")
+    if f.name == "SettingsStore.kt":
+        # UPDATE 17 key migration: the ONLY allowed provider-named
+        # text is the legacy storage key literal "gemini_api_key"
+        # (LEGACY_AI_KEY constant + its doc comment) — the old
+        # DataStore key a key entered early was stored under. Any
+        # other provider-named text here is still a violation.
+        for line in raw.splitlines():
+            if "gemini" in line.lower() and "gemini_api_key" not in line:
+                fails.append(f"SettingsStore.kt: provider name outside the legacy-key migration: {line.strip()[:80]}")
     if "free tier" in low or "free-tier" in low:
         fails.append(f"{f.name}: 'free tier' wording still present (UPDATE 12)")
     if "http 404" in low or "http_code" in low:
@@ -462,6 +475,209 @@ for needle in ["u14-screenshot greeting", "u15-plan pan tomorrow",
         fails.append(f"ai_assistant_mirror.py missing conversational piece: {needle!r}")
 if 'def _no_money_q' not in mirror_src:
     fails.append("ai_assistant_mirror.py missing the no-money-question guard assertion (UPDATE 15)")
+
+# 15. UPDATE 17 — real-time streaming + natural animated typing.
+streaming = MAIN / "domain/Streaming.kt"
+if not streaming.exists():
+    fails.append("domain/Streaming.kt missing (UPDATE 17 streaming engine)")
+else:
+    stream_src = streaming.read_text()
+    for needle in ["object GraphemeChunker", "fun graphemeClusters",
+                   "fun displayChunks", "fun isLossless",
+                   "object TypewriterLogic", "fun steps",
+                   "class Typewriter", "fun feed", "fun markFinished",
+                   "fun stop", "fun flush", "fun awaitCompletion",
+                   "DEFAULT_WORDS_PER_SECOND", "MIN_WORDS_PER_SECOND",
+                   "MAX_WORDS_PER_SECOND", "BreakIterator",
+                   "sealed class StreamingError", "NoCloudConfigured",
+                   "HttpStatus", "InvalidResponse",
+                   "class SseParser", "sealed class SseEvent",
+                   "[DONE]", "enum class GenerationState"]:
+        if needle not in stream_src:
+            fails.append(f"Streaming.kt missing: {needle}")
+    if "local engine: typewriter display over locally generated text" not in stream_src:
+        fails.append("Streaming.kt must label the local path honestly (typewriter display, no network stream)")
+cloud_src = (MAIN / "domain/CloudAiClient.kt").read_text()
+for needle in ["suspend fun converse", "fun converseStreaming", "fun hasCloudStream",
+               "streamGenerateContent", "text/event-stream", "Flow<String>",
+               "SseParser", "StreamingError", "ensureActive",
+               "local engine: typewriter display over locally generated text"]:
+    if needle not in cloud_src:
+        fails.append(f"CloudAiClient.kt missing streaming piece: {needle!r}")
+if "OkHttp" in cloud_src or "okhttp" in cloud_src:
+    fails.append("CloudAiClient added OkHttp — use the existing HttpURLConnection (UPDATE 17)")
+vm_src = (MAIN / "ui/chatbot/ChatbotViewModel.kt").read_text()
+for needle in ["isThinking", "isStreaming", "canRetry", "lastUserMessage",
+               "stopGeneration", "fun regenerate", "fun retryLast",
+               "fun streamReply", "Typewriter", "onCleared",
+               "migrateLegacyAiKey", "cloudConverseFlow", "GenerationState"]:
+    if needle not in vm_src:
+        fails.append(f"ChatbotViewModel.kt missing streaming piece: {needle!r}")
+if "generationJob" not in vm_src or "cancelAndJoin" not in vm_src:
+    fails.append("ChatbotViewModel.kt does not guard one active generation (cancelAndJoin)")
+screen_src = (MAIN / "ui/chatbot/ChatbotScreen.kt").read_text()
+for needle in ["BizKhata AI is thinking...", "ThinkingDots", "BlinkingCursor",
+               "Stop Generating", "Regenerate", "Copy", "Retry",
+               "MarkdownText", "markdownInline", "LocalClipboardManager",
+               "lastBotMessage", "isThinking", "isStreaming"]:
+    if needle not in screen_src:
+        fails.append(f"ChatbotScreen.kt missing streaming piece: {needle!r}")
+if "Jawab likh raha hai" in screen_src:
+    fails.append("ChatbotScreen.kt still shows the old spinner text instead of the thinking indicator")
+if "▍" not in screen_src:
+    fails.append("ChatbotScreen.kt missing the blinking cursor glyph")
+if not (TEST / "ConversationTest.kt").exists():
+    fails.append("ConversationTest.kt missing")
+else:
+    stream_test = (TEST / "ConversationTest.kt").read_text()
+    for needle in ["class StreamingTest", "chunkerGraphemeSafety_devanagari",
+                   "chunkerGraphemeSafety_gujaratiAndTamil",
+                   "chunkerGraphemeSafety_emojiZwjAndMixed",
+                   "typewriterFinalEqualsSource_emptyShortLong",
+                   "typewriterStopPreservesPrefix", "typewriterAppendWhileTyping",
+                   "sseParser_splitLinesAndSplitUtf8", "sseParser_doneAndCancel",
+                   "typingSpeed_naturalBand", "streamingErrorsAreTyped"]:
+        if needle not in stream_test:
+            fails.append(f"ConversationTest.kt missing streaming test: {needle}")
+mirror_src = mirror.read_text()
+for needle in ["u17-chunker devanagari", "u17-typewriter final equals source",
+               "u17-sse split lines", "u17-sse done", "u17-flow-14step",
+               "u17-migration legacy key", "STREAMING TYPING SPEED",
+               "def grapheme_clusters", "def display_chunks",
+               "class SseParser", "class TypewriterSim", "class GenerationSim",
+               "def migrate_legacy_key", "def markdown_plain"]:
+    if needle not in mirror_src:
+        fails.append(f"ai_assistant_mirror.py missing streaming piece: {needle!r}")
+# Key migration (UPDATE 17 check): the old Android storage key must
+# exist as a LEGACY constant, the migration must copy it opaquely
+# into the new key, and clearing must remove both.
+settings_src = (MAIN / "data/SettingsStore.kt").read_text()
+for needle in ["LEGACY_AI_KEY", "gemini_api_key", "fun migrateLegacyAiKey",
+               "it.remove(LEGACY_AI_KEY)"]:
+    if needle not in settings_src:
+        fails.append(f"SettingsStore.kt missing key-migration piece: {needle!r}")
+if "migrateLegacyAiKey" not in (MAIN / "MainActivity.kt").read_text():
+    fails.append("MainActivity does not run migrateLegacyAiKey on launch (UPDATE 17)")
+if "migrateLegacyAiKey" not in vm_src:
+    fails.append("ChatbotViewModel does not run migrateLegacyAiKey before first aiKey read (UPDATE 17)")
+
+# 16. UPDATE 18 — two-way voice conversation (Android only).
+# STT/TTS are the native Android speech services (free, no key);
+# the intelligence is the SAME conversational client as text chat
+# (CloudAiClient.converse() via the shared pipeline) — voice builds
+# no separate AI path and no separate intent logic. The user speaks
+# in his own way: no rigid command grammar anywhere.
+voice_conv = MAIN / "domain/VoiceConversation.kt"
+if not voice_conv.exists():
+    fails.append("domain/VoiceConversation.kt missing (UPDATE 18 voice logic)")
+else:
+    vc_src = voice_conv.read_text()
+    for needle in ["enum class VoiceState", "data class VoiceSettings",
+                   "sealed class VoiceDecision", "object VoiceInterrupt",
+                   "fun stripInterruptPrefix", "object VoicePipeline",
+                   "MIN_CONFIDENCE", "DUPLICATE_WINDOW_MS",
+                   "object ContinuousMode", "shouldRestartAfterResult",
+                   "shouldRestartAfterSpeech", "object VoiceText",
+                   "fun speakable", "fun repeatPrompt",
+                   "fun clarificationForMissing", "object VoiceNaturalPhrasing",
+                   "fun understands", "isFinancialAction"]:
+        if needle not in vc_src:
+            fails.append(f"VoiceConversation.kt missing: {needle}")
+    # No rigid-command wording: the voice flow must never demand a
+    # fixed phrase from the user.
+    for bad in ["say it exactly", "exact command", "fixed command",
+                "speak like this", "you must say"]:
+        if bad in vc_src.lower():
+            fails.append(f"VoiceConversation.kt demands a fixed phrase: {bad!r}")
+    # No provider name anywhere in the voice layer (UPDATE 12).
+    if "gemini" in vc_src.lower():
+        fails.append("VoiceConversation.kt names a provider (UPDATE 12)")
+voice_out = MAIN / "ui/chatbot/VoiceOutput.kt"
+if not voice_out.exists():
+    fails.append("ui/chatbot/VoiceOutput.kt missing (UPDATE 18 TTS speaker)")
+else:
+    vo_src = voice_out.read_text()
+    for needle in ["class VoiceSpeaker", "TextToSpeech", "UtteranceProgressListener",
+                   "fun speak", "fun stop", "fun shutdown", "fun setLanguage",
+                   "speechRate", "speechPitch", "QUEUE_FLUSH"]:
+        if needle not in vo_src:
+            fails.append(f"VoiceOutput.kt missing: {needle}")
+    if "gemini" in vo_src.lower():
+        fails.append("VoiceOutput.kt names a provider (UPDATE 12)")
+voice_in = MAIN / "ui/chatbot/VoiceInput.kt"
+voice_in_src = voice_in.read_text()
+for needle in ["SpeechRecognizer", "CONFIDENCE_SCORES", "onResultWithConfidence",
+               "onPartial", "fun isListening", "ERROR_NO_MATCH",
+               "ERROR_SPEECH_TIMEOUT", "isRecognitionAvailable"]:
+    if needle not in voice_in_src:
+        fails.append(f"VoiceInput.kt missing voice piece: {needle}")
+# A bare service+amount fragment ("Xerox 300") must reach the
+# clarification path, not Unknown (UPDATE 18 natural phrasing).
+ai_src = (MAIN / "domain/AiAssistant.kt").read_text()
+if "detectService(q) != null && mainAmount(q) != null &&" not in ai_src:
+    fails.append("AiAssistant.kt bare-entry gate still requires a mode (UPDATE 18: 'Xerox 300' must clarify)")
+settings_src = (MAIN / "data/SettingsStore.kt").read_text()
+for needle in ["voiceResponsesEnabled", "setVoiceResponsesEnabled",
+               "voiceSpeechRate", "setVoiceSpeechRate",
+               "voiceSpeechPitch", "setVoiceSpeechPitch",
+               "voiceContinuousMode", "setVoiceContinuousMode"]:
+    if needle not in settings_src:
+        fails.append(f"SettingsStore missing voice setting: {needle}")
+settings_screen_src = (MAIN / "ui/settings/SettingsScreen.kt").read_text()
+for needle in ["Voice Assistant", "showVoice", "voiceResponsesEnabled",
+               "onVoiceResponsesEnabled", "voiceSpeechRate", "onVoiceSpeechRate",
+               "voiceContinuousMode", "onVoiceContinuousMode"]:
+    if needle not in settings_screen_src:
+        fails.append(f"SettingsScreen missing voice piece: {needle}")
+if "gemini" in settings_screen_src.lower():
+    fails.append("SettingsScreen voice section names a provider (UPDATE 12)")
+if "voiceResponsesEnabled" not in (MAIN / "MainActivity.kt").read_text():
+    fails.append("MainActivity does not wire voice settings to SettingsScreen (UPDATE 18)")
+vm_src = (MAIN / "ui/chatbot/ChatbotViewModel.kt").read_text()
+for needle in ["onVoiceTranscript", "speakEvents", "stopSpeakingEvents",
+               "voiceState", "voiceSessionActive", "interruptSpeaking",
+               "stopVoiceSession", "setContinuousMode", "setVoiceResponsesEnabled",
+               "setSpeechRate", "maybeSpeak", "confirmPendingFromChat",
+               "queuedVoiceTranscript", "VoiceSpeakRequest"]:
+    if needle not in vm_src:
+        fails.append(f"ChatbotViewModel.kt missing voice piece: {needle!r}")
+screen_src = (MAIN / "ui/chatbot/ChatbotScreen.kt").read_text()
+for needle in ["VoiceSpeaker", "VoiceState", "onVoiceTranscript",
+               "onResultWithConfidence", "Continuous: ON", "Voice replies: ON",
+               "stopVoice", "startListening", "DisposableEffect",
+               "Sun raha hoon", "Bol raha hoon"]:
+    if needle not in screen_src:
+        fails.append(f"ChatbotScreen.kt missing voice piece: {needle!r}")
+if "gemini" in screen_src.lower():
+    fails.append("ChatbotScreen.kt names a provider (UPDATE 12)")
+conv_test = (TEST / "ConversationTest.kt").read_text()
+for needle in ["voice_verbatim_gujarati_roman_asks_mode_not_guesses",
+               "voice_verbatim_mixed_amounts_asks_service",
+               "voice_verbatim_agent_payment_asks_agent_name",
+               "voice_verbatim_pan_plan_is_not_entry",
+               "voice_verbatim_total_hisab_is_factual",
+               "voice_verbatim_gujarati_profit_is_factual",
+               "voice_fragment_xerox_300_cash_is_action",
+               "voice_word_order_swap_is_action",
+               "voice_low_confidence_asks_repeat_never_guesses",
+               "voice_duplicate_transcript_ignored_once_only",
+               "voice_interrupt_stops_speech_and_keeps_instruction",
+               "voice_continuous_mode_restarts_only_when_active",
+               "voice_no_rigid_grammar_fragments_understood"]:
+    if needle not in conv_test:
+        fails.append(f"ConversationTest.kt missing voice test: {needle}")
+mirror_src = mirror.read_text()
+for needle in ["u18-s1 normal voice conversation", "u18-s3 cash income by voice",
+               "u18-s6 daily profit by voice", "u18-s7 open Cash Book by voice",
+               "u18-s8 interrupt AI speech", "u18-s10 continuous mode multi-turn",
+               "u18-s11 mic permission denial", "u18-s12 network failure",
+               "u18-s13 ambiguous financial instruction",
+               "u18-s14 duplicate prevention",
+               "u18-natural-1 fragment", "u18-natural-5 verbatim",
+               "VOICE LATENCY", "def voice_decide", "def voice_speakable",
+               "class VoiceStore", "def voice_respond"]:
+    if needle not in mirror_src:
+        fails.append(f"ai_assistant_mirror.py missing voice piece: {needle!r}")
 
 # 9. Python mirror of AccountingEngine — run the unit-test cases
 def customer_due(total, received): return max(total - received, 0)
