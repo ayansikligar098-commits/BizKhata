@@ -18,7 +18,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outDir = '/tmp/bizkhata-ai-test';
 
 execSync(
-  `npx tsc src/lib/types.ts src/lib/money.ts src/lib/accounting.ts src/lib/store.ts src/lib/categories.ts src/lib/routes.ts src/lib/chatbot.ts src/lib/knowledge.ts src/lib/assistant.ts src/lib/ai.ts --outDir ${outDir} --module commonjs --target es2020 --esModuleInterop --skipLibCheck`,
+  `npx tsc src/lib/types.ts src/lib/money.ts src/lib/accounting.ts src/lib/store.ts src/lib/categories.ts src/lib/routes.ts src/lib/languages.ts src/lib/chatbot.ts src/lib/knowledge.ts src/lib/assistant.ts src/lib/ai.ts --outDir ${outDir} --module commonjs --target es2020 --esModuleInterop --skipLibCheck`,
   { cwd: root, stdio: 'pipe' },
 );
 

@@ -281,6 +281,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       receiptPrefix: 'BK',
       receiptCounter: 0,
       language: 'en',
+      aiLanguage: 'auto',
       theme: 'light',
       servicesV2Migrated: true,
       createdAt: new Date().toISOString(),

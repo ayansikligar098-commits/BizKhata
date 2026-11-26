@@ -22,6 +22,7 @@ import type { AppState, BusinessProfile, Method } from './types';
 import type { AssistantAction, FoundRecord } from './assistant';
 import { findAssistantTargets } from './assistant';
 import type { ChatContext } from './knowledge';
+import { detectLanguage, normalizeDigitsMultilingual, normalizeMultilingual, replyIn, resolveReplyLang, type AiLangCode, type ReplyKey } from './languages';
 import { SERVICE_ALIASES, findNameIn, findServiceIn, normalizeDevanagariWords, parseDateRange } from './knowledge';
 
 export interface DueEntry {
@@ -171,10 +172,18 @@ export function factsSummary(f: BusinessFacts): string {
 
 /** Hinglish (Devanagari or Hinglish words) vs English. */
 export function detectLang(q: string): 'hi' | 'en' {
-  if (/[\u0900-\u097F]/.test(q)) return 'hi';
-  const s = q.toLowerCase();
-  if (/\b(aaj|kal|kitna|kitne|kaun|kisne|kya|kab|dena|lena|baaki|baki|munafa|faayda|fayda|kharcha|kamai|paise|rupay|batao|dikhao|mere|mera|meri|hoga|hain|hai|kar|do|bolo|bata)\b/.test(s)) return 'hi';
-  return 'en';
+  const det = detectLanguage(q);
+  return det.code === 'en' ? 'en' : 'hi';
+}
+
+/** Full multilingual reply language for a message (23 languages). */
+export function detectReplyLang(q: string, preferred?: AiLangCode | 'auto' | null): AiLangCode {
+  return resolveReplyLang(q, preferred);
+}
+
+/** Localised clarification question, in the user's own language/style. */
+function askIn(original: string, key: ReplyKey, values: Record<string, string | number> = {}): string {
+  return replyIn(detectReplyLang(original), key, values);
 }
 
 export type ChatIntent =
@@ -186,150 +195,83 @@ function has(q: string, re: RegExp): boolean {
 }
 
 /** Built-in factual responder — every figure comes from the real ledgers. */
-export function answerLocally(question: string, f: BusinessFacts): { intent: ChatIntent; text: string } {
-  const lang = detectLang(question);
-  const q = question.toLowerCase();
-  const hi = lang === 'hi';
+export function answerLocally(question: string, f: BusinessFacts, preferred?: AiLangCode | 'auto' | null): { intent: ChatIntent; text: string } {
+  const lang = detectReplyLang(question, preferred);
+  const q = normalizeMultilingual(question.toLowerCase());
   const noData = !f.hasData;
 
-  const t = (h: string, e: string) => (hi ? h : e);
+  const t = (key: ReplyKey, values: Record<string, string | number> = {}) => replyIn(lang, key, values);
 
   // Greeting / help first (they contain no figures).
-  if (has(q, /^(hi|hii+|hello|hey|namaste|namaskar|ram\s*ram|good\s(morning|afternoon|evening)|salaam|adaab)\b/)) {
-    return {
-      intent: 'greeting',
-      text: t(
-        'Namaste! Main aapka BizKhata AI Assistant hoon. Mujhse poochho: aaj ka profit, aaj ki kamai, kharcha, customer due, agent payable, Money Transfer commission, ya cash/UPI balance.',
-        'Hello! I am your BizKhata AI Assistant. Ask me about: today\u2019s profit, today\u2019s income, expenses, customer dues, agent payables, Money Transfer commission, or cash/UPI balance.',
-      ),
-    };
+  if (has(q, /^(hi|hii+|hello|hey|namaste|namaskar|ram\s*ram|good\s(morning|afternoon|evening)|salaam|adaab|vanakkam|namaskaram|sat\s*sri\s*akal|johar|khurumjari|adaab|namaskara)\b/)) {
+    return { intent: 'greeting', text: t('greeting') };
   }
   if (has(q, /help|madad|kya kar sakte|what can you|kaise (use|kaam)|how (to|do)/)) {
-    return {
-      intent: 'help',
-      text: t(
-        'Main ye bata sakta hoon — sab aapke real record se:\n• Aaj ka profit / kamai / kharcha\n• Customer due — kaun kitna dena baaki hai\n• Agent payable — agent ko kitna dena hai\n• Money Transfer — aaj ka commission aur profit\n• Cash aur UPI balance\nNeeche diye gaye sawal par tap karo ya apna sawal likho.',
-        'I can tell you — all from your real records:\n• Today\u2019s profit / income / expenses\n• Customer dues — who owes how much\n• Agent payables — what you owe each agent\n• Money Transfer — today\u2019s commission and profit\n• Cash and UPI balance\nTap a suggested question below or type your own.',
-      ),
-    };
+    return { intent: 'help', text: t('help') };
   }
 
   if (noData) {
-    return {
-      intent: 'unknown',
-      text: t(
-        'Abhi koi record nahi hai — isliye main koi figure nahi bata sakta. Pehle ek job, payment, kharcha ya Money Transfer add karo, phir mujhse poochho (jaise: "Aaj ka profit kitna hai?").',
-        'There are no records yet, so I cannot quote any figure. Add a job, payment, expense or Money Transfer first, then ask me (for example: "What is today\u2019s profit?").',
-      ),
-    };
+    return { intent: 'unknown', text: t('noData') };
   }
 
   // Agent payable (check before customer due — both mention "dena").
   if (has(q, /agent/)) {
     if (f.agentPayablePaise <= 0) {
-      return { intent: 'agents', text: t('Kisi agent ko kuch dena baaki nahi hai — sab clear hai.', 'You owe no agent anything — everything is clear.') };
+      return { intent: 'agents', text: t('agentNone') };
     }
     const lines = f.agentDues.map((d) => `• ${d.name} — ${formatINR(d.duePaise)}`).join('\n');
-    return {
-      intent: 'agents',
-      text: t(
-        `Agent ko kul dena baaki hai: ${formatINR(f.agentPayablePaise)}.\n${lines}`,
-        `Total payable to agents: ${formatINR(f.agentPayablePaise)}.\n${lines}`,
-      ),
-    };
+    return { intent: 'agents', text: t('agent', { due: formatINR(f.agentPayablePaise), lines }) };
   }
 
   // Money Transfer (check before income — "commission" is MT-only profit).
   if (has(q, /money transfer|\bmt\b|commission/)) {
     if (f.mtTodayTransfers === 0 && f.mtPending === 0) {
-      return { intent: 'mt', text: t('Aaj koi Money Transfer nahi hua aur koi pending transfer bhi nahi hai.', 'No Money Transfer happened today and none is pending.') };
+      return { intent: 'mt', text: t('mtNone') };
     }
     return {
       intent: 'mt',
-      text: t(
-        `Aaj Money Transfer: ${f.mtTodayTransfers} transfer, kul bheja ${formatINR(f.mtTodaySentPaise)}, commission ${formatINR(f.mtTodayCommissionPaise)}, MT profit ${formatINR(f.mtTodayProfitPaise)}. Pending transfer: ${f.mtPending}.`,
-        `Money Transfer today: ${f.mtTodayTransfers} transfers, total sent ${formatINR(f.mtTodaySentPaise)}, commission ${formatINR(f.mtTodayCommissionPaise)}, MT profit ${formatINR(f.mtTodayProfitPaise)}. Pending transfers: ${f.mtPending}.`,
-      ),
+      text: t('mt', { count: f.mtTodayTransfers, sent: formatINR(f.mtTodaySentPaise), commission: formatINR(f.mtTodayCommissionPaise), profit: formatINR(f.mtTodayProfitPaise), pending: f.mtPending }),
     };
   }
 
   // Profit.
   if (has(q, /profit|munafa|faayda|fayda/)) {
-    return {
-      intent: 'profit',
-      text: t(
-        `Aaj ka profit ${formatINR(f.todayProfitPaise)} hai (income ${formatINR(f.todayIncomePaise)} − kharcha ${formatINR(f.todayExpensePaise)}). Is mahine ka profit ab tak ${formatINR(f.monthProfitPaise)} hai.`,
-        `Today\u2019s profit is ${formatINR(f.todayProfitPaise)} (income ${formatINR(f.todayIncomePaise)} − expenses ${formatINR(f.todayExpensePaise)}). This month\u2019s profit so far is ${formatINR(f.monthProfitPaise)}.`,
-      ),
-    };
+    return { intent: 'profit', text: t('profit', { profit: formatINR(f.todayProfitPaise), income: formatINR(f.todayIncomePaise), expense: formatINR(f.todayExpensePaise), monthProfit: formatINR(f.monthProfitPaise) }) };
   }
 
   // Income.
   if (has(q, /income|kamai|received|collection|aaya|mila/)) {
-    return {
-      intent: 'income',
-      text: t(
-        `Aaj ki kamai (received) ${formatINR(f.todayIncomePaise)} hai. Is mahine ki kamai ab tak ${formatINR(f.monthIncomePaise)} hai.`,
-        `Today\u2019s income (received) is ${formatINR(f.todayIncomePaise)}. This month\u2019s income so far is ${formatINR(f.monthIncomePaise)}.`,
-      ),
-    };
+    return { intent: 'income', text: t('income', { income: formatINR(f.todayIncomePaise), monthIncome: formatINR(f.monthIncomePaise) }) };
   }
 
   // Expenses.
   if (has(q, /expense|kharcha|kharach|spend/)) {
-    return {
-      intent: 'expenses',
-      text: t(
-        `Aaj ka kharcha ${formatINR(f.todayExpensePaise)} hai. Is mahine ka kharcha ab tak ${formatINR(f.monthExpensePaise)} hai.`,
-        `Today\u2019s expenses are ${formatINR(f.todayExpensePaise)}. This month\u2019s expenses so far are ${formatINR(f.monthExpensePaise)}.`,
-      ),
-    };
+    return { intent: 'expenses', text: t('expense', { expense: formatINR(f.todayExpensePaise), monthExpense: formatINR(f.monthExpensePaise) }) };
   }
 
   // Customer due.
   if (has(q, /due|udhaar|udhar|baaki|baki|dena|owe|owes|collect|pending|kisne|kaun/)) {
     if (f.customerDuePaise <= 0) {
-      return { intent: 'due', text: t('Koi customer due nahi hai — sab clear hai.', 'No customer owes anything — everything is clear.') };
+      return { intent: 'due', text: t('dueNone') };
     }
     const lines = f.topDues.map((d) => `• ${d.name} — ${formatINR(d.duePaise)}`).join('\n');
-    return {
-      intent: 'due',
-      text: t(
-        `Kul customer due ${formatINR(f.customerDuePaise)} hai. Sabse zyada dena baaki:\n${lines}`,
-        `Total customer due is ${formatINR(f.customerDuePaise)}. Biggest amounts owed:\n${lines}`,
-      ),
-    };
+    return { intent: 'due', text: t('due', { due: formatINR(f.customerDuePaise), lines }) };
   }
 
   // Balances.
   if (has(q, /balance|cash|upi|kitne paise (hai|bache)|available/)) {
-    return {
-      intent: 'balance',
-      text: t(
-        `Cash balance ${formatINR(f.cashPaise)} hai aur UPI balance ${formatINR(f.upiPaise)} hai. Kul ${formatINR(f.cashPaise + f.upiPaise)} available hai.`,
-        `Cash balance is ${formatINR(f.cashPaise)} and UPI balance is ${formatINR(f.upiPaise)}. Total available: ${formatINR(f.cashPaise + f.upiPaise)}.`,
-      ),
-    };
+    return { intent: 'balance', text: t('balance', { cash: formatINR(f.cashPaise), upi: formatINR(f.upiPaise), total: formatINR(f.cashPaise + f.upiPaise) }) };
   }
 
   // Overview / summary.
   if (has(q, /overview|summary|haal|hisab|report|sab kuch|kul|aaj ka (kya|kaise)|today/)) {
     return {
       intent: 'overview',
-      text: t(
-        `Aaj ka hisab:\n• Income: ${formatINR(f.todayIncomePaise)}\n• Kharcha: ${formatINR(f.todayExpensePaise)}\n• Profit: ${formatINR(f.todayProfitPaise)}\n• Customer due: ${formatINR(f.customerDuePaise)}\n• Agent payable: ${formatINR(f.agentPayablePaise)}\n• MT commission (aaj): ${formatINR(f.mtTodayCommissionPaise)}\n• Cash: ${formatINR(f.cashPaise)} • UPI: ${formatINR(f.upiPaise)}`,
-        `Today\u2019s summary:\n• Income: ${formatINR(f.todayIncomePaise)}\n• Expenses: ${formatINR(f.todayExpensePaise)}\n• Profit: ${formatINR(f.todayProfitPaise)}\n• Customer due: ${formatINR(f.customerDuePaise)}\n• Agent payable: ${formatINR(f.agentPayablePaise)}\n• MT commission (today): ${formatINR(f.mtTodayCommissionPaise)}\n• Cash: ${formatINR(f.cashPaise)} • UPI: ${formatINR(f.upiPaise)}`,
-      ),
+      text: t('overview', { income: formatINR(f.todayIncomePaise), expense: formatINR(f.todayExpensePaise), profit: formatINR(f.todayProfitPaise), due: formatINR(f.customerDuePaise), agent: formatINR(f.agentPayablePaise), commission: formatINR(f.mtTodayCommissionPaise), cash: formatINR(f.cashPaise), upi: formatINR(f.upiPaise) }),
     };
   }
 
-  return {
-    intent: 'unknown',
-    text: t(
-      'Sorry, ye main nahi bata sakta. Main ye bata sakta hoon: aaj ka profit, income, kharcha, customer due, agent payable, Money Transfer commission, cash/UPI balance. Neeche diye gaye sawal par tap karo.',
-      'Sorry, I cannot answer that. I can tell you about: today\u2019s profit, income, expenses, customer dues, agent payables, Money Transfer commission, and cash/UPI balance. Tap a suggested question below.',
-    ),
-  };
+  return { intent: 'unknown', text: t('unknown') };
 }
 
 /* ================= Natural-language action parsing =================
@@ -342,13 +284,9 @@ export function answerLocally(question: string, f: BusinessFacts): { intent: Cha
  * UI asks the user instead of guessing.
  */
 
-const DEVANAGARI_DIGITS: Record<string, string> = {
-  '०': '0', '१': '1', '२': '2', '३': '3', '४': '4',
-  '५': '5', '६': '6', '७': '7', '८': '8', '९': '9',
-};
-
+// Devanagari + all supported scripts' digits live in languages.ts.
 export function normalizeDigits(text: string): string {
-  return text.replace(/[०-९]/g, (d) => DEVANAGARI_DIGITS[d] || d);
+  return normalizeDigitsMultilingual(text);
 }
 
 const HINDI_NUMBERS: Record<string, number> = {
@@ -358,15 +296,7 @@ const HINDI_NUMBERS: Record<string, number> = {
 
 /** Replace Hindi number words ("do sau", "paanch hazaar") with digits. */
 export function normalizeNumberWords(text: string): string {
-  let s = normalizeDevanagariWords(normalizeDigits(text.toLowerCase()));
-  // Fold nukta forms (ज़ेरॉक्स -> जेरॉक्स) so service matching works.
-  s = s.replace(/ज़/g, 'ज').replace(/फ़/g, 'फ').replace(/क़/g, 'क').replace(/ख़/g, 'ख').replace(/ग़/g, 'ग');
-  s = s.replace(/\b(ek|do|teen|chaar|paanch|chhe|saat|aath|nau|das)\s+hazaar\b/g, (_m, w) => String((HINDI_NUMBERS[w] || 1) * 1000));
-  s = s.replace(/\b(ek|do|teen|chaar|paanch|chhe|saat|aath|nau|das)\s+sau\b/g, (_m, w) => String((HINDI_NUMBERS[w] || 1) * 100));
-  s = s.replace(/\bhazaar\b/g, '1000');
-  s = s.replace(/\bsau\b/g, '100');
-  s = s.replace(/\bdedh\s+sau\b/g, '150');
-  return s;
+  return normalizeMultilingual(text);
 }
 
 export interface FoundAmount {
@@ -454,7 +384,7 @@ export function cashUpiMethod(m: PayMethod | null, fallback: Method): Method {
 
 /** Date words: "kal" = yesterday, explicit dd/mm/yyyy, else today. */
 export function extractDate(raw: string, today: string = todayISO()): string {
-  const s = raw.toLowerCase();
+  const s = normalizeMultilingual(raw.toLowerCase());
   const dm = s.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
   if (dm) {
     const y = dm[3].length === 2 ? 2000 + Number(dm[3]) : Number(dm[3]);
@@ -694,7 +624,7 @@ export function parseAssistantMessage(
       return draftFor('amount', `${receiver} ko kitne rupaye transfer karne hain?`, { mtReceiver: receiver, mtCommission: commission, date }, rawText);
     }
     if (commission === undefined) {
-      return draftFor('commission', `${receiver} ko ${money(principal)} transfer par commission kitna mila? (0 ho to 0 likho)`, { mtReceiver: receiver, mtPrincipal: principal, date }, rawText);
+      return draftFor('commission', askIn(rawText, 'askCommission', { name: receiver, amount: money(principal) }), { mtReceiver: receiver, mtPrincipal: principal, date }, rawText);
     }
     const method = cashUpiMethod(extractMethod(q), 'upi');
     const action: AssistantAction = { kind: 'mt_transfer', date, receiverName: receiver, mobile: '', amountPaise: principal, commissionPaise: commission, method };
@@ -716,7 +646,7 @@ export function parseAssistantMessage(
     const agentName = findNameIn(q, state.agents.filter((a) => a.profileId === profile.id).map((a) => a.name));
     if (!agentName) {
       const names = state.agents.filter((a) => a.profileId === profile.id).map((a) => a.name);
-      return draftFor('agent', `Kis agent ko payment diya?${names.length ? ` Agents: ${names.join(', ')}.` : ' Is profile mein koi agent nahi hai — pehle agent add karo.'}`, { agentAmount: amounts[0]?.paise, date }, rawText);
+      return draftFor('agent', askIn(rawText, 'askAgent', { agents: names.length ? ` Agents: ${names.join(', ')}.` : '' }), { agentAmount: amounts[0]?.paise, date }, rawText);
     }
     if (amounts.length === 0) {
       return draftFor('amount', `${agentName} ko kitne rupaye diye?`, { agentName, date }, rawText);
@@ -725,6 +655,32 @@ export function parseAssistantMessage(
     const method = cashUpiMethod(extractMethod(q), 'cash');
     const action: AssistantAction = { kind: 'agent_payment', date, agentId: agent.id, agentName, amountPaise: amounts[0].paise, method };
     return { kind: 'action', action, previewLines: [`Agent payment: ${agentName} ko ${money(amounts[0].paise)} (${method.toUpperCase()})`, 'Ye agent payment hai — customer kharcha nahi.'], totalPaise: amounts[0].paise };
+  }
+
+  // --- Agent payable (owed, not paid): "Agent ko 500 dena baaki hai".
+  // This is NOT a payment — it is a question/record request. If no
+  // agent is named, ask which one (never invent an agent). If one is
+  // named, fall through to the knowledge Q&A, which quotes the real
+  // payable. Recording a NEW payable needs a job (payable lives on
+  // jobs), so the draft flow asks for the job/service next instead of
+  // inventing a payable entry.
+  if (/agent/.test(q) && /(dena|baki|baaki|payable|aapvana)/.test(q) && amounts.length >= 1 && !/diye|diya|\bpaid\b|\bpayment\b|\bpay\b|de\s*diye/.test(q)) {
+    const agentName = findNameIn(q, state.agents.filter((a) => a.profileId === profile.id).map((a) => a.name));
+    if (!agentName) {
+      const names = state.agents.filter((a) => a.profileId === profile.id).map((a) => a.name);
+      return draftFor('agent', askIn(rawText, 'askAgent', { agents: names.length ? ` Agents: ${names.join(', ')}.` : '' }), { payableAmount: amounts[0].paise, date }, rawText);
+    }
+    return { kind: 'question' };
+  }
+
+  // --- Generic customer due collection: "customer ka baki 300 jama kar"
+  // (no customer named yet) — ask which customer, never invent one.
+  if (/customer|grahak/.test(q) && !/customers\b/.test(q) && !findServiceIn(q, profile.services) && amounts.length >= 1 && /(jama|mila|mile|diye|diya|paid|payment|collect)/.test(q) && !/agent/.test(q)) {
+    const custName = findNameIn(q, [...state.customers.filter((c) => c.profileId === profile.id).map((c) => c.name), ...state.jobs.filter((j) => j.profileId === profile.id).map((j) => j.customerName)]);
+    if (!custName) {
+      const names = state.customers.filter((c) => c.profileId === profile.id).map((c) => c.name);
+      return draftFor('customer', askIn(rawText, 'askCustomer', { customers: names.length ? ` Customers: ${names.join(', ')}.` : '' }), { customerPaymentAmount: amounts[0].paise, date }, rawText);
+    }
   }
 
   // --- Customer payment: "Rahul ne 500 diye" / "Rahul se 500 mile".
@@ -803,14 +759,14 @@ export function parseAssistantMessage(
         lastService = service;
       }
       if (missingService && entries.length === 0) {
-        return draftFor('service', `Ye amount kis service ka hai? Services: ${profile.services.join(', ')}.`, { pendingAmounts: amounts.map((a) => a.paise), date }, rawText);
+        return draftFor('service', askIn(rawText, 'askService', { amount: money(amounts[0].paise), services: profile.services.join(', ') }), { pendingAmounts: amounts.map((a) => a.paise), date }, rawText);
       }
       if (entries.length === 0) {
-        return draftFor('amount', 'Kitne rupaye hue? Amount batao.', { pendingService: segments[0]?.service || ctx.lastService, date }, rawText);
+        return draftFor('amount', askIn(rawText, 'askAmount', { service: segments[0]?.service || ctx.lastService || 'Service' }), { pendingService: segments[0]?.service || ctx.lastService, date }, rawText);
       }
       if (missingMethod) {
         const first = entries[0];
-        return draftFor('method', `${first.service} ke ${money(first.amountPaise)} — Cash mein mile ya UPI mein?`, { pendingEntries: entries, date }, rawText);
+        return draftFor('method', askIn(rawText, 'askMethod', { service: first.service, amount: money(first.amountPaise) }), { pendingEntries: entries, date }, rawText);
       }
       // 'other' (udhaar) entries: customer name present?
       const custName = findNameIn(q, state.customers.filter((c) => c.profileId === profile.id).map((c) => c.name));
@@ -826,11 +782,11 @@ export function parseAssistantMessage(
     // Service mentioned but no amount → ask for amount.
     if (hasServiceWord && amounts.length === 0 && !/kitna|kitne|kitni|kya|batao|dikhao|compare|kab|kaise|kahan|kaun|kab/.test(q)) {
       const svc = segments.find((s) => s.service)?.service || null;
-      return draftFor('amount', `${svc ? `${svc} ke ` : ''}kitne rupaye hue?`, { pendingService: svc, date }, rawText);
+      return draftFor('amount', askIn(rawText, 'askAmount', { service: svc || 'Service' }), { pendingService: svc, date }, rawText);
     }
     // Amount + money words but no service → ask for service (unless follow-up with context).
     if (amounts.length >= 1 && !hasServiceWord && hasMoneyWord && !followUp && !/kharcha|expense/.test(q)) {
-      return draftFor('service', `${money(amounts[0].paise)} kis service ke hue? Services: ${profile.services.join(', ')}.`, { pendingAmounts: amounts.map((a) => a.paise), date }, rawText);
+      return draftFor('service', askIn(rawText, 'askService', { amount: money(amounts[0].paise), services: profile.services.join(', ') }), { pendingAmounts: amounts.map((a) => a.paise), date }, rawText);
     }
   }
 
@@ -891,6 +847,38 @@ export function applyDraftAnswer(
     const t0 = p.target as { kind: 'daily' | 'job' | 'expense' | 'mt'; id: string; label: string; amountPaise: number };
     const action: AssistantAction = { kind: 'correct_entry', targetKind: t0.kind, targetId: t0.id, label: t0.label, oldAmountPaise: t0.amountPaise, newAmountPaise: amounts[0].paise };
     return { kind: 'action', action, previewLines: [`Correct: ${t0.label}`, `Naya amount: ${formatINR(amounts[0].paise)} (pehle ${formatINR(t0.amountPaise)})`], totalPaise: amounts[0].paise };
+  }
+  if (draft.missing === 'customer' && p.customerPaymentAmount) {
+    // Generic due collection: the reply names the customer.
+    const custName = findNameIn(q, [...state.customers.filter((c) => c.profileId === profile.id).map((c) => c.name), ...state.jobs.filter((j) => j.profileId === profile.id).map((j) => j.customerName)]);
+    if (!custName) return draftFor('customer', askIn(replyText, 'askCustomer', {}), p, draft.original);
+    const amt = (p.customerPaymentAmount as number) || amounts[0]?.paise;
+    const dueJobs = state.jobs
+      .filter((j) => j.profileId === profile.id && j.customerName.toLowerCase() === custName.toLowerCase() && jobDuePaise(j) > 0)
+      .sort((a, b) => (a.date < b.date ? -1 : 1));
+    if (dueJobs.length === 0) {
+      return { kind: 'error', text: `${custName} ka koi due nahi hai — isliye payment record nahi kar sakta.` };
+    }
+    const job = dueJobs[0];
+    if (amt > jobDuePaise(job)) {
+      return { kind: 'error', text: `${custName} ka is job par due sirf ${formatINR(jobDuePaise(job))} hai. ${formatINR(amt)} zyada hai — sahi amount batao.` };
+    }
+    const method = cashUpiMethod(extractMethod(q), 'cash');
+    const action: AssistantAction = { kind: 'customer_payment', date: (p.date as string) || todayISO(), jobId: job.id, customerName: custName, amountPaise: amt, method };
+    return { kind: 'action', action, previewLines: [`Payment received: ${custName} se ${formatINR(amt)} (${method.toUpperCase()})`, `${job.service} job — due ${formatINR(jobDuePaise(job))} se ${formatINR(jobDuePaise(job) - amt)} reh jayega.`], totalPaise: amt };
+  }
+  if (draft.missing === 'agent' && p.payableAmount) {
+    // Payable (owed) — NOT a payment. Agent payable lives on jobs, so
+    // a new payable cannot be recorded without a job. Ask for the
+    // job/service instead of inventing a payable entry.
+    const agentName = findNameIn(q, state.agents.filter((a) => a.profileId === profile.id).map((a) => a.name));
+    if (!agentName) return draftFor('agent', askIn(replyText, 'askAgent', {}), p, draft.original);
+    const agent = state.agents.find((a) => a.profileId === profile.id && a.name === agentName)!;
+    const payable = agentPayablePaise(agent, state.jobs.filter((j) => j.profileId === profile.id && j.agentId === agent.id));
+    if (payable >= (p.payableAmount as number) && payable > 0) {
+      return { kind: 'error', text: `${agentName} ko abhi ${formatINR(payable)} dena baaki hai (asli payable). ${formatINR(p.payableAmount as number)} ka naya payable record karne ke liye us job/service ka naam batao jis ka kaam hua tha — payable job par banta hai, khaali amount se nahi.` };
+    }
+    return { kind: 'error', text: `${agentName} ke naam par abhi ${formatINR(payable)} payable hai. ${formatINR(p.payableAmount as number)} ka naya payable record karne ke liye job/service aur customer ka naam batao (jaise: "Ramesh ne Rahul ka PAN Card kiya, charge 500") — payable job par banta hai, khaali amount se nahi.` };
   }
   if (draft.missing === 'agent') {
     const agentName = findNameIn(q, state.agents.filter((a) => a.profileId === profile.id).map((a) => a.name));

@@ -14,6 +14,7 @@ import { applyAssistantAction, type AssistantAction, type ExecResult } from '@/l
 import { computeKnowledge, type ChatContext, type KnowledgeTable } from '@/lib/knowledge';
 import { loadState } from '@/lib/store';
 import { formatINR } from '@/lib/money';
+import { detectLanguage, replyIn, voiceLangFor } from '@/lib/languages';
 import { uid } from '@/lib/types';
 
 /**
@@ -268,7 +269,7 @@ function useChat(onNavigateAway?: () => void) {
     try {
       window.speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text.replace(/[*#]/g, '').slice(0, 400));
-      u.lang = app.profile?.language === 'hi' ? 'hi-IN' : 'en-IN';
+      u.lang = app.profile?.aiLanguage && app.profile.aiLanguage !== 'auto' ? voiceLangFor(app.profile.aiLanguage) : voiceLangFor(detectLanguage(text).code);
       window.speechSynthesis.speak(u);
     } catch { /* voice response is best-effort */ }
   }
@@ -463,7 +464,7 @@ function useChat(onNavigateAway?: () => void) {
       if (parsed0.kind === 'action') {
         supersedePending();
         const preview = previewFromAction(parsed0.action, parsed0.previewLines, parsed0.totalPaise, parsed0.duplicateWarning);
-        const msg = botReply('Ye entries save karun? Pehle check karo, phir Confirm dabao.', { preview });
+        const msg = botReply(replyIn(detectLanguage(q).code, 'confirmPrompt'), { preview });
         pendingRef.current = { msgId: msg.id, preview };
         setBusy(false);
         return;
@@ -496,7 +497,7 @@ function useChat(onNavigateAway?: () => void) {
 
       // 4. Factual fallback (profit, balance, due, agent, MT, overview).
       const facts = computeFacts(state, profile);
-      const local = answerLocally(q, facts);
+      const local = answerLocally(q, facts, profile.aiLanguage || 'auto');
       botReply(local.text);
       setBusy(false);
     } catch (e) {
@@ -526,7 +527,7 @@ function useChat(onNavigateAway?: () => void) {
         onend: (() => void) | null;
         start: () => void; stop: () => void;
       })();
-      recog.lang = app.profile?.language === 'hi' ? 'hi-IN' : 'en-IN';
+      recog.lang = app.profile?.aiLanguage && app.profile.aiLanguage !== 'auto' ? voiceLangFor(app.profile.aiLanguage) : 'en-IN';
       recog.interimResults = false;
       recog.continuous = false;
       recog.onresult = (e) => {
@@ -704,7 +705,7 @@ function ChatBody({ chat }: { chat: ReturnType<typeof useChat> }) {
           value={chat.input}
           onChange={(e) => chat.setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') chat.send(chat.input); }}
-          placeholder="Apna sawal likho ya bolo… (Hinglish / English / Hindi)"
+          placeholder="Apna sawal likho ya bolo… (22 Indian languages — Hinglish, Gujarati, Marathi, Tamil…)"
           aria-label="Ask the AI assistant"
           data-testid="chat-input"
         />
@@ -807,7 +808,7 @@ export function ChatPageView() {
           <span className="brand-mark" style={{ width: 34, height: 34, fontSize: 18 }}>B</span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontWeight: 700 }}>BizKhata AI Assistant</div>
-            <div style={{ fontSize: 12, opacity: 0.85 }}>Your Intelligent Business Assistant • {chat.profileName} • Ask in Hinglish, English or Hindi</div>
+            <div style={{ fontSize: 12, opacity: 0.85 }}>Your Intelligent Business Assistant • {chat.profileName} • Ask in any of 22 Indian languages — Hinglish, Gujarati, Marathi, Tamil…</div>
           </div>
           <button className="icon-btn" style={{ color: '#fff' }} onClick={() => chat.setSpeakOn(!chat.speakOn)} aria-label={chat.speakOn ? 'Turn off voice replies' : 'Turn on voice replies'} title="Voice replies">
             {chat.speakOn ? '🔊' : '🔇'}

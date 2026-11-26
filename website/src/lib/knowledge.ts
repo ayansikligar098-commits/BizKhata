@@ -35,6 +35,7 @@ import {
 import { formatINR } from './money';
 import type { AppState, BusinessProfile } from './types';
 import { todayISO } from './types';
+import { detectLanguage, normalizeMultilingual, replyIn, type AiLangCode, type ReplyKey } from './languages';
 
 /** Common Devanagari words → Latin equivalents, so Hinglish written in
  *  Devanagari ("आज ज़ेरॉक्स के ३०० रुपये कैश हुए") is understood the
@@ -59,16 +60,9 @@ export const DEVANAGARI_WORDS: Record<string, string> = {
 };
 
 export function normalizeDevanagariWords(text: string): string {
-  return text
-    .split(/(\s+)/)
-    .map((tok) => {
-      // \p{M} matters: Devanagari vowel signs (े, ॉ, ्) are marks, not letters.
-      const m = tok.match(/^([^\p{L}\p{M}\p{N}]*)([\p{L}\p{M}\p{N}]+)([^\p{L}\p{M}\p{N}]*)$/u);
-      if (!m) return tok;
-      const word = DEVANAGARI_WORDS[m[2]];
-      return word ? `${m[1]}${word}${m[3]}` : tok;
-    })
-    .join('');
+  // Backwards-compatible name: now normalises ALL supported languages
+  // (native scripts + Romanized + mixed) to canonical Hinglish tokens.
+  return normalizeMultilingual(text);
 }
 
 export interface ChatContext {
@@ -131,7 +125,7 @@ function prevMonthYm(ym: string): string {
 
 /** Interpret the date words in a question (aaj/kal/is mahine/last month/...). */
 export function parseDateRange(q: string, today: string = todayISO()): DateRange {
-  const s = q.toLowerCase();
+  const s = normalizeMultilingual(q.toLowerCase());
   const ym = today.slice(0, 7);
   if (/pichhle?\s*(3|teen)\s*(mahine|month)|last\s*3\s*months?|pichle\s*3/.test(s)) {
     const start = shiftISO(monthRange(prevMonthYm(prevMonthYm(ym))).start, 0);
@@ -273,7 +267,7 @@ export function appHelp(q: string): KnowledgeAnswer | null {
     return help('Nayi service add karne ke liye:', ['Customization Studio kholo.', '"Add Service" mein service ka naam likho.', 'Save dabao — nayi service Services list aur AI Assistant dono mein aa jayegi.'], '/customization', 'Open Customization Studio');
   }
   if (/language.*change|bhasha.*(badlo|change)|hindi.*(karo|change)|english.*(karo|change)/.test(s)) {
-    return help('Language badalne ke liye:', ['Settings kholo.', '"Language" section mein jao.', 'English, Hindi ya Hinglish chuno.', 'Save dabao.'], '/settings/language', 'Open Language Settings');
+    return help('Language badalne ke liye:', ['Settings kholo.', '"Language" section mein jao.', 'App language (English / Hindi / Hinglish) chuno.', '"AI Assistant language" mein 22 Indian languages mein se koi ek chuno — ya Auto-detect chhodo, to AI aapki bhasha khud pehchan lega.', 'Save dabao.'], '/settings/language', 'Open Language Settings');
   }
   if (/difference finder/.test(s)) {
     return help('Difference Finder use karne ke liye:', ['Difference Finder kholo.', 'Scope chuno — Cash, UPI, Money Transfer, Service ya General.', 'Apna ginna hua (expected) balance likho.', '"Find Possible Causes" dabao — app batayega kahan fark ho sakta hai. Ye kabhi entry khud nahi badalta.'], '/difference-finder', 'Open Difference Finder');
@@ -342,8 +336,12 @@ export function computeKnowledge(
   const q = normalizeDevanagariWords(question.toLowerCase());
   const today = todayISO();
   const range = parseDateRange(q, today);
-  const langHi = /[\u0900-\u097F]/.test(question) || /\b(aaj|kal|kitna|kitne|kis|kaun|kya|batao|dikhao|mera|meri|hoga|hai|hua|hue|hain)\b/.test(q);
+  const replyLang: AiLangCode = profile.aiLanguage && profile.aiLanguage !== 'auto' ? profile.aiLanguage : detectLanguage(question).code;
+  const langHi = replyLang !== 'en';
   const t = (h: string, e: string) => (langHi ? h : e);
+  /** Localised template when the reply language has one, else hi/en text. */
+  const tt = (key: ReplyKey, values: Record<string, string | number>, h: string, e: string) =>
+    replyLang !== 'hi' && replyLang !== 'en' ? replyIn(replyLang, key, values) : (langHi ? h : e);
   const jobs = state.jobs.filter((j) => j.profileId === pid);
   const expenses = state.expenses.filter((e) => e.profileId === pid);
   const txns = state.cashTxns.filter((x) => x.profileId === pid);
@@ -705,7 +703,8 @@ export function computeKnowledge(
     }
     const top = s.byService[0];
     return {
-      text: t(
+      text: tt('overview',
+        { income: formatINR(s.totalCollection), expense: formatINR(s.expenses), profit: formatINR(s.netEarnings), due: formatINR(s.customerDue), agent: formatINR(agents.reduce((a, ag) => a + agentPayablePaise(ag, jobs), 0)), commission: formatINR(s.mtCommission), cash: formatINR(s.cashCollection), upi: formatINR(s.upiCollection) },
         `${range.label} ka dhandha:\n• Collection: ${formatINR(s.totalCollection)} (cash ${formatINR(s.cashCollection)}, UPI ${formatINR(s.upiCollection)})\n• MT commission: ${formatINR(s.mtCommission)}\n• Kharcha: ${formatINR(s.expenses)}\n• Net earnings: ${formatINR(s.netEarnings)}\n• Customer due: ${formatINR(s.customerDue)}\n• Transactions: ${s.totalTransactions}${top ? `\n• Sabse zyada earning: ${top.service} — ${formatINR(top.collection)}` : ''}`,
         `Business for ${range.label}:\n• Collection: ${formatINR(s.totalCollection)} (cash ${formatINR(s.cashCollection)}, UPI ${formatINR(s.upiCollection)})\n• MT commission: ${formatINR(s.mtCommission)}\n• Expenses: ${formatINR(s.expenses)}\n• Net earnings: ${formatINR(s.netEarnings)}\n• Customer due: ${formatINR(s.customerDue)}\n• Transactions: ${s.totalTransactions}${top ? `\n• Top earning service: ${top.service} — ${formatINR(top.collection)}` : ''}`,
       ),
@@ -716,18 +715,21 @@ export function computeKnowledge(
   }
 
   // --- Profit (month / today). ---
+  // Use the SAME Daily Business hub figures as the Dashboard and the
+  // factual responder (jobs + quick daily entries + MT commission, never
+  // double-counted) — job-only profit would wrongly report ₹0 after
+  // real daily entries were saved through the chat.
   if (/profit|munafa|faayda/.test(q)) {
-    const inR = jobs.filter((j) => j.date >= range.start && j.date <= range.end);
+    const hub = dailyBusinessSummary(dailyInput(state, pid, range.start, range.end));
+    const profit = hub.netEarnings;
+    const received = hub.totalCollection;
+    const mtP = hub.mtCommission;
     const inE = expenses.filter((e) => e.date >= range.start && e.date <= range.end);
-    const inMt = mtT.filter((m) => m.date >= range.start && m.date <= range.end);
-    const inMtE = mtE.filter((m) => m.date >= range.start && m.date <= range.end);
-    const profit = netProfitPaise(inR, inE, inMt, inMtE);
-    const received = inR.reduce((a, j) => a + j.receivedPaise, 0);
-    const mtP = mtProfitPaise(inMt, inMtE);
     return {
-      text: t(
-        `${range.label} ka profit ${formatINR(profit)} hai. Calculation: received ${formatINR(received)} + MT commission profit ${formatINR(mtP)} − agent charges − kharcha ${formatINR(inE.reduce((a, e) => a + e.amountPaise, 0))}. (Sirf mila hua paisa income hai — due/billing nahi.)`,
-        `Profit for ${range.label} is ${formatINR(profit)}. Calculation: received ${formatINR(received)} + MT commission profit ${formatINR(mtP)} − agent charges − expenses ${formatINR(inE.reduce((a, e) => a + e.amountPaise, 0))}. (Only money actually received counts as income — not billing/due.)`,
+      text: tt('profit',
+        { profit: formatINR(profit), income: formatINR(received), expense: formatINR(inE.reduce((a, e) => a + e.amountPaise, 0)), monthProfit: formatINR(profit) },
+        `${range.label} ka profit ${formatINR(profit)} hai. Calculation: collection ${formatINR(received)} (is me MT commission ${formatINR(mtP)} shamil hai) − agent charges − kharcha ${formatINR(inE.reduce((a, e) => a + e.amountPaise, 0))}. (Sirf mila hua paisa income hai — due/billing nahi.)`,
+        `Profit for ${range.label} is ${formatINR(profit)}. Calculation: collection ${formatINR(received)} (including MT commission ${formatINR(mtP)}) − agent charges − expenses ${formatINR(inE.reduce((a, e) => a + e.amountPaise, 0))}. (Only money actually received counts as income — not billing/due.)`,
       ),
       links: [{ label: 'View Profit Report', path: '/reports/profit' }],
       context: { ...baseCtx, lastPeriodKey: range.key, lastTopic: 'profit' },

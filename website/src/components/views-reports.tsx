@@ -7,6 +7,7 @@ import { CATEGORIES, MT_EXPENSE_CATEGORIES } from '@/lib/categories';
 import { auditEntry, exportBackup, exportCSV } from '@/lib/store';
 import { t, LANG_OPTIONS } from '@/lib/i18n';
 import type { Lang, Theme } from '@/lib/types';
+import { SUPPORTED_LANGUAGES, type AiLangCode } from '@/lib/languages';
 import { todayISO } from '@/lib/types';
 import { BarChart, Btn, Card, Empty, Field, Pager, Stat, formatDate, pageSlice, type Ctx } from './ui';
 import { jobServices } from '@/lib/routes';
@@ -870,6 +871,20 @@ export function SettingsView({ ctx, section }: { ctx: Ctx; section?: string }) {
               </button>
             ))}
           </div>
+          <Field label="AI Assistant language — 22 Indian languages + English (Auto-detect replies in your language)">
+            <select
+              className="input"
+              value={profile.aiLanguage || 'auto'}
+              onChange={(e) => update({ aiLanguage: e.target.value as AiLangCode | 'auto' }, `AI Assistant language changed to ${e.target.selectedOptions[0]?.text || e.target.value}`)}
+              aria-label="AI Assistant language"
+            >
+              <option value="auto">Auto-detect (recommended) — replies in the language you write in</option>
+              {SUPPORTED_LANGUAGES.map((l) => (
+                <option key={l.code} value={l.code}>{l.name} — {l.nativeName}</option>
+              ))}
+            </select>
+          </Field>
+          <p className="muted" style={{ marginTop: 8 }}>The AI understands all 22 scheduled languages in native script and in Roman letters (Hinglish, Roman Gujarati, Roman Marathi…), including mixed-language sentences. You never have to pick a language before chatting.</p>
         </Card></div>
 
         <Card title={t(lang, 'theme')}>

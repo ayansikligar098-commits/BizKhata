@@ -5,6 +5,7 @@
  */
 
 export type Method = 'cash' | 'upi';
+import type { AiLangCode } from './languages';
 export type Lang = 'en' | 'hi' | 'hinglish';
 export type Theme = 'light' | 'dark' | 'system';
 export type JobStatus =
@@ -49,6 +50,10 @@ export interface BusinessProfile {
   receiptPrefix: string;
   receiptCounter: number;
   language: Lang;
+  /** AI Assistant reply language: one of the 22 scheduled languages +
+   *  English, or 'auto' (default) — the assistant detects the user's
+   *  language from each message and replies in the same language/style. */
+  aiLanguage?: AiLangCode | 'auto';
   theme: Theme;
   createdAt: string;
 }
