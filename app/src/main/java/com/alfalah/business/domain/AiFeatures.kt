@@ -27,8 +27,23 @@ object AiFeatures {
     /** Cloud AI summary is off by default; the built-in assistant is always on. */
     const val AI_ENABLED_BY_DEFAULT = false
 
-    /** Cloud model identifier (provider configuration — never shown in the UI). */
-    const val AI_MODEL = "gemini-2.0-flash"
+    /** Cloud model identifier (provider configuration — never shown in the UI).
+     *
+     *  UPDATE 19 (2026-11-27) — model evaluation, verified against the
+     *  provider's own models + OpenAI-compatibility docs that day:
+     *  the previous 2.0-flash value is SHUT DOWN (models page lists it
+     *  as shut down, June 1 2026) — calls to it fail, so it must never
+     *  come back; 2.5-flash is deprecated and routes to 3.5-flash-lite
+     *  from Dec 1 2026; 3.8-flash is the Stable Flash for agentic
+     *  work on the no-cost tier (fast, full quality rather than Lite,
+     *  no shutdown announced). 4-hydrogen (the docs' example model) is a newer
+     *  frontier reasoning model — higher latency for short chat
+     *  replies, so it was NOT picked for chat. This constant is the
+     *  single source of truth for Android AND the website (its
+     *  UPSTREAM_MODEL / DEFAULT_MODEL constants must carry the same
+     *  value). A live call with this value is still unverified — no
+     *  key exists on this VM; the owner tests it on his phone. */
+    const val AI_MODEL = "gemini-3.8-flash"
 
     sealed interface AiResult {
         /** Cloud AI is not set up — show this, keep the app working. */

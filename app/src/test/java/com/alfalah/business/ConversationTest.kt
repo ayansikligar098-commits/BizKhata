@@ -19,6 +19,7 @@ import com.alfalah.business.domain.VoiceNaturalPhrasing
 import com.alfalah.business.domain.VoicePipeline
 import com.alfalah.business.domain.VoiceText
 import com.alfalah.business.domain.ServiceType
+import com.alfalah.business.domain.AiFeatures
 import com.alfalah.business.domain.GraphemeChunker
 import com.alfalah.business.domain.SseEvent
 import com.alfalah.business.domain.SseParser
@@ -946,6 +947,42 @@ class StreamingTest {
         assertEquals(listOf(SseEvent.Ignored), parser.feed("data: {\"no_text\": 1}\n"))
         assertEquals("a\nb", parser.extractFirstText("{\"text\": \"a\\nb\"}"))
         assertEquals(null, parser.extractFirstText("{\"other\": \"x\"}"))
+    }
+
+    @Test
+    fun sseParser_contentKey_openAiStyleDeltas() {
+        // UPDATE 19 — the cloud now speaks OpenAI-style chat
+        // completions: deltas carry choices[0].delta.content. The
+        // opening role-only chunk has "content": null and must be
+        // ignored, never treated as text.
+        val parser = SseParser("content")
+        val events = parser.feed(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":null}}]}\n" +
+                "data: {\"choices\":[{\"delta\":{\"content\":\"Namaste\"}}]}\n" +
+                "data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}\n" +
+                "data: [DONE]\n"
+        )
+        assertEquals(4, events.size)
+        assertTrue(events[0] is SseEvent.Ignored)
+        assertEquals("Namaste", (events[1] as SseEvent.Text).text)
+        assertEquals("!", (events[2] as SseEvent.Text).text)
+        assertTrue(events[3] is SseEvent.Done)
+        assertEquals(
+            "Aaj ka profit ₹500 hai.",
+            parser.extractFirstContent(
+                "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Aaj ka profit ₹500 hai.\"}}]}"
+            )
+        )
+        assertEquals(null, parser.extractFirstContent("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null}}]}"))
+    }
+
+    @Test
+    fun aiModelIsLiveStableFlash() {
+        // UPDATE 19 — the old 2.0-flash value is shut down (provider
+        // models page, June 1 2026); the constant must be the live
+        // Stable Flash, shared with the website.
+        assertEquals("gemini-3.8-flash", AiFeatures.AI_MODEL)
+        assertFalse(AiFeatures.AI_MODEL.contains("2.0-flash"))
     }
 
     @Test

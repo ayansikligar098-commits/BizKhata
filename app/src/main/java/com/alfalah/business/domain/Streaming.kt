@@ -314,11 +314,18 @@ sealed class SseEvent {
  * across two reads — including a multi-byte UTF-8 character split
  * across reads, which the UTF-8 reader reassembles before we ever
  * see it — is parsed exactly once. `data:` lines yield [SseEvent.Text]
- * (the JSON payload's first text value); `[DONE]` yields
+ * (the JSON payload's first [textKey] value); `[DONE]` yields
  * [SseEvent.Done] and ends the stream; everything else is ignored.
  * Feeding after [Done] is a no-op.
+ *
+ * [textKey] is the payload key that carries reply text: "text" for
+ * the original native payloads (used by the unit tests), "content"
+ * for OpenAI-style chat-completions payloads — both the one-shot
+ * message (choices[0].message.content) and the streaming deltas
+ * (choices[0].delta.content, UPDATE 19). A delta with a null content
+ * (e.g. the opening role-only chunk) is ignored, not treated as text.
  */
-class SseParser {
+class SseParser(private val textKey: String = "text") {
 
     private val lineBuffer = StringBuilder()
     private var done = false
@@ -358,19 +365,26 @@ class SseParser {
         return if (text.isEmpty()) SseEvent.Ignored else SseEvent.Text(text)
     }
 
+    /** The first [textKey] value in a JSON payload (default key). */
+    fun extractFirstText(json: String): String? = extractFirstValue(json, textKey)
+
+    /** The first "content" value — OpenAI-style message / delta. */
+    fun extractFirstContent(json: String): String? = extractFirstValue(json, "content")
+
     /**
-     * Pull the first "text" value out of a JSON payload, honouring
-     * backslash escapes. Same hand-rolled parse as CloudAiClient (no
-     * JSON dependency). Character codes (34 = quote, 92 = backslash)
-     * are used instead of quote/backslash char literals, so the
-     * JVM-free verifier's simple string/char stripper cannot misread
-     * this file.
+     * Pull the first [key] value out of a JSON payload, honouring
+     * backslash escapes. A non-string value (e.g. "content": null in
+     * an opening delta chunk) is skipped and the search continues.
+     * Same hand-rolled parse as CloudAiClient (no JSON dependency).
+     * Character codes (34 = quote, 92 = backslash) are used instead
+     * of quote/backslash char literals, so the JVM-free verifier's
+     * simple string/char stripper cannot misread this file.
      */
-    fun extractFirstText(json: String): String? {
-        val key = "\"text\""
-        var idx = json.indexOf(key)
+    fun extractFirstValue(json: String, key: String): String? {
+        val keyText = "\"" + key + "\""
+        var idx = json.indexOf(keyText)
         while (idx >= 0) {
-            var i = idx + key.length
+            var i = idx + keyText.length
             while (i < json.length && (json[i] == ' ' || json[i] == ':')) i++
             if (i < json.length && json[i].code == 34) {
                 val out = StringBuilder()
@@ -401,7 +415,7 @@ class SseParser {
                 }
                 return null
             }
-            idx = json.indexOf(key, idx + 1)
+            idx = json.indexOf(keyText, idx + 1)
         }
         return null
     }

@@ -2196,20 +2196,32 @@ def delay_per_word_ms(words_per_second=11.0):
 
 
 class SseParser:
-    """Mirror of domain/Streaming.kt SseParser (incremental, [DONE])."""
+    """Mirror of domain/Streaming.kt SseParser (incremental, [DONE]).
+    text_key is the payload key carrying reply text: "text" for the
+    original payloads, "content" for OpenAI-style chat completions
+    (UPDATE 19: message content + streaming deltas)."""
 
-    def __init__(self):
+    def __init__(self, text_key="text"):
         self._buf, self.done = "", False
+        self.text_key = text_key
 
     @staticmethod
-    def extract_first_text(payload):
-        m = re.search(r'"text"\s*:\s*("(?:\\.|[^"\\])*")', payload)
+    def extract_first_value(payload, key):
+        m = re.search(r'"' + re.escape(key) + r'"\s*:\s*("(?:\\.|[^"\\])*")', payload)
         if not m:
             return None
         try:
             return json.loads(m.group(1))
         except ValueError:
             return None
+
+    @staticmethod
+    def extract_first_text(payload):
+        return SseParser.extract_first_value(payload, "text")
+
+    @staticmethod
+    def extract_first_content(payload):
+        return SseParser.extract_first_value(payload, "content")
 
     def feed(self, chunk):
         if self.done or not chunk:
@@ -2228,9 +2240,58 @@ class SseParser:
                 events.append(("done", None))
                 self._buf = ""
                 break
-            text = self.extract_first_text(data)
+            text = self.extract_first_value(data, self.text_key)
             events.append(("text", text) if text else ("ignored", None))
         return events
+
+
+# ---------------------------------------------------------------------------
+# UPDATE 19 — model selection + OpenAI-compatible chat completions
+# (mirror of AiFeatures.AI_MODEL + CloudAiClient.chatBody).
+# Evaluated 2026-11-27 against the provider's own models page and
+# OpenAI-compatibility docs: gemini-2.0-flash is SHUT DOWN (June 1
+# 2026); gemini-2.5-flash is deprecated (routes to 3.5-flash-lite
+# from Dec 1 2026); gemini-3.8-flash is the Stable free-tier Flash
+# for agentic work. The website's UPSTREAM_MODEL / DEFAULT_MODEL
+# constants must carry the same value.
+# ---------------------------------------------------------------------------
+AI_MODEL = "gemini-3.8-flash"
+CHAT_COMPLETIONS_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+MODEL_STATUS = {
+    "gemini-2.0-flash": "shut_down",
+    "gemini-2.5-flash": "deprecated",
+    "gemini-3.5-flash-lite": "stable",
+    "gemini-3.6-flash": "stable",
+    "gemini-3.8-flash": "stable",
+    "gemini-4-hydrogen": "stable",
+}
+
+
+def chat_body(system, user, stream=False, temperature=0.7):
+    """Mirror of CloudAiClient.chatBody: every cloud request carries
+    "model" (the endpoint REQUIRES it — a missing model fails even
+    with a valid key), plus OpenAI-style messages; "stream" only on
+    the SSE path; temperature omitted for structured JSON."""
+    body = {"model": AI_MODEL,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}]}
+    if temperature is not None:
+        body["temperature"] = temperature
+    if stream:
+        body["stream"] = True
+    return body
+
+
+def extract_message_content(payload):
+    """Mirror of CloudAiClient.extractMessageContent:
+    choices[0].message.content."""
+    m = re.search(r'"choices".*?"content"\s*:\s*("(?:\\.|[^"\\])*")', payload, re.S)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1))
+    except ValueError:
+        return None
 
 
 class TypewriterSim:
@@ -3996,6 +4057,59 @@ def main():
         is_true(not migrate_legacy_key(prefs), "empty store must not migrate")
         eq(prefs, {})
 
+    @t("u19-model is live stable flash")
+    def _():
+        eq(AI_MODEL, "gemini-3.8-flash")
+        eq(MODEL_STATUS[AI_MODEL], "stable")
+        eq(MODEL_STATUS["gemini-2.0-flash"], "shut_down")
+        eq(MODEL_STATUS["gemini-2.5-flash"], "deprecated")
+        is_true("2.0-flash" not in AI_MODEL, "dead model must never come back")
+
+    @t("u19-every cloud path sends model")
+    def _():
+        for label, body in (
+            ("ask", chat_body("system summary", "facts + question")),
+            ("converse", chat_body("system chat", "history + message")),
+            ("parse", chat_body("system json", "message", temperature=None)),
+            ("stream", chat_body("system chat", "history + message", stream=True)),
+        ):
+            eq(body["model"], AI_MODEL, label)
+            eq(body["messages"][0]["role"], "system", label)
+            eq(body["messages"][1]["role"], "user", label)
+        eq(chat_body("s", "u", stream=True)["stream"], True)
+        is_true("stream" not in chat_body("s", "u"), "one-shot must not stream")
+        is_true("temperature" not in chat_body("s", "u", temperature=None),
+                "structured JSON must be deterministic (no temperature)")
+
+    @t("u19-endpoint is chat completions with bearer")
+    def _():
+        eq(CHAT_COMPLETIONS_URL,
+           "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
+        is_true(CHAT_COMPLETIONS_URL.endswith("/openai/chat/completions"), CHAT_COMPLETIONS_URL)
+
+    @t("u19-sse content key deltas")
+    def _():
+        p = SseParser("content")
+        events = p.feed(
+            'data: {"choices":[{"delta":{"role":"assistant","content":null}}]}\n'
+            'data: {"choices":[{"delta":{"content":"Namaste"}}]}\n'
+            'data: {"choices":[{"delta":{"content":"!"}}]}\n'
+            'data: [DONE]\n')
+        eq(events, [("ignored", None), ("text", "Namaste"), ("text", "!"), ("done", None)])
+        eq(SseParser.extract_first_content(
+            '{"choices":[{"message":{"role":"assistant","content":"Aaj ka profit ₹500 hai."}}]}'),
+            "Aaj ka profit ₹500 hai.")
+        eq(SseParser.extract_first_content(
+            '{"choices":[{"message":{"role":"assistant","content":null}}]}'), None)
+
+    @t("u19-nonstreaming content extraction")
+    def _():
+        eq(extract_message_content(
+            '{"choices":[{"message":{"role":"assistant","content":"Hi bhai, kaise ho?"}}]}'),
+            "Hi bhai, kaise ho?")
+        eq(extract_message_content('{"choices":[]}'), None)
+        eq(extract_message_content('{"error":{"message":"bad key"}}'), None)
+
     @t("u17-migration clear removes both entries")
     def _():
         prefs = {"ai_key": "K", "gemini_api_key": "K"}
@@ -4026,6 +4140,7 @@ def main():
                           ("u16-", "UPDATE 16 do-it commands"),
                           ("u17-", "UPDATE 17 streaming + typing + key migration"),
                           ("u18-", "UPDATE 18 voice conversation (simulated transcripts)"),
+                          ("u19-", "UPDATE 19 model + endpoint"),
                           ("regression-", "Classifier regression traces")):
         names = [n for n in outcomes if n.startswith(prefix)]
         p = sum(outcomes[n] for n in names)

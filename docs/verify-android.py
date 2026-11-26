@@ -142,7 +142,15 @@ for f in kt_files:
     raw = f.read_text()
     low = raw.lower()
     if "gemini" in low and f.name not in ("AiFeatures.kt", "SettingsStore.kt"):
-        fails.append(f"{f.name}: provider name 'gemini' still present (UPDATE 12)")
+        # UPDATE 19: the model-value test in ConversationTest.kt may
+        # name the constant's value (its assert lines mention AI_MODEL);
+        # any other provider-named text there is still a violation.
+        if f.name == "ConversationTest.kt":
+            for line in raw.splitlines():
+                if "gemini" in line.lower() and "AI_MODEL" not in line:
+                    fails.append(f"ConversationTest.kt: provider name outside the AI_MODEL value test: {line.strip()[:80]}")
+        else:
+            fails.append(f"{f.name}: provider name 'gemini' still present (UPDATE 12)")
     if f.name == "AiFeatures.kt":
         for line in raw.splitlines():
             if "gemini" in line.lower() and "AI_MODEL" not in line:
@@ -499,11 +507,34 @@ else:
         fails.append("Streaming.kt must label the local path honestly (typewriter display, no network stream)")
 cloud_src = (MAIN / "domain/CloudAiClient.kt").read_text()
 for needle in ["suspend fun converse", "fun converseStreaming", "fun hasCloudStream",
-               "streamGenerateContent", "text/event-stream", "Flow<String>",
+               "text/event-stream", "Flow<String>",
                "SseParser", "StreamingError", "ensureActive",
                "local engine: typewriter display over locally generated text"]:
     if needle not in cloud_src:
         fails.append(f"CloudAiClient.kt missing streaming piece: {needle!r}")
+# UPDATE 19 — every cloud call is an OpenAI-style chat completion
+# with "model" in the body; the native generateContent paths are gone.
+for needle in ["openai/chat/completions", "CHAT_COMPLETIONS_URL",
+               "Bearer", "chatBody", "extractMessageContent",
+               "SseParser(\"content\")", "\"model\"",
+               "stream\\\":true",
+               "choices"]:
+    if needle not in cloud_src:
+        fails.append(f"CloudAiClient.kt missing UPDATE 19 piece: {needle!r}")
+for dead in ["streamGenerateContent", ":generateContent", "X-goog-api-key",
+             "gemini-2.0-flash", "\"contents\"", "\"parts\""]:
+    if dead in cloud_src:
+        fails.append(f"CloudAiClient.kt still contains retired native-call piece: {dead!r}")
+ai_features_src = (MAIN / "domain/AiFeatures.kt").read_text()
+if '"gemini-3.8-flash"' not in ai_features_src:
+    fails.append("AiFeatures.AI_MODEL is not gemini-3.8-flash (UPDATE 19)")
+for f in kt_files:
+    if "gemini-2.0-flash" in f.read_text():
+        fails.append(f"{f.name}: dead model gemini-2.0-flash still present (shut down June 1 2026, UPDATE 19)")
+stream_src2 = (MAIN / "domain/Streaming.kt").read_text()
+for needle in ["extractFirstContent", "extractFirstValue", "textKey"]:
+    if needle not in stream_src2:
+        fails.append(f"Streaming.kt missing UPDATE 19 piece: {needle}")
 if "OkHttp" in cloud_src or "okhttp" in cloud_src:
     fails.append("CloudAiClient added OkHttp — use the existing HttpURLConnection (UPDATE 17)")
 vm_src = (MAIN / "ui/chatbot/ChatbotViewModel.kt").read_text()
@@ -536,6 +567,7 @@ else:
                    "typewriterFinalEqualsSource_emptyShortLong",
                    "typewriterStopPreservesPrefix", "typewriterAppendWhileTyping",
                    "sseParser_splitLinesAndSplitUtf8", "sseParser_doneAndCancel",
+                   "sseParser_contentKey_openAiStyleDeltas", "aiModelIsLiveStableFlash",
                    "typingSpeed_naturalBand", "streamingErrorsAreTyped"]:
         if needle not in stream_test:
             fails.append(f"ConversationTest.kt missing streaming test: {needle}")
@@ -543,6 +575,10 @@ mirror_src = mirror.read_text()
 for needle in ["u17-chunker devanagari", "u17-typewriter final equals source",
                "u17-sse split lines", "u17-sse done", "u17-flow-14step",
                "u17-migration legacy key", "STREAMING TYPING SPEED",
+               "u19-model is live stable flash", "u19-every cloud path sends model",
+               "u19-sse content key deltas", "u19-nonstreaming content extraction",
+               "def chat_body", "def extract_message_content",
+               "AI_MODEL = \"gemini-3.8-flash\"",
                "def grapheme_clusters", "def display_chunks",
                "class SseParser", "class TypewriterSim", "class GenerationSim",
                "def migrate_legacy_key", "def markdown_plain"]:

@@ -27,6 +27,20 @@ import kotlinx.coroutines.withContext
  * record, and never shipped in code. There is no key anywhere in this
  * codebase.
  *
+ * UPDATE 19 (2026-11-27) — service address + model field. All cloud
+ * calls go to the service's OpenAI-compatible chat-completions
+ * endpoint (see CHAT_COMPLETIONS_URL) with Bearer auth and
+ * OpenAI-style messages. EVERY request body carries
+ * "model": AiFeatures.AI_MODEL — the endpoint REQUIRES the model
+ * field; a request without it fails even with a valid key (the same
+ * bug the website fixed in commit d99e85b9). The model value lives
+ * in exactly ONE place, [AiFeatures.AI_MODEL] (see the UPDATE 19
+ * note there — the previous 2.0-flash value is shut down, so it must
+ * never come back). Non-streaming replies are
+ * read from choices[0].message.content; streaming replies arrive as
+ * SSE events whose choices[0].delta.content is emitted per chunk
+ * (parsed by [SseParser] with the "content" key).
+ *
  * The client is used ONLY to word the same snapshot facts more
  * naturally. The prompt tells it to use ONLY those facts, never to
  * invent a number, and to answer in the user's language (Hinglish /
@@ -41,6 +55,9 @@ import kotlinx.coroutines.withContext
  * an answer. No new dependency: plain [HttpURLConnection], manual JSON.
  */
 class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
+
+    /** Parses OpenAI-style payloads (choices / message / delta). */
+    private val contentParser = SseParser("content")
 
     override suspend fun ask(question: String, businessContext: String): AiFeatures.AiResult {
         if (apiKey.isBlank()) {
@@ -63,16 +80,16 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
     }
 
     private fun callAi(question: String, businessContext: String): String? {
-        val prompt = "You are BizKhata AI Assistant, a shop accounting helper. " +
+        val system = "You are BizKhata AI Assistant, a shop accounting helper. " +
             "Answer in the SAME language and style as the question — it may be Hinglish, English, Hindi, " +
             "Gujarati, Marathi, Bengali, Punjabi, Tamil, Telugu, Kannada, Malayalam, Odia, Assamese, Urdu, " +
             "Nepali or another Indian language, in native script or Roman letters. Reply naturally in that language. " +
-            "Use ONLY the facts below. NEVER invent a number, a name or a record. " +
+            "Use ONLY the facts in the user's message. NEVER invent a number, a name or a record. " +
             "If the facts say there is no record, say so plainly. " +
             "If the question is casual conversation, reply naturally and briefly — never mention business records unless the question asks about them. " +
-            "Keep the answer short and simple, in plain words a shopkeeper understands.\n\n" +
-            businessContext + "\n\nQuestion: " + question
-        return postPrompt(prompt)
+            "Keep the answer short and simple, in plain words a shopkeeper understands."
+        val user = businessContext + "\n\nQuestion: " + question
+        return postChat(system, user, temperature = 0.7)
     }
 
     /** UPDATE 15 — the MAIN engine for casual / general conversation.
@@ -96,7 +113,7 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
         if (apiKey.isBlank()) return null
         return try {
             withContext(Dispatchers.IO) {
-                val prompt = "You are BizKhata AI Assistant, a friendly personal and business assistant for a small shopkeeper in India. " +
+                val system = "You are BizKhata AI Assistant, a friendly personal and business assistant for a small shopkeeper in India. " +
                     "The user speaks to you in their own language and style — it may be Hinglish, English, Hindi, Gujarati, Marathi, Bengali, Punjabi, Tamil, Telugu, Kannada, Malayalam, Odia, Assamese, Urdu, Nepali or another Indian language, in native script or Roman letters. " +
                     "Reply in the SAME language and style as the user's latest message. Be natural, warm and varied — write like a helpful person, never like a form letter, and never repeat the same generic question. " +
                     "First understand the user's actual intention: a greeting, a statement about their day, a plan for tomorrow, a question, a request, or a business action. Answer THAT intention. " +
@@ -104,9 +121,9 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
                     "If the user asks about their business, use ONLY the ledger facts given below — never invent a number, a name or a record; if there is no record, say so plainly and give the real figure (zero when nothing is recorded). " +
                     "You never perform a financial action yourself: if the user wants an entry, a payment or a change, say what you understood and ask them to confirm — the app handles the actual save. " +
                     "If you do not know something (live prices, news, weather, or anything outside the facts below), say so honestly in plain words instead of inventing it. " +
-                    "Keep replies short and simple, in plain words a shopkeeper understands.\n\n" +
-                    context + "\n\nLatest message: " + question
-                postPrompt(prompt)
+                    "Keep replies short and simple, in plain words a shopkeeper understands."
+                val user = context + "\n\nLatest message: " + question
+                postChat(system, user, temperature = 0.7)
             }
         } catch (_: Exception) {
             null
@@ -116,9 +133,10 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
     /** UPDATE 17 — GENUINE backend streaming (real SSE, not a timer).
      *
      *  Posts to the owner-configured endpoint with streaming requested
-     *  and returns a Flow of incremental text chunks as they arrive
-     *  over the wire: each `data:` event is parsed by [SseParser] and
-     *  its text is emitted immediately — the first chunk is emitted as
+     *  ("stream": true) and returns a Flow of incremental text chunks
+     *  as they arrive over the wire: each `data:` event is parsed by
+     *  [SseParser] (key "content" — choices[0].delta.content) and its
+     *  text is emitted immediately — the first chunk is emitted as
      *  soon as it arrives, never after the whole reply is buffered.
      *  The response is read through a UTF-8 reader, so a multi-byte
      *  character split across two network reads is reassembled by the
@@ -140,7 +158,7 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
 
     fun converseStreaming(question: String, context: String): Flow<String> = flow {
         if (apiKey.isBlank()) throw StreamingError.NoCloudConfigured()
-        val prompt = "You are BizKhata AI Assistant, a friendly personal and business assistant for a small shopkeeper in India. " +
+        val system = "You are BizKhata AI Assistant, a friendly personal and business assistant for a small shopkeeper in India. " +
             "The user speaks to you in their own language and style — it may be Hinglish, English, Hindi, Gujarati, Marathi, Bengali, Punjabi, Tamil, Telugu, Kannada, Malayalam, Odia, Assamese, Urdu, Nepali or another Indian language, in native script or Roman letters. " +
             "Reply in the SAME language and style as the user's latest message. Be natural, warm and varied — write like a helpful person, never like a form letter, and never repeat the same generic question. " +
             "First understand the user's actual intention: a greeting, a statement about their day, a plan for tomorrow, a question, a request, or a business action. Answer THAT intention. " +
@@ -148,26 +166,15 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
             "If the user asks about their business, use ONLY the ledger facts given below — never invent a number, a name or a record; if there is no record, say so plainly and give the real figure (zero when nothing is recorded). " +
             "You never perform a financial action yourself: if the user wants an entry, a payment or a change, say what you understood and ask them to confirm — the app handles the actual save. " +
             "If you do not know something (live prices, news, weather, or anything outside the facts below), say so honestly in plain words instead of inventing it. " +
-            "Keep replies short and simple, in plain words a shopkeeper understands.\n\n" +
-            context + "\n\nLatest message: " + question
-        val endpoint =
-            "https://generativelanguage.googleapis.com/v1beta/models/" +
-                AiFeatures.AI_MODEL + ":streamGenerateContent?alt=sse"
-        val body = "{\"contents\":[{\"parts\":[{\"text\":" + jsonString(prompt) + "}]}]}"
-        val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 15000
-            readTimeout = 0
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json")
-            setRequestProperty("Accept", "text/event-stream")
-            setRequestProperty("X-goog-api-key", apiKey)
-        }
+            "Keep replies short and simple, in plain words a shopkeeper understands."
+        val user = context + "\n\nLatest message: " + question
+        val body = chatBody(system, user, stream = true, temperature = 0.7)
+        val connection = openChatConnection(stream = true)
         try {
             OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { it.write(body) }
             val code = connection.responseCode
             if (code != HttpURLConnection.HTTP_OK) throw StreamingError.HttpStatus(code)
-            val parser = SseParser()
+            val parser = SseParser("content")
             var sawAnyText = false
             var streamDone = false
             BufferedReader(InputStreamReader(connection.inputStream, Charsets.UTF_8)).use { reader ->
@@ -206,29 +213,93 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
         }
     }.flowOn(Dispatchers.IO)
 
-    /** One HTTP call with a prompt; returns the reply text or null. */
-    private fun postPrompt(prompt: String): String? {
-        val endpoint =
-            "https://generativelanguage.googleapis.com/v1beta/models/" +
-                AiFeatures.AI_MODEL + ":generateContent"
-        val body = "{\"contents\":[{\"parts\":[{\"text\":" + jsonString(prompt) + "}]}]}"
-        val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 15000
-            readTimeout = 15000
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json")
-            setRequestProperty("X-goog-api-key", apiKey)
+    /** Structured understanding fallback: when the built-in parser
+     *  cannot understand a message, ask the cloud AI to return a small
+     *  JSON object describing the action. Returns null on any failure
+     *  or invalid JSON — the caller then asks the user a clarification
+     *  question instead of guessing. The JSON is validated field by
+     *  field; no value from it is ever trusted without the repository's
+     *  own validation. Never used for amounts the user did not state. */
+    suspend fun parseAction(question: String, context: String): String? {
+        if (apiKey.isBlank()) return null
+        return try {
+            withContext(Dispatchers.IO) {
+                val system = "You are BizKhata AI Assistant. The user wrote a business message. " +
+                    "The message may be in any Indian language, in native script or Romanized " +
+                    "(Hinglish, Roman Gujarati, Roman Tamil, and so on) — understand the meaning, not just the script. " +
+                    "Reply with ONLY a JSON object, no other text. Keys: kind (one of " +
+                    "daily_income, expense, agent_payment, money_transfer, internal_transfer, " +
+                    "customer_payment, question, help, unknown), service (Xerox, Printing, " +
+                    "Smart Card, PAN Card, Aadhaar Services, Voter ID, Ayushman Card, " +
+                    "Passport Size Photo, Scanning, Document Work, Money Transfer, or empty), " +
+                    "amount_rupees (number or 0), mode (Cash, UPI or empty), name (agent or " +
+                    "customer name or empty). NEVER invent an amount, a mode or a name — " +
+                    "use empty / 0 when the message does not state it."
+                val user = context + "\n\nMessage: " + question
+                // No temperature: structured JSON must be deterministic.
+                postChat(system, user, temperature = null)
+            }
+        } catch (_: Exception) {
+            null
         }
+    }
+
+    // --- Shared chat-completions plumbing (UPDATE 19) -------------------
+    // Every cloud call in this file goes through [postChat] (one-shot)
+    // or [converseStreaming] (SSE). Both build their body with
+    // [chatBody], which ALWAYS includes "model": AI_MODEL — the
+    // endpoint requires it. There is no other request path left in
+    // this file; the old native calls are gone.
+
+    /** One non-streaming chat call; returns choices[0].message.content or null. */
+    private fun postChat(system: String, user: String, temperature: Double?): String? {
+        val body = chatBody(system, user, stream = false, temperature = temperature)
+        val connection = openChatConnection(stream = false)
         try {
             OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { it.write(body) }
-            val code = connection.responseCode
-            if (code != HttpURLConnection.HTTP_OK) return null
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
             val text = BufferedReader(InputStreamReader(connection.inputStream, Charsets.UTF_8)).use { it.readText() }
-            return extractFirstText(text)
+            return extractMessageContent(text)
         } finally {
             connection.disconnect()
         }
+    }
+
+    /** Pull choices[0].message.content out of a chat-completions reply. */
+    private fun extractMessageContent(json: String): String? {
+        val choicesIdx = json.indexOf("\"choices\"")
+        if (choicesIdx < 0) return null
+        return contentParser.extractFirstContent(json.substring(choicesIdx))
+    }
+
+    /** Open a POST to the chat-completions endpoint with Bearer auth. */
+    private fun openChatConnection(stream: Boolean): HttpURLConnection {
+        return (URL(CHAT_COMPLETIONS_URL).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15000
+            readTimeout = if (stream) 0 else 30000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("Authorization", "Bearer " + apiKey)
+            if (stream) setRequestProperty("Accept", "text/event-stream")
+        }
+    }
+
+    /**
+     * Build a chat-completions request body. "model" is ALWAYS
+     * present (from [AiFeatures.AI_MODEL] — the single source of
+     * truth, shared with the website). "stream": true only for the
+     * SSE path. [temperature] is omitted (null) for structured JSON.
+     */
+    private fun chatBody(system: String, user: String, stream: Boolean, temperature: Double?): String {
+        val out = StringBuilder("{")
+        out.append("\"model\":").append(jsonString(AiFeatures.AI_MODEL))
+        out.append(",\"messages\":[{\"role\":\"system\",\"content\":").append(jsonString(system))
+        out.append("},{\"role\":\"user\",\"content\":").append(jsonString(user)).append("}]")
+        if (temperature != null) out.append(",\"temperature\":").append(temperature.toString())
+        if (stream) out.append(",\"stream\":true")
+        out.append("}")
+        return out.toString()
     }
 
     /** Escape a string as a JSON string literal (quotes, backslashes, newlines).
@@ -251,93 +322,12 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
         return out.toString()
     }
 
-    /**
-     * Pull the first "text": "..." value out of the AI response.
-     * Minimal hand-rolled parse (no JSON dependency): find the key, then
-     * read the quoted value honouring backslash escapes. Character codes
-     * (34 = quote, 92 = backslash) are used instead of quote/backslash
-     * char literals, so the JVM-free verifier's simple string/char
-     * stripper cannot misread this file.
-     */
-    private fun extractFirstText(json: String): String? {
-        val key = "\"text\""
-        var idx = json.indexOf(key)
-        while (idx >= 0) {
-            var i = idx + key.length
-            while (i < json.length && (json[i] == ' ' || json[i] == ':')) i++
-            if (i < json.length && json[i].code == 34) {
-                val out = StringBuilder()
-                var j = i + 1
-                while (j < json.length) {
-                    val ch = json[j]
-                    if (ch.code == 92 && j + 1 < json.length) {
-                        when (json[j + 1]) {
-                            'n' -> out.append('\n')
-                            'r' -> out.append('\r')
-                            't' -> out.append('\t')
-                            else -> out.append(json[j + 1])
-                        }
-                        j += 2
-                    } else if (ch.code == 34) {
-                        return out.toString()
-                    } else {
-                        out.append(ch)
-                        j++
-                    }
-                }
-                return null
-            }
-            idx = json.indexOf(key, idx + 1)
-        }
-        return null
-    }
-
-    /** Structured understanding fallback: when the built-in parser
-     *  cannot understand a message, ask the cloud AI to return a small
-     *  JSON object describing the action. Returns null on any failure
-     *  or invalid JSON — the caller then asks the user a clarification
-     *  question instead of guessing. The JSON is validated field by
-     *  field; no value from it is ever trusted without the repository's
-     *  own validation. Never used for amounts the user did not state. */
-    suspend fun parseAction(question: String, context: String): String? {
-        if (apiKey.isBlank()) return null
-        return try {
-            withContext(Dispatchers.IO) {
-                val endpoint =
-                    "https://generativelanguage.googleapis.com/v1beta/models/" +
-                        AiFeatures.AI_MODEL + ":generateContent"
-                val prompt = "You are BizKhata AI Assistant. The user wrote a business message. " +
-                    "The message may be in any Indian language, in native script or Romanized " +
-                    "(Hinglish, Roman Gujarati, Roman Tamil, and so on) — understand the meaning, not just the script. " +
-                    "Reply with ONLY a JSON object, no other text. Keys: kind (one of " +
-                    "daily_income, expense, agent_payment, money_transfer, internal_transfer, " +
-                    "customer_payment, question, help, unknown), service (Xerox, Printing, " +
-                    "Smart Card, PAN Card, Aadhaar Services, Voter ID, Ayushman Card, " +
-                    "Passport Size Photo, Scanning, Document Work, Money Transfer, or empty), " +
-                    "amount_rupees (number or 0), mode (Cash, UPI or empty), name (agent or " +
-                    "customer name or empty). NEVER invent an amount, a mode or a name — " +
-                    "use empty / 0 when the message does not state it.\n\n" +
-                    context + "\n\nMessage: " + question
-                val body = "{\"contents\":[{\"parts\":[{\"text\":" + jsonString(prompt) + "}]}]}"
-                val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    connectTimeout = 15000
-                    readTimeout = 15000
-                    doOutput = true
-                    setRequestProperty("Content-Type", "application/json")
-                    setRequestProperty("X-goog-api-key", apiKey)
-                }
-                try {
-                    OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { it.write(body) }
-                    if (connection.responseCode != HttpURLConnection.HTTP_OK) return@withContext null
-                    val text = BufferedReader(InputStreamReader(connection.inputStream, Charsets.UTF_8)).use { it.readText() }
-                    extractFirstText(text)
-                } finally {
-                    connection.disconnect()
-                }
-            }
-        } catch (_: Exception) {
-            null
-        }
+    companion object {
+        /** UPDATE 19 service address (OpenAI-compatible chat
+         *  completions). Bearer auth, OpenAI-style messages, reply in
+         *  choices[0].message.content, SSE deltas in
+         *  choices[0].delta.content. Code config only — never UI. */
+        const val CHAT_COMPLETIONS_URL =
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
     }
 }
