@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Assessment
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
@@ -201,7 +202,8 @@ class MainActivity : ComponentActivity() {
                                 activeProfileId = activeProfile?.id ?: -1L,
                                 savedMobile = savedMobile,
                                 onProfile = { id -> scope.launch { settings.setActiveProfile(id) } },
-                                onNavigate = ::go
+                                onNavigate = ::go,
+                                onClose = { scope.launch { drawerState.close() } }
                             )
                         }
                     }
@@ -242,7 +244,12 @@ class MainActivity : ComponentActivity() {
                                     },
                                     navigationIcon = {
                                         if (onDashboard) {
-                                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                            IconButton(onClick = {
+                                                scope.launch {
+                                                    // Toggle: open when closed, close when open.
+                                                    if (drawerState.isOpen) drawerState.close() else drawerState.open()
+                                                }
+                                            }) {
                                                 Icon(Icons.Filled.Menu, contentDescription = "Menu", tint = Color.White)
                                             }
                                         } else if (nav.previousBackStackEntry != null) {
@@ -308,7 +315,13 @@ class MainActivity : ComponentActivity() {
                                     )
                                     NavigationBarItem(
                                         selected = false,
-                                        onClick = { scope.launch { drawerState.open() } },
+                                        onClick = {
+                                            scope.launch {
+                                                // Toggle, like the hamburger: More opens the
+                                                // drawer and closes it again when it is open.
+                                                if (drawerState.isOpen) drawerState.close() else drawerState.open()
+                                            }
+                                        },
                                         icon = { Icon(Icons.Filled.MoreHoriz, contentDescription = "More") },
                                         label = { Text("More") },
                                         colors = navItemColors()
@@ -631,7 +644,8 @@ private fun DrawerContent(
     activeProfileId: Long,
     savedMobile: String,
     onProfile: (Long) -> Unit,
-    onNavigate: (String) -> Unit
+    onNavigate: (String) -> Unit,
+    onClose: () -> Unit
 ) {
     var servicesExpanded by remember { mutableStateOf(false) }
     var profilesExpanded by remember { mutableStateOf(false) }
@@ -666,6 +680,13 @@ private fun DrawerContent(
                         if (savedMobile.isNotBlank()) {
                             Text(savedMobile, color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
                         }
+                    }
+                    // Visible close (X): the drawer also closes via scrim
+                    // tap, swipe and system Back, but users reach for a
+                    // button first — give them one in the header.
+                    Spacer(Modifier.weight(1f))
+                    IconButton(onClick = onClose) {
+                        Icon(Icons.Filled.Close, contentDescription = "Close menu", tint = Color.White)
                     }
                 }
                 Spacer(Modifier.height(16.dp))
