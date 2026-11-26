@@ -53,3 +53,37 @@ export async function getGeminiInsight(
     return { ok: false, text: `Could not reach Gemini: ${e instanceof Error ? e.message : 'network error'}. The app works fine without AI.` };
   }
 }
+
+/** Chatbot: answer one question using ONLY the supplied real figures.
+ *  The prompt carries the ledger figures; Gemini only turns them into a
+ *  natural-language answer. If it fails, the caller falls back to the
+ *  built-in factual responder — figures are never invented. */
+export async function askGeminiChat(
+  apiKey: string,
+  question: string,
+  factsText: string,
+): Promise<{ ok: boolean; text: string }> {
+  const prompt = [
+    'You are BizKhata AI Assistant, helping a small Indian shop owner. Answer in the same language the user asked in (Hinglish, Hindi or English).',
+    'Use ONLY the figures below. Never invent numbers, customers, or amounts. If the figures do not cover the question, say so plainly.',
+    'Keep the answer short (2-4 lines) and simple.',
+    `Real figures from the shop's ledgers:\n${factsText}`,
+    `User question: ${question}`,
+  ].join('\n');
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+      },
+    );
+    if (!res.ok) return { ok: false, text: `Gemini request failed (HTTP ${res.status}). Check the key or quota — the app works fine without AI.` };
+    const data = await res.json();
+    const text = data?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text || '').join('') || '';
+    return { ok: true, text: text.trim() || 'Gemini returned an empty answer.' };
+  } catch (e) {
+    return { ok: false, text: `Could not reach Gemini: ${e instanceof Error ? e.message : 'network error'}. The app works fine without AI.` };
+  }
+}

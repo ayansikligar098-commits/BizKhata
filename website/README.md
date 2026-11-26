@@ -11,15 +11,26 @@ Cloudflare Pages.
 ## What it does
 
 - **Starts completely empty** — no demo numbers, ever.
-- **28 dedicated pages**, one per feature, in a single-page app with view switching:
-  Dashboard, Daily Dhandha, Cash Book, UPI Book, Money Transfer, PAN Card,
-  Aadhaar Services, Voter ID, Ayushman Card, Xerox, Printing, Smart Card,
-  Document Work, Customers, Customer Profile, Customer Khata, Agent Management,
-  Agent Profile, Agent Payments, Expenses, Machine Maintenance, Receipt
-  Generator, Reports, Difference Finder, Recycle Bin, Audit Log, Customization
-  Studio, Settings. Every page has its own header, summary cards, search and
-  filters, professional tables, Add/Edit/View/Delete actions, working forms
-  and dialogs, and pagination — all wired to real saved data.
+- **28 dedicated pages, each with its own real URL** (Next.js App Router —
+  see [URL routing](#url-routing) below): Dashboard, Daily Dhandha, Cash Book,
+  UPI Book, Money Transfer, PAN Card, Aadhaar Services, Voter ID, Ayushman
+  Card, Xerox, Printing, Smart Card, Document Work, Customers, Customer
+  Profile, Customer Khata, Agent Management, Agent Profile, Agent Payments,
+  Expenses, Machine Maintenance, Receipt Generator, Reports, Difference
+  Finder, Recycle Bin, Audit Log, Customization Studio, Settings — plus the
+  **AI Assistant** chat page (`/chatbot`). Every page has its own header,
+  summary cards, search and filters, professional tables, Add/Edit/View/Delete
+  actions, working forms and dialogs, and pagination — all wired to real saved
+  data. Browser Back/Forward, Refresh, deep links and bookmarks all work;
+  refreshing `/cash-book` reopens Cash Book.
+- **AI Assistant / chatbot** (`/chatbot`, sidebar "Chatbot / AI Assistant",
+  and a purple floating chat button on every screen): ask in Hinglish,
+  English or Hindi about today's profit, who owes money, agent payables,
+  Money Transfer commission, or cash/UPI balance. Every figure comes from
+  the real ledgers (integer paise) — nothing is invented, and with no data
+  it says so plainly. Works fully with no Gemini key (built-in factual
+  responder); with the owner's free Gemini key in Settings, Gemini only
+  rephrases the same real figures into a natural-language answer.
 - **Design**: premium dark navy sidebar with expandable Services/Reports
   groups, modern top nav (business profile switcher, global search across
   customers/jobs/receipts, notification bell, owner menu), purple primary
@@ -37,6 +48,10 @@ Cloudflare Pages.
 - **Money Transfer**: fully separate ledger. Fund from brother (by UPI), transfers,
   commission-only profit, MT other expenses (Tea/Food, Transport, Staff, Shop, Misc),
   daily closing (Starting + Received − Sent − Expenses, Cash and UPI separately).
+  Money Transfer is a top-level module, **not** a job service: it never appears
+  in the Services list, the add-job service picker, or the Difference Finder
+  service picker (older profiles that saved it as a service have it filtered
+  out everywhere; `/services/money-transfer` redirects to `/money-transfer`).
 - **Services / Jobs**: per-service jobs with status (New → Delivered), fees, received,
   due, per-job margin. **PAN work can never be assigned to an agent** — enforced in the UI.
 - **Customers & Customer Khata**: per-customer pages, document uploads, WhatsApp
@@ -65,6 +80,64 @@ All money is integer **paise** — never float. See `tests/accounting.test.mjs`
 2. Money Transfer ₹10,000 with ₹50 commission → profit is ₹50 only.
 3. Cash→UPI ₹1,000 internal transfer → ₹0 income, ₹0 expense.
 4. Customer receivable and agent payable are separate ledgers.
+
+## URL routing
+
+Every feature has its own proper URL (App Router, static export). The address
+bar always reflects the open page:
+
+`/dashboard`, `/daily-business`, `/cash-book`, `/upi-book`,
+`/money-transfer`, `/services`, `/services/pan-card`, `/services/aadhaar`,
+`/services/voter-id`, `/services/ayushman`, `/services/xerox`,
+`/services/printing`, `/services/smart-card`, `/services/document-work`,
+`/customers`, `/customers/[id]`, `/customer-khata`, `/agents`, `/agents/[id]`,
+`/agent-payments`, `/expenses`, `/machine-maintenance`, `/receipts`,
+`/receipt-generator`, `/reports`, `/reports/income`, `/reports/expenses`,
+`/reports/profit`, `/reports/service-wise`, `/difference-finder`,
+`/recycle-bin`, `/audit-log`, `/customization`, `/chatbot`, `/settings`,
+`/settings/profile`, `/settings/business`, `/settings/language`,
+`/settings/receipt`, `/settings/security`. Unknown routes show a professional
+404 page (`src/app/not-found.tsx`). Switching business profiles keeps the
+current feature open and loads that business's data.
+
+How deep links work on the static export: every fixed route is its own HTML
+file in `out/`, so direct loads and refresh work natively — no SPA fallback.
+Customer and agent ids are created by the user at runtime, so no static HTML
+can exist for them: `public/_redirects` rewrites `/customers/*` and
+`/agents/*` to the list page's HTML (200, URL unchanged), and the list pages
+are pathname-aware — they render that customer's / agent's profile when the
+URL carries an id. One honest consequence: a click on a customer/agent
+profile does a full page load instead of a client-side transition (no
+prerendered RSC payload can exist for a user-created id); the profile still
+renders correctly, as verified in the browser drive.
+
+## Persistent login (sessions)
+
+Opening the site shows a branded BizKhata loading screen while the saved
+session is verified — the login page is never flashed to an authenticated
+user. Valid session → Dashboard (or the last page / originally requested
+page); renewable session → silently renewed in the background; no session →
+Login. Refresh, close/reopen and new tabs all restore the session, the
+active business profile, language, theme and last page. Logout revokes the
+session (cookies + record deleted, token hashes blocklisted) and logs out all
+tabs (BroadcastChannel + storage events). All private routes are gated behind
+session validation; a private URL without login redirects to
+`/login?next=<page>` and returns there after login. Network failure during
+verification shows a retry screen — it is never treated as a logout.
+
+Implementation (`src/lib/session.ts`): opaque 256-bit random tokens, access
+15 min + refresh 30 days, rotation on use (old refresh is single-use),
+revocation list. Raw tokens live only in cookies (`Path=/`, `SameSite=Lax`,
+`Secure` on HTTPS); localStorage holds only SHA-256 hashes + metadata —
+never the PIN, never a boolean `loggedIn` flag.
+
+**Honest gap:** cookies set from JavaScript cannot be `HttpOnly`, and there
+is no server in this deployment to validate sessions. A full server-side
+session layer (Cloudflare Pages Functions + KV/D1 session store + a
+dashboard-configured signing secret) is the documented next step — it needs
+Cloudflare dashboard bindings that cannot be created from here, so it is
+NOT faked. The current layer is the closest secure equivalent that actually
+works on the free static tier.
 
 ## Local development
 
@@ -120,3 +193,12 @@ Every push to the GitHub repo re-deploys automatically with Option A.
 - Gemini insight needs the owner's own free Gemini key; without it, AI stays off
   and the app works fully.
 - Receipt "PDF" uses the browser's Print → Save as PDF (free, no paid service).
+- **Sessions are not yet server-validated** (see "Persistent login" above):
+  JS-set cookies cannot be HttpOnly and there is no Pages Functions + KV/D1
+  session store yet — that needs Cloudflare dashboard bindings. The current
+  token/rotation/revocation layer is the closest secure equivalent on the
+  free static tier; it is not presented as server-side validation.
+- **Profile clicks do a full page load** (see "URL routing" above): a static
+  export cannot prerender an RSC payload for user-created customer/agent ids,
+  so the client falls back to a full navigation, which renders correctly via
+  the pathname-aware list page + `_redirects` rewrite.

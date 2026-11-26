@@ -3,6 +3,7 @@ import React from 'react';
 import { formatINR, parseAmount } from '@/lib/money';
 import { jobDuePaise, jobMarginPaise } from '@/lib/accounting';
 import { NON_OUTSOURCEABLE_SERVICES, JOB_STATUSES } from '@/lib/categories';
+import { jobServices } from '@/lib/routes';
 import { auditEntry, whatsAppLink } from '@/lib/store';
 import type { DocFile, Job, JobStatus, Method } from '@/lib/types';
 import { todayISO, uid } from '@/lib/types';
@@ -59,7 +60,7 @@ export function DocUploader({ ctx, ownerType, ownerId }: { ctx: Ctx; ownerType: 
   );
 }
 
-export function ServicesView({ ctx }: { ctx: Ctx }) {
+export function ServicesView({ ctx, service: serviceProp, openForm }: { ctx: Ctx; service?: string; openForm?: boolean }) {
   const { state, profile } = ctx;
   const pid = profile.id;
   const [serviceFilter, setServiceFilter] = React.useState<string>('All');
@@ -72,7 +73,7 @@ export function ServicesView({ ctx }: { ctx: Ctx }) {
   const [page, setPage] = React.useState(1);
 
   // form state
-  const [service, setService] = React.useState(profile.services[0] || 'Xerox');
+  const [service, setService] = React.useState(jobServices(profile.services)[0] || 'Xerox');
   const [customerName, setCustomerName] = React.useState('');
   const [mobile, setMobile] = React.useState('');
   const [refNo, setRefNo] = React.useState('');
@@ -93,15 +94,15 @@ export function ServicesView({ ctx }: { ctx: Ctx }) {
     .filter((j) => !search || j.customerName.toLowerCase().includes(search.toLowerCase()) || j.mobile.includes(search))
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 
-  // Jump from dashboard quick-service buttons / sidebar service list.
-  const jumpNonce = ctx.serviceJump?.nonce;
+  // Route-driven service selection: /services/<slug> opens this service's
+  // page; ?new=1 opens the add-job form (dashboard quick-service buttons).
   React.useEffect(() => {
-    if (!ctx.serviceJump) return;
-    setServiceFilter(ctx.serviceJump.service);
-    setService(ctx.serviceJump.service);
+    if (!serviceProp) return;
+    setServiceFilter(serviceProp);
+    setService(serviceProp);
     setStatusFilter('All');
-    if (ctx.serviceJump.openForm) setShowForm(true);
-  }, [jumpNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (openForm) setShowForm(true);
+  }, [serviceProp, openForm]);
 
   const sumTotal = jobs.reduce((s, j) => s + j.totalPaise, 0);
   const sumReceived = jobs.reduce((s, j) => s + j.receivedPaise, 0);
@@ -189,7 +190,7 @@ export function ServicesView({ ctx }: { ctx: Ctx }) {
           <Field label="Service">
             <select className="input" value={serviceFilter} onChange={(e) => setServiceFilter(e.target.value)}>
               <option value="All">All Services</option>
-              {profile.services.map((s) => <option key={s} value={s}>{s}</option>)}
+              {jobServices(profile.services).map((s) => <option key={s} value={s}>{s}</option>)}
             </select>
           </Field>
           <Field label="Search customer / mobile">
@@ -265,7 +266,7 @@ export function ServicesView({ ctx }: { ctx: Ctx }) {
           <div className="form-row">
             <Field label="Service">
               <select className="input" value={service} onChange={(e) => { setService(e.target.value); setAgentId(''); }}>
-                {profile.services.map((s) => <option key={s} value={s}>{s}</option>)}
+                {jobServices(profile.services).map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </Field>
             <Field label="Status">

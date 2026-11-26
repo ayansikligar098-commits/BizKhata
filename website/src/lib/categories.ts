@@ -23,7 +23,6 @@ export const CATEGORIES: CategoryDef[] = [
       'Xerox',
       'Printing',
       'Document Work',
-      'Money Transfer',
     ],
     expenseCategories: [
       'Machine Repair',

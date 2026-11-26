@@ -6,14 +6,16 @@ import { auditEntry, nextReceiptNumber, whatsAppLink } from '@/lib/store';
 import type { Job, Method, Receipt } from '@/lib/types';
 import { todayISO, uid } from '@/lib/types';
 import { AmountInput, Btn, Card, Empty, Field, Modal, Stat, formatDate, initials, statusPill, type Ctx } from './ui';
+import { jobServices } from '@/lib/routes';
 import { DocUploader } from './views-services';
 
 /* ================= Customer Profile (page 15) ================= */
 
-export function CustomerProfileView({ ctx }: { ctx: Ctx }) {
+export function CustomerProfileView({ ctx, customerId }: { ctx: Ctx; customerId?: string }) {
   const { state, profile } = ctx;
   const pid = profile.id;
-  const customer = state.customers.find((c) => c.profileId === pid && c.id === ctx.customerId)
+  const id = customerId || ctx.customerId;
+  const customer = state.customers.find((c) => c.profileId === pid && c.id === id)
     || state.customers.find((c) => c.profileId === pid) || null;
   const [tab, setTab] = React.useState<'ledger' | 'jobs' | 'documents' | 'details'>('ledger');
   const [payJob, setPayJob] = React.useState<Job | null>(null);
@@ -23,7 +25,7 @@ export function CustomerProfileView({ ctx }: { ctx: Ctx }) {
   const [showEdit, setShowEdit] = React.useState(false);
   const [error, setError] = React.useState('');
   // add-job form
-  const [service, setService] = React.useState(profile.services[0] || 'Xerox');
+  const [service, setService] = React.useState(jobServices(profile.services)[0] || 'Xerox');
   const [total, setTotal] = React.useState(0);
   const [received, setReceived] = React.useState(0);
   const [method, setMethod] = React.useState<Method>('cash');
@@ -262,7 +264,7 @@ export function CustomerProfileView({ ctx }: { ctx: Ctx }) {
         <Modal title={`Add Job — ${customer.name}`} onClose={() => setShowAddJob(false)}>
           <Field label="Service">
             <select className="input" value={service} onChange={(e) => setService(e.target.value)}>
-              {profile.services.map((s) => <option key={s} value={s}>{s}</option>)}
+              {jobServices(profile.services).map((s) => <option key={s} value={s}>{s}</option>)}
             </select>
           </Field>
           <Field label="Application Reference No. (optional)"><input className="input" value={refNo} onChange={(e) => setRefNo(e.target.value)} /></Field>
@@ -302,10 +304,11 @@ export function CustomerProfileView({ ctx }: { ctx: Ctx }) {
 
 /* ================= Agent Profile (page 18) ================= */
 
-export function AgentProfileView({ ctx }: { ctx: Ctx }) {
+export function AgentProfileView({ ctx, agentId }: { ctx: Ctx; agentId?: string }) {
   const { state, profile } = ctx;
   const pid = profile.id;
-  const agent = state.agents.find((a) => a.profileId === pid && a.id === ctx.agentId)
+  const id = agentId || ctx.agentId;
+  const agent = state.agents.find((a) => a.profileId === pid && a.id === id)
     || state.agents.find((a) => a.profileId === pid) || null;
   const [tab, setTab] = React.useState<'jobs' | 'payments' | 'details'>('jobs');
   const [payJobId, setPayJobId] = React.useState('');

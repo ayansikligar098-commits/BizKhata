@@ -1,0 +1,13 @@
+# Cloudflare Pages redirects — ONLY for user-created ids.
+#
+# Why this file exists: the site is a static export, so every fixed route
+# (/dashboard, /cash-book, /services/pan-card, /reports/income, ...) is its
+# own HTML file in out/ and deep links + refresh work natively — no fallback
+# needed for them. Customer and agent ids, however, are created by the user
+# at runtime, so no static HTML can exist for /customers/<id> or /agents/<id>.
+# These two rewrites serve the list page's HTML (200, URL unchanged) for a
+# direct deep link or refresh; the list page is pathname-aware and renders
+# that customer's / agent's profile when the URL carries an id.
+# A custom 404 is handled by app/not-found.tsx for every other unknown path.
+/customers/*  /customers/index.html  200
+/agents/*  /agents/index.html  200

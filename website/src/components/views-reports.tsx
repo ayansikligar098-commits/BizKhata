@@ -1,5 +1,6 @@
 'use client';
 import React from 'react';
+import { useRouter } from 'next/navigation';
 import { formatINR } from '@/lib/money';
 import { agentPayablePaise, balancesPaise, mtClosingPaise, mtProfitPaise, netProfitPaise, serviceProfitPaise, totalCustomerDuePaise } from '@/lib/accounting';
 import { CATEGORIES, MT_EXPENSE_CATEGORIES } from '@/lib/categories';
@@ -8,14 +9,27 @@ import { t, LANG_OPTIONS } from '@/lib/i18n';
 import type { Lang, Theme } from '@/lib/types';
 import { todayISO } from '@/lib/types';
 import { BarChart, Btn, Card, Empty, Field, Pager, Stat, formatDate, pageSlice, type Ctx } from './ui';
+import { jobServices } from '@/lib/routes';
 
 /* ================= Reports (page 23) ================= */
 
-export function ReportsView({ ctx }: { ctx: Ctx }) {
+export function ReportsView({ ctx, tab: tabProp }: { ctx: Ctx; tab?: 'business' | 'service' | 'customer' | 'agent' | 'mt' | 'expenses' }) {
   const { state, profile } = ctx;
   const pid = profile.id;
   const [period, setPeriod] = React.useState<'today' | 'month' | 'year' | 'all'>('month');
-  const [tab, setTab] = React.useState<'business' | 'service' | 'customer' | 'agent' | 'mt' | 'expenses'>('business');
+  const [tab, setTab] = React.useState<'business' | 'service' | 'customer' | 'agent' | 'mt' | 'expenses'>(tabProp || 'business');
+  const router = useRouter();
+
+  // Route-driven tab: /reports/<type> opens this tab.
+  React.useEffect(() => { if (tabProp) setTab(tabProp); }, [tabProp]);
+
+  function selectTab(k: typeof tab) {
+    setTab(k);
+    // Business / Service-wise / Expenses have their own URLs; Customer,
+    // Agent and Money Transfer tabs live on /reports.
+    const path = k === 'business' ? '/reports' : k === 'service' ? '/reports/service-wise' : k === 'expenses' ? '/reports/expenses' : null;
+    if (path) router.push(path);
+  }
   const jobs = state.jobs.filter((j) => j.profileId === pid);
   const expenses = state.expenses.filter((e) => e.profileId === pid);
   const txns = state.cashTxns.filter((x) => x.profileId === pid);
@@ -92,7 +106,7 @@ export function ReportsView({ ctx }: { ctx: Ctx }) {
 
       <div className="tabs" style={{ marginBottom: 14 }}>
         {([['business', 'Business'], ['service', 'Service-wise'], ['customer', 'Customer'], ['agent', 'Agent'], ['mt', 'Money Transfer'], ['expenses', 'Expenses']] as const).map(([k, label]) => (
-          <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{label}</button>
+          <button key={k} className={tab === k ? 'active' : ''} onClick={() => selectTab(k)}>{label}</button>
         ))}
       </div>
 
@@ -230,7 +244,7 @@ export function DifferenceFinderView({ ctx }: { ctx: Ctx }) {
   const { state, profile } = ctx;
   const pid = profile.id;
   const [scope, setScope] = React.useState<DfScope>('Cash');
-  const [service, setService] = React.useState(profile.services[0] || 'Xerox');
+  const [service, setService] = React.useState(jobServices(profile.services)[0] || 'Xerox');
   const [expected, setExpected] = React.useState('');
   const [result, setResult] = React.useState<{ recorded: number; diff: number; suggestions: { label: string; why: string; amount: number }[] } | null>(null);
 
@@ -301,7 +315,7 @@ export function DifferenceFinderView({ ctx }: { ctx: Ctx }) {
           {scope === 'Service' && (
             <Field label="Service">
               <select className="input" value={service} onChange={(e) => setService(e.target.value)}>
-                {profile.services.map((s) => <option key={s} value={s}>{s}</option>)}
+                {jobServices(profile.services).map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </Field>
           )}
@@ -572,7 +586,7 @@ export function CustomizationView({ ctx }: { ctx: Ctx }) {
 
 /* ================= Settings (page 28) ================= */
 
-export function SettingsView({ ctx }: { ctx: Ctx }) {
+export function SettingsView({ ctx, section }: { ctx: Ctx; section?: string }) {
   const { state, profile } = ctx;
   const lang = profile.language;
   const [name, setName] = React.useState(profile.name);
@@ -583,6 +597,13 @@ export function SettingsView({ ctx }: { ctx: Ctx }) {
   const [geminiKey, setGeminiKey] = React.useState(profile.geminiKey);
   const [msg, setMsg] = React.useState('');
   const [importError, setImportError] = React.useState('');
+
+  // Deep link: /settings/<section> scrolls to that card.
+  React.useEffect(() => {
+    if (!section) return;
+    const el = document.getElementById(`settings-${section}`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [section]);
 
   function update(patch: Partial<typeof profile>, note = 'Settings updated') {
     ctx.mutate((s) => {
@@ -635,14 +656,14 @@ export function SettingsView({ ctx }: { ctx: Ctx }) {
       </Card>
 
       <div className="grid grid-2">
-        <Card title="Business Profiles">
+        <div id="settings-profile"><Card title="Business Profiles">
           <p style={{ color: 'var(--muted)', marginTop: 0 }}>Manage your businesses — up to 3 separate profiles.</p>
           <p><strong>{profile.name}</strong> — {profile.category}</p>
           <p className="field-hint">{state.profiles.map((p) => p.name).join(' • ')}</p>
           <Btn kind="secondary" onClick={() => ctx.go?.('customize')}>Manage Profiles</Btn>
-        </Card>
+        </Card></div>
 
-        <Card title="Business Information">
+        <div id="settings-business"><Card title="Business Information">
           <div className="form-row">
             <Field label="Business Name"><input className="input" value={name} onChange={(e) => setName(e.target.value)} /></Field>
             <Field label="Mobile"><input className="input" value={mobile} onChange={(e) => setMobile(e.target.value)} inputMode="tel" /></Field>
@@ -654,9 +675,9 @@ export function SettingsView({ ctx }: { ctx: Ctx }) {
           </div>
           <Btn onClick={saveBusiness}>Save Business Info</Btn>
           {msg && <p className="success">{msg}</p>}
-        </Card>
+        </Card></div>
 
-        <Card title={t(lang, 'language')}>
+        <div id="settings-language"><Card title={t(lang, 'language')}>
           <div className="lang-pick">
             {LANG_OPTIONS.map((o) => (
               <button key={o.code} onClick={() => update({ language: o.code as Lang }, `Language changed to ${o.label}`)}>
@@ -664,7 +685,7 @@ export function SettingsView({ ctx }: { ctx: Ctx }) {
               </button>
             ))}
           </div>
-        </Card>
+        </Card></div>
 
         <Card title={t(lang, 'theme')}>
           <div className="btn-row">
@@ -676,7 +697,7 @@ export function SettingsView({ ctx }: { ctx: Ctx }) {
           </div>
         </Card>
 
-        <Card title="Receipt Settings">
+        <div id="settings-receipt"><Card title="Receipt Settings">
           <Field label="Receipt Number Prefix">
             <input className="input" value={profile.receiptPrefix} onChange={(e) => update({ receiptPrefix: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '') || 'BK' }, 'Receipt prefix changed')} />
           </Field>
@@ -684,7 +705,7 @@ export function SettingsView({ ctx }: { ctx: Ctx }) {
           <div className="btn-row">
             <Btn kind="secondary" onClick={() => ctx.go?.('receipt-generator')}>Open Receipt Generator</Btn>
           </div>
-        </Card>
+        </Card></div>
 
         <Card title="Service Settings">
           <p style={{ color: 'var(--muted)', marginTop: 0 }}>Manage services &amp; rates for this profile.</p>
@@ -735,7 +756,7 @@ export function SettingsView({ ctx }: { ctx: Ctx }) {
           {importError && <p className="error">{importError}</p>}
         </Card>
 
-        <Card title="Security & Privacy">
+        <div id="settings-security"><Card title="Security & Privacy">
           <p style={{ color: 'var(--muted)', marginTop: 0 }}>
             App lock (mobile + PIN) protects this device. Data is local-first — nothing is
             uploaded anywhere. Gemini key, if added, stays on this device only.
@@ -744,7 +765,7 @@ export function SettingsView({ ctx }: { ctx: Ctx }) {
             <Btn kind="secondary" onClick={() => ctx.go?.('audit')}>Audit Log →</Btn>
             <Btn kind="secondary" onClick={() => ctx.go?.('recycle')}>Recycle Bin →</Btn>
           </div>
-        </Card>
+        </Card></div>
 
         <Card title="About BizKhata">
           <p>BizKhata v1.0 — free business accounting for CSC Centers and small businesses.</p>

@@ -6,6 +6,7 @@ import { auditEntry, exportCSV } from '@/lib/store';
 import type { Agent, Equipment, Expense, MaintenanceRecord, Method } from '@/lib/types';
 import { todayISO, uid } from '@/lib/types';
 import { AmountInput, Btn, Card, Empty, Field, Modal, Pager, Stat, formatDate, initials, pageSlice, type Ctx } from './ui';
+import { jobServices } from '@/lib/routes';
 
 export function AgentsView({ ctx }: { ctx: Ctx }) {
   const { state, profile } = ctx;
@@ -316,7 +317,7 @@ export function ExpensesView({ ctx }: { ctx: Ctx }) {
             <Field label="Service (for profit)">
               <select className="input" value={service} onChange={(e) => setService(e.target.value)}>
                 <option value="General">General (shared)</option>
-                {profile.services.map((s) => <option key={s} value={s}>{s}</option>)}
+                {jobServices(profile.services).map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </Field>
           </div>
