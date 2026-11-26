@@ -216,6 +216,95 @@ if not mirror.exists():
     fails.append("docs/ai_assistant_mirror.py missing (JVM-free accuracy measurement)")
 
 
+# 13. UPDATE 13 — multilingual AI (22 scheduled languages + English).
+multi = MAIN / "domain/Multilingual.kt"
+if not multi.exists():
+    fails.append("domain/Multilingual.kt missing (UPDATE 13 language layer)")
+else:
+    multi_src = multi.read_text()
+    # All 23 language codes + Hinglish + Unknown in the enum.
+    for code in ["ENGLISH", "HINDI", "GUJARATI", "MARATHI", "BENGALI", "PUNJABI",
+                "TAMIL", "TELUGU", "KANNADA", "MALAYALAM", "ODIA", "ASSAMESE",
+                "URDU", "SANSKRIT", "KASHMIRI", "KONKANI", "NEPALI", "SINDHI",
+                "MANIPURI", "BODO", "DOGRI", "MAITHILI", "SANTALI", "HINGLISH"]:
+        if code not in multi_src:
+            fails.append(f"Multilingual.kt missing AiLanguage.{code}")
+    for needle in ["fun detectLanguage", "fun canonicalise", "fun asciiDigits",
+                   "object MultilingualReplies", "romanVariants", "nativeTokens",
+                   "numberWords", "detectionKeywords"]:
+        if needle not in multi_src:
+            fails.append(f"Multilingual.kt missing: {needle}")
+    # Combining marks must be in the token regexes, or Indic words with
+    # vowel signs (कैश, मिळाले, টাকা) never match any vocabulary key.
+    if "\\p{M}" not in multi_src:
+        fails.append("Multilingual.kt token regexes lack \\p{M} (combining marks)")
+    # "pan" must never map to "bhi" — it is the PAN Card service.
+    if '"pan" to "bhi"' in multi_src:
+        fails.append("Multilingual.kt maps 'pan' to 'bhi' (destroys PAN Card)")
+    # Reply templates: 15 languages x 12 keys, each present.
+    template_langs = ["HINGLISH", "ENGLISH", "HINDI", "GUJARATI", "MARATHI",
+                      "BENGALI", "PUNJABI", "TAMIL", "TELUGU", "KANNADA",
+                      "MALAYALAM", "ODIA", "ASSAMESE", "URDU", "NEPALI"]
+    template_keys = ["previewHeader", "totalLine", "askMode", "askService",
+                     "askAmount", "askAgent", "askCustomer", "askCommission",
+                     "askDirection", "refund", "kal", "cancelled"]
+    for lang in template_langs:
+        block = multi_src.split(f"AiLanguage.{lang} to mapOf(")
+        if len(block) < 2:
+            fails.append(f"MultilingualReplies missing template block for {lang}")
+            continue
+        seg = block[1].split("AiLanguage.")[0]
+        for key in template_keys:
+            if f'"{key}"' not in seg:
+                fails.append(f"MultilingualReplies {lang} missing template key {key!r}")
+ai_src = (MAIN / "domain/AiAssistant.kt").read_text()
+for needle in ["Multilingual.canonicalise", "Multilingual.detectLanguage",
+               "MultilingualReplies.get", "Multilingual.isAffirmative",
+               "Multilingual.isNegative"]:
+    if needle not in ai_src:
+        fails.append(f"AiAssistant.kt not wired to language layer: {needle}")
+if 'Regex("\\\\bupi\\\\b")' not in ai_src and "bupi" not in ai_src:
+    fails.append("AiAssistant.kt detectMode still uses bare contains(\"upi\") — 'rupiya' fakes UPI")
+if "lastLanguage" not in ai_src:
+    fails.append("AiAssistant.kt AiConversationContext missing lastLanguage (UPDATE 13)")
+if "jama kar" not in ai_src:
+    fails.append("AiAssistant.kt missing collect-a-due (jama kar) branch (UPDATE 13)")
+bk_src = (MAIN / "domain/BusinessKnowledge.kt").read_text()
+if "AiAssistantParser.normalise(text)" not in bk_src:
+    fails.append("BusinessKnowledge.parsePeriod does not normalise (multilingual periods, UPDATE 13)")
+settings_store_src = (MAIN / "data/SettingsStore.kt").read_text()
+for needle in ["aiLanguagePref", "setAiLanguagePref", "AI_LANGUAGE_PREF"]:
+    if needle not in settings_store_src:
+        fails.append(f"SettingsStore missing: {needle} (UPDATE 13 manual AI language)")
+settings_screen_src = (MAIN / "ui/settings/SettingsScreen.kt").read_text()
+for needle in ["AI Assistant Language", "showAiLanguage", "aiLanguagePref", "onAiLanguagePref"]:
+    if needle not in settings_screen_src:
+        fails.append(f"SettingsScreen missing: {needle} (UPDATE 13)")
+if "aiLanguagePref" not in main_act:
+    fails.append("MainActivity does not pass aiLanguagePref to SettingsScreen (UPDATE 13)")
+voice_src = (MAIN / "ui/chatbot/VoiceInput.kt").read_text()
+if "startListening(languageTag" not in voice_src:
+    fails.append("VoiceInput.startListening does not take a language tag (UPDATE 13)")
+if "voiceLanguageTag" not in (MAIN / "ui/chatbot/ChatbotViewModel.kt").read_text():
+    fails.append("ChatbotViewModel missing voiceLanguageTag (UPDATE 13)")
+if "voiceLanguageTag" not in (MAIN / "ui/chatbot/ChatbotScreen.kt").read_text():
+    fails.append("ChatbotScreen does not use voiceLanguageTag for the mic (UPDATE 13)")
+cloud_src = (MAIN / "domain/CloudAiClient.kt").read_text()
+if "Indian language" not in cloud_src:
+    fails.append("CloudAiClient prompts do not mention Indian languages (UPDATE 13)")
+if not (TEST / "MultilingualAiTest.kt").exists():
+    fails.append("MultilingualAiTest.kt missing (UPDATE 13 test suite)")
+else:
+    ml_test = (TEST / "MultilingualAiTest.kt").read_text()
+    for needle in ["allLanguagesIncome", "detectionPerLanguage", "accuracySuite_reportsMeasuredAccuracyPerLanguage"]:
+        if needle not in ml_test:
+            fails.append(f"MultilingualAiTest.kt missing: {needle}")
+mirror_src = mirror.read_text()
+for needle in ["LANG_INCOME", "LANGUAGE-WISE ACCURACY", "detect_language", "canonicalise"]:
+    if needle not in mirror_src:
+        fails.append(f"ai_assistant_mirror.py missing multilingual piece: {needle}")
+
+
 # 11. Daily Business hub checks
 db_screen = MAIN / "ui/dailybusiness/DailyBusinessScreen.kt"
 db_vm = MAIN / "ui/dailybusiness/DailyBusinessViewModel.kt"

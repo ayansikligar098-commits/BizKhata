@@ -42,7 +42,10 @@ enum class AiPeriod { TODAY, YESTERDAY, LAST_7_DAYS, THIS_MONTH, LAST_MONTH, LAS
 data class PeriodRange(val label: String, val startDay: Long, val endDay: Long)
 
 fun parsePeriod(text: String, today: Long): AiPeriod? {
-    val q = text.lowercase(Locale.ENGLISH)
+    // UPDATE 13: normalise first — Gujarati "chhella 7 divas", Marathi
+    // "gata mahina", Tamil "indha maasam" etc. canonicalise to the
+    // Hinglish tokens matched below, so periods work in every language.
+    val q = AiAssistantParser.normalise(text)
     return when {
         q.contains("last 3 month") || q.contains("pichhle 3 mahine") || q.contains("pichle 3 mahine") ||
             q.contains("last three month") -> AiPeriod.LAST_3_MONTHS
@@ -294,7 +297,7 @@ object BusinessKnowledge {
         q.contains("profit") || q.contains("munafa") || q.contains("faayda") || q.contains("fayda")
 
     private fun isBalance(q: String) =
-        q.contains("balance") || q.contains("cash") || q.contains("upi") ||
+        q.contains("balance") || q.contains("cash") || Regex("\\bupi\\b").containsMatchIn(q) ||
             q.contains("opening") || q.contains("closing") || q.contains("kitne paise")
 
     private fun isExpenseQuestion(q: String) =
@@ -442,10 +445,11 @@ object BusinessKnowledge {
                 deepLinkRoute = "cash_book", deepLinkLabel = "Cash Book kholo"
             )
         }
-        if (q.contains("cash") && !q.contains("upi")) {
+        val hasUpi = Regex("\\bupi\\b").containsMatchIn(q)
+        if (q.contains("cash") && !hasUpi) {
             return KnowledgeAnswer("Cash balance: ${formatPaise(cash)}.", deepLinkRoute = "cash_book", deepLinkLabel = "Cash Book kholo")
         }
-        if (q.contains("upi") && !q.contains("cash")) {
+        if (hasUpi && !q.contains("cash")) {
             return KnowledgeAnswer("UPI balance: ${formatPaise(upi)}.", deepLinkRoute = "upi_book", deepLinkLabel = "UPI Book kholo")
         }
         val diff = cash - upi
@@ -1027,7 +1031,7 @@ object AiNavigation {
         if (!open) return null
         return when {
             q.contains("cash book") -> "cash_book" to "Cash Book"
-            q.contains("upi") -> "upi_book" to "UPI Book"
+            Regex("\\bupi\\b").containsMatchIn(q) -> "upi_book" to "UPI Book"
             q.contains("money transfer") -> "money_transfer" to "Money Transfer"
             q.contains("daily") || q.contains("dhandha") -> "daily_business" to "Daily Business"
             q.contains("customer khata") || q.contains("khata") -> "khata" to "Customer Khata"

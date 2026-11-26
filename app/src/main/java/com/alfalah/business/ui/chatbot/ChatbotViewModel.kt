@@ -10,6 +10,7 @@ import com.alfalah.business.data.repository.BusinessRepository
 import com.alfalah.business.domain.AccountingEngine
 import com.alfalah.business.domain.AiAssistantParser
 import com.alfalah.business.domain.AiFeatures
+import com.alfalah.business.domain.AiLanguage
 import com.alfalah.business.domain.AiNavigation
 import com.alfalah.business.domain.AppHelpKnowledge
 import com.alfalah.business.domain.BuiltInChatbotResponder
@@ -21,6 +22,8 @@ import com.alfalah.business.domain.AgentOwed
 import com.alfalah.business.domain.JobStatus
 import com.alfalah.business.domain.KnowledgeSnapshot
 import com.alfalah.business.domain.LastKnowledge
+import com.alfalah.business.domain.Multilingual
+import com.alfalah.business.domain.MultilingualReplies
 import com.alfalah.business.domain.PaymentMode
 import com.alfalah.business.domain.ServiceIncome
 import com.alfalah.business.domain.ServiceType
@@ -134,6 +137,30 @@ class ChatbotViewModel(
     private val _aiEnabled = MutableStateFlow(false)
     val aiEnabled: StateFlow<Boolean> = _aiEnabled
 
+    /** Voice recogniser language tag (UPDATE 13): follows the language
+     *  the user is chatting in — detected per message, or the manual
+     *  AI-language preference from Settings when one is set. The chat
+     *  screen passes this to VoiceInputHelper.startListening(). */
+    private val _voiceLanguageTag = MutableStateFlow("hi-IN")
+    val voiceLanguageTag: StateFlow<String> = _voiceLanguageTag
+
+    /** Manual AI-language preference ("AUTO" or an AiLanguage code). */
+    private val _aiLanguagePref = MutableStateFlow("AUTO")
+    val aiLanguagePref: StateFlow<String> = _aiLanguagePref
+
+    /** Language the assistant currently replies in (UPDATE 13): the
+     *  manual Settings preference wins; otherwise the detected language
+     *  of this message; otherwise the last language of the conversation.
+     *  A manual preference never forces a choice before chatting — it is
+     *  only read when the user has set one. */
+    private fun effectiveLanguage(text: String): AiLanguage {
+        val preferred = AiLanguage.fromCode(_aiLanguagePref.value.takeIf { it != "AUTO" })
+        if (preferred != AiLanguage.UNKNOWN) return preferred
+        val detected = Multilingual.detectLanguage(text)
+        return if (detected.language != AiLanguage.UNKNOWN) detected.language
+            else context.lastLanguage
+    }
+
     private val _snapshot = MutableStateFlow(BusinessSnapshot())
     val snapshot: StateFlow<BusinessSnapshot> = _snapshot
 
@@ -188,6 +215,12 @@ class ChatbotViewModel(
 
     init {
         viewModelScope.launch { settings.aiKey.collect { key -> _aiEnabled.value = key.isNotBlank() } }
+        viewModelScope.launch {
+            settings.aiLanguagePref.collect { pref ->
+                _aiLanguagePref.value = pref
+                if (pref != "AUTO") _voiceLanguageTag.value = AiLanguage.fromCode(pref).bcp47
+            }
+        }
         viewModelScope.launch {
             val sessions = chatHistory.loadSessions(profileId)
             _allSessions.value = sessions
@@ -389,6 +422,12 @@ class ChatbotViewModel(
         val snap = _knowledge.value
         val agents = snap.agents.map { it.name }
         val customers = snap.customers.map { it.name }.distinct()
+        // UPDATE 13: track the language of this message (detected, or the
+        // manual preference) — replies and voice input follow it, and a
+        // mid-conversation switch is picked up on the next message.
+        val lang = effectiveLanguage(text)
+        context = context.copy(lastLanguage = lang)
+        if (_aiLanguagePref.value == "AUTO") _voiceLanguageTag.value = lang.bcp47
 
         // --- 1. A pending financial action: Haan / Nahi / follow-up amount.
         pendingAction?.let { pending ->
@@ -400,7 +439,7 @@ class ChatbotViewModel(
             if (AiAssistantParser.isNegative(norm)) {
                 pendingAction = null
                 _pendingPreviewId.value = null
-                append(ChatMessage(text = "Theek hai — ye entry save nahi ki gayi. Kuch bhi change nahi hua hai.", fromUser = false))
+                append(ChatMessage(text = MultilingualReplies.get(lang, "cancelled"), fromUser = false))
                 return
             }
             // "Aur 200 UPI bhi add kar do" — append to the pending entries.
@@ -414,7 +453,7 @@ class ChatbotViewModel(
                     pending.previewMessageId,
                     ChatMessage(
                         id = pending.previewMessageId,
-                        text = AiAssistantParser.previewDaily(merged.entries),
+                        text = AiAssistantParser.previewDaily(merged.entries, lang),
                         fromUser = false,
                         preview = previewFor(merged),
                         note = "Confirm karein to save karunga — abhi kuch save nahi hua hai."

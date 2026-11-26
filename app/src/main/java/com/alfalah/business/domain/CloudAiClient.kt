@@ -62,7 +62,9 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
             "https://generativelanguage.googleapis.com/v1beta/models/" +
                 AiFeatures.AI_MODEL + ":generateContent"
         val prompt = "You are BizKhata AI Assistant, a shop accounting helper. " +
-            "Answer in the SAME language as the question (Hinglish, English or Hindi). " +
+            "Answer in the SAME language and style as the question — it may be Hinglish, English, Hindi, " +
+            "Gujarati, Marathi, Bengali, Punjabi, Tamil, Telugu, Kannada, Malayalam, Odia, Assamese, Urdu, " +
+            "Nepali or another Indian language, in native script or Roman letters. Reply naturally in that language. " +
             "Use ONLY the facts below. NEVER invent a number, a name or a record. " +
             "If the facts say there is no record, say so plainly. " +
             "Keep the answer short and simple, in plain words a shopkeeper understands.\n\n" +
@@ -163,6 +165,8 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
                     "https://generativelanguage.googleapis.com/v1beta/models/" +
                         AiFeatures.AI_MODEL + ":generateContent"
                 val prompt = "You are BizKhata AI Assistant. The user wrote a business message. " +
+                    "The message may be in any Indian language, in native script or Romanized " +
+                    "(Hinglish, Roman Gujarati, Roman Tamil, and so on) — understand the meaning, not just the script. " +
                     "Reply with ONLY a JSON object, no other text. Keys: kind (one of " +
                     "daily_income, expense, agent_payment, money_transfer, internal_transfer, " +
                     "customer_payment, question, help, unknown), service (Xerox, Printing, " +

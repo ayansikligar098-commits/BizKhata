@@ -29,6 +29,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.alfalah.business.data.SettingsStore
 import com.alfalah.business.data.entity.BusinessProfileEntity
+import com.alfalah.business.domain.AiLanguage
 import com.alfalah.business.domain.AppLanguage
 import com.alfalah.business.domain.Branding
 import com.alfalah.business.navigation.Routes
@@ -55,7 +56,9 @@ fun SettingsScreen(
     onRemovePin: () -> Unit,
     aiKey: String = "",
     onSaveAiKey: (String) -> Unit = {},
-    onClearAiKey: () -> Unit = {}
+    onClearAiKey: () -> Unit = {},
+    aiLanguagePref: String = "AUTO",
+    onAiLanguagePref: (String) -> Unit = {}
 ) {
     var showLanguage by remember { mutableStateOf(false) }
     var showTheme by remember { mutableStateOf(false) }
@@ -64,6 +67,7 @@ fun SettingsScreen(
     var showReceiptSettings by remember { mutableStateOf(false) }
     var showSecurity by remember { mutableStateOf(false) }
     var showAiKey by remember { mutableStateOf(false) }
+    var showAiLanguage by remember { mutableStateOf(false) }
     var aiKeyInput by remember { mutableStateOf("") }
 
     LazyColumn(
@@ -100,6 +104,13 @@ fun SettingsScreen(
                 if (aiKey.isNotBlank()) "AI summary ON — key saved (tap to change / remove)"
                 else "AI summary OFF — tap to add your AI key"
             ) { aiKeyInput = ""; showAiKey = true }
+            // UPDATE 13: manual AI language. "Auto" (default) detects the
+            // language of every message — the user is never forced to
+            // pick one before chatting. A manual choice fixes the reply
+            // language and the voice recogniser language instead.
+            val aiLangLabel = if (aiLanguagePref == "AUTO") "Auto — detects your language"
+                else AiLanguage.fromCode(aiLanguagePref).displayName
+            SettingsRow("AI Assistant Language", "Current: $aiLangLabel") { showAiLanguage = true }
             SettingsRow("Audit Log", "Old → new values for every change") { onOpen(Routes.AUDIT_LOG) }
             SettingsRow("Recycle Bin", "Deleted jobs — restore them here") { onOpen(Routes.RECYCLE_BIN) }
             SettingsRow("Data & Backup", "CSV export, local backup") { onOpen(Routes.REPORTS) }
@@ -125,6 +136,34 @@ fun SettingsScreen(
             },
             confirmButton = {},
             dismissButton = { TextButton(onClick = { showLanguage = false }) { Text("Cancel") } }
+        )
+    }
+
+    if (showAiLanguage) {
+        AlertDialog(
+            onDismissRequest = { showAiLanguage = false },
+            title = { Text("AI Assistant Language") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "Auto detects the language of every message — Hindi, Gujarati, Tamil, Hinglish, " +
+                            "Romanized typing, mixed sentences — and replies in the same language. " +
+                            "Pick one language to fix it instead (also sets the voice input language)."
+                    )
+                    Button(
+                        onClick = { onAiLanguagePref("AUTO"); showAiLanguage = false },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text(if (aiLanguagePref == "AUTO") "✓ Auto (detect from message)" else "Auto (detect from message)") }
+                    AiLanguage.values().filter { it != AiLanguage.UNKNOWN }.forEach { lang ->
+                        Button(
+                            onClick = { onAiLanguagePref(lang.code); showAiLanguage = false },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text(if (aiLanguagePref == lang.code) "✓ ${lang.displayName}" else lang.displayName) }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { showAiLanguage = false }) { Text("Cancel") } }
         )
     }
 

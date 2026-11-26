@@ -6,9 +6,14 @@ import java.time.ZoneOffset
 
 /**
  * BizKhata AI Business Assistant — language understanding + structured
- * actions (UPDATE 9, 2026-11-26). This file is PURE Kotlin: no Android,
- * no Room, no network — so every rule here is unit-testable (see
- * AiAssistantTest) and mirrored in docs/ai_assistant_mirror.py.
+ * actions (UPDATE 9, 2026-11-26; UPDATE 13 multilingual, 2026-11-26).
+ * This file is PURE Kotlin: no Android, no Room, no network — so every
+ * rule here is unit-testable (see AiAssistantTest, MultilingualAiTest)
+ * and mirrored in docs/ai_assistant_mirror.py. UPDATE 13: every message
+ * is first canonicalised by [Multilingual] (all 22 scheduled languages
+ * + English, native script + Romanized + mixed), then this pipeline
+ * runs unchanged; replies use [MultilingualReplies] in the user's
+ * language.
  *
  * PIPELINE (the AI never touches the database directly):
  *   user text → [AiAssistantParser.parse] → [AiParseResult]
@@ -52,7 +57,11 @@ object AiAssistantParser {
         val lastKnowledgePeriod: AiPeriod? = null,
         val lastKnowledgeKind: String? = null,
         val lastCustomerName: String? = null,
-        val lastAgentName: String? = null
+        val lastAgentName: String? = null,
+        /** Language the user last wrote in (UPDATE 13) — replies and the
+         *  voice recogniser follow it until the user switches language
+         *  mid-conversation, which re-detects automatically. */
+        val lastLanguage: AiLanguage = AiLanguage.HINGLISH
     )
 
     // ------------------------------------------------------------------
@@ -168,12 +177,9 @@ object AiAssistantParser {
 
     // ------------------------------------------------------------------
     // Normalisation: Devanagari digits, Hindi number words, punctuation.
+    // UPDATE 13: digit conversion for ALL Indic scripts now lives in
+    // [Multilingual.asciiDigits] (called from normalise via canonicalise).
     // ------------------------------------------------------------------
-    private val devanagariDigits = mapOf(
-        '०' to '0', '१' to '1', '२' to '2', '३' to '3', '४' to '4',
-        '५' to '5', '६' to '6', '७' to '7', '८' to '8', '९' to '9'
-    )
-
     private val hindiOnes = mapOf(
         "ek" to 1L, "do" to 2L, "teen" to 3L, "chaar" to 4L, "paanch" to 5L,
         "chhe" to 6L, "saat" to 7L, "aath" to 8L, "nau" to 9L, "das" to 10L,
@@ -181,15 +187,20 @@ object AiAssistantParser {
         "sau" to 100L, "hazaar" to 1000L
     )
 
-    /** Normalise digits + lower-case + collapse whitespace. Keeps the
-     *  original words (service/mode keywords are matched on this form). */
+    /** Normalise digits + lower-case + collapse whitespace. UPDATE 13:
+     *  the first step is [Multilingual.canonicalise] — every supported
+     *  language, script and Romanized spelling maps to the canonical
+     *  Hinglish tokens below, so the rest of this file never sees a
+     *  Gujarati "થયા", a Tamil "வந்தது" or a Bengali "টাকা" — it sees
+     *  "hue", "aaya" and "rupaye". Keeps the original words (service /
+     *  mode keywords are matched on this form). */
     fun normalise(text: String): String {
-        var out = text.map { devanagariDigits[it] ?: it }.joinToString("")
-        out = out.lowercase(java.util.Locale.ENGLISH)
-            .replace("₹", " rs ").replace("रुपये", " rupaye").replace("रुपए", " rupaye")
-            .replace("रु.", " rs ").replace("रु", " rs ")
+        var out = Multilingual.canonicalise(text)
+        out = out.replace("₹", " rs ")
         // Hindi word-numbers -> digits ("teen sau" -> "300"), so every
         // amount is a digit hit for the positional parser below.
+        // (Multilingual already converted the cross-language equivalents;
+        // these stay for the Hindi forms it also covers.)
         for ((word, value) in hindiOnes) {
             out = out.replace(Regex("\\b$word\\s+sau\\b"), (value * 100).toString())
             out = out.replace(Regex("\\b$word\\s+hazaar\\b"), (value * 1000).toString())
@@ -276,7 +287,10 @@ object AiAssistantParser {
 
     fun detectMode(text: String): PaymentMode? = when {
         text.contains("cash") || text.contains("nagad") || text.contains("nakad") -> PaymentMode.CASH
-        text.contains("upi") || text.contains("online") || text.contains("gpay") ||
+        // "upi" needs a word boundary: "rupiya" contains "upi" as a
+        // substring, and must NOT read as a UPI payment (UPDATE 13 —
+        // this misread Gujarati "rupiya" messages as UPI).
+        Regex("\\bupi\\b").containsMatchIn(text) || text.contains("online") || text.contains("gpay") ||
             text.contains("google pay") || text.contains("phonepe") || text.contains("paytm") ||
             text.contains("bhim") -> PaymentMode.UPI
         else -> null
@@ -336,6 +350,14 @@ object AiAssistantParser {
     ): AiParseResult {
         val q = normalise(rawText)
         if (q.isEmpty()) return AiParseResult.Unknown
+        // UPDATE 13: detect the message's language (script + keywords,
+        // Romanized included) and answer in it. A fresh detection wins
+        // — mid-conversation switching just works; when the message
+        // carries no language signal (e.g. a bare "300"), the last
+        // language from the conversation context is kept.
+        val detected = Multilingual.detectLanguage(rawText)
+        val lang = if (detected.language != AiLanguage.UNKNOWN) detected.language
+            else context.lastLanguage
 
         // --- App help: "kaise …?" / "how to …?" / "kahan …?" -------------
         val help = detectHelp(q)
@@ -347,8 +369,7 @@ object AiAssistantParser {
         // --- Refund: a REVERSAL, never an ordinary expense ---------------
         if (q.contains("refund") || q.contains("wapas") || q.contains("return")) {
             return AiParseResult.Clarify(
-                "Refund kis entry ka hai? Kaunsi service / kitne rupaye / Cash ya UPI — " +
-                    "refund ko main wapas (reversal) ki tarah record karunga, kharcha nahi.",
+                MultilingualReplies.get(lang, "refund"),
                 missing = listOf("refund entry", "amount", "mode")
             )
         }
@@ -365,8 +386,7 @@ object AiAssistantParser {
         val dayEpoch = context.dayEpoch
         if (Regex("\\bkal\\b").containsMatchIn(q)) {
             return AiParseResult.Clarify(
-                "\"Kal\" se aapka matlab yesterday (pichhla din) hai ya tomorrow (aane wala din)? " +
-                    "Date confirm karein, phir main entry bana dunga.",
+                MultilingualReplies.get(lang, "kal"),
                 missing = listOf("date")
             )
         }
@@ -382,7 +402,7 @@ object AiAssistantParser {
                 q.contains("cash se upi") || q.contains("cash to upi") || q.contains("cash -> upi") -> PaymentMode.CASH
                 q.contains("upi se cash") || q.contains("upi to cash") -> PaymentMode.UPI
                 else -> return AiParseResult.Clarify(
-                    "Transfer kis taraf hua — Cash se UPI, ya UPI se Cash?",
+                    MultilingualReplies.get(lang, "askDirection"),
                     missing = listOf("direction")
                 )
             }
@@ -403,38 +423,64 @@ object AiAssistantParser {
             (q.contains("transfer") && q.contains("commission")) ||
             q.contains("transfer kiya") || q.contains("transfer kara")
         ) {
-            return parseMoneyTransfer(q, context)
+            return parseMoneyTransfer(q, context, lang)
         }
 
         // --- Agent payment: "Agent Ramesh ko 500 diye" -------------------
-        if (q.contains("agent")) return parseAgentPayment(q, context, knownAgents)
+        if (q.contains("agent")) return parseAgentPayment(q, context, knownAgents, lang)
 
         // --- Expense: "… kharcha hua / kharch hue" -----------------------
         if (q.contains("kharch") || q.contains("expense") || q.contains("kharach")) {
-            return parseExpense(q, context)
+            return parseExpense(q, context, lang)
+        }
+
+        // --- Collect a due: "Rahul ka baki 300 jama kar" — this is a
+        //     customer PAYMENT (money coming in), not a new due record.
+        //     It must be tried BEFORE the due branch below, which would
+        //     otherwise record the same words as fresh udhaar.
+        if (q.contains("jama kar") || q.contains("jama karo")) {
+            val collected = parseCustomerPayment(q, context, knownCustomers, lang)
+            if (collected != null) return collected
+            val amt = mainAmount(q)
+            if (amt != null) {
+                return AiParseResult.Clarify(
+                    MultilingualReplies.get(
+                        lang, "askCustomer",
+                        "amount" to formatRupees(rupeesToPaise(amt))
+                    ),
+                    missing = listOf("customer")
+                )
+            }
         }
 
         // --- Customer owes money — NEVER income ---------------------------
         if ((q.contains("due") || q.contains("udhaar") || q.contains("udhar") ||
-                q.contains("baki hai") || q.contains("baaki") || q.contains("lena hai")) &&
+                q.contains("pending") || q.contains("baki hai") || q.contains("baaki") ||
+                q.contains("lena hai")) &&
             mainAmount(q) != null
         ) {
-            return parseCustomerDue(q, context, knownCustomers)
+            return parseCustomerDue(q, context, knownCustomers, lang)
         }
 
         // --- Add a customer ----------------------------------------------
         if ((q.contains("customer") || q.contains("grahak")) &&
             (q.contains("add") || q.contains("naya") || q.contains("new"))
         ) {
-            return parseAddCustomer(q, context)
+            return parseAddCustomer(q, context, lang)
         }
 
         // --- Customer payment received: "<name> ne 500 diye / jama kiye" --
-        val customerPayment = parseCustomerPayment(q, context, knownCustomers)
+        val customerPayment = parseCustomerPayment(q, context, knownCustomers, lang)
         if (customerPayment != null) return customerPayment
 
         // --- Daily income entries (the most important path) --------------
-        if (hasIncomeSignal(q)) return parseDailyEntries(q, context)
+        // A bare "Xerox 300 cash" (no verb — common in quick typing and
+        // in voice-to-text output) is still an entry, as long as no known
+        // customer name appears (that would make it a job payment, not a
+        // walk-in entry, and must not be guessed).
+        val bareEntry = detectService(q) != null && mainAmount(q) != null && detectMode(q) != null &&
+            knownCustomers.none { q.contains(it.lowercase()) }
+        if (hasIncomeSignal(q) || bareEntry) return parseDailyEntries(q, context, lang)
 
         return AiParseResult.Unknown
     }
@@ -448,7 +494,9 @@ object AiAssistantParser {
         if (!how) return null
         return when {
             q.contains("cash book") -> "cash_book"
-            q.contains("upi") -> "upi_book"
+            // Word boundary: "rupiya" contains "upi" and must not route
+            // a help question to the UPI Book (UPDATE 13).
+            Regex("\\bupi\\b").containsMatchIn(q) -> "upi_book"
             q.contains("customer") && (q.contains("add") || q.contains("khata")) -> "add_customer"
             q.contains("agent") -> "agent_payment"
             q.contains("receipt") || q.contains("rasid") || q.contains("bill") -> "receipt"
@@ -493,12 +541,14 @@ object AiAssistantParser {
             q.contains("aaye") || q.contains("aaya") || q.contains("collection") ||
             q.contains("kamaye") || q.contains("kamaya") || q.contains("income") ||
             q.contains("earning") || q.contains("bikri") || q.contains("sale") ||
-            q.contains("add kar") || q.contains("entry")
+            q.contains("add kar") || q.contains("entry") || q.contains("received")
 
     private fun isInternalTransfer(q: String): Boolean {
-        val both = q.contains("cash") && q.contains("upi")
-        return both && (q.contains("transfer") || q.contains("badla") || q.contains("se") ||
-            q.contains("to") || q.contains("->"))
+        val both = q.contains("cash") && Regex("\\bupi\\b").containsMatchIn(q)
+        // Word boundaries: "total" contains "to", and "se" is a substring
+        // of many words — a bare contains() misread multi-entry messages
+        // ("Xerox 300 cash, 200 UPI total hua") as internal transfers.
+        return both && Regex("\\b(transfer|badla|se|to)\\b").containsMatchIn(q)
     }
 
     // ------------------------------------------------------------------
@@ -525,7 +575,11 @@ object AiAssistantParser {
         }.toList()
     }
 
-    private fun parseDailyEntries(q: String, context: AiConversationContext): AiParseResult {
+    private fun parseDailyEntries(
+        q: String,
+        context: AiConversationContext,
+        lang: AiLanguage = AiLanguage.HINGLISH
+    ): AiParseResult {
         // Positional parsing: every money amount starts one entry. The
         // service/mode for an entry are the keywords around ITS amount
         // (service usually before it — "Xerox 300"; mode usually after
@@ -534,7 +588,7 @@ object AiAssistantParser {
         val hits = findMoneyHits(q)
         if (hits.isEmpty()) {
             return AiParseResult.Clarify(
-                "Kaunsi service aur kitne rupaye? Misal: \"Aaj Xerox ke 300 rupaye cash hue\".",
+                MultilingualReplies.get(lang, "askAmount"),
                 missing = listOf("service", "amount")
             )
         }
@@ -581,39 +635,45 @@ object AiAssistantParser {
         }
         if (entries.isEmpty()) {
             return AiParseResult.Clarify(
-                "Kaunsi service aur kitne rupaye? Misal: \"Aaj Xerox ke 300 rupaye cash hue\".",
+                MultilingualReplies.get(lang, "askAmount"),
                 missing = listOf("service", "amount")
             )
         }
         if (missingService) {
             return AiParseResult.Clarify(
-                "Kaunsi service ki entry hai — Xerox, Printing, Smart Card, ya koi aur? " +
-                    "Amount maine samajh liya hai (${formatRupees(entries.sumOf { it.amountPaise })}), service bata dein.",
+                MultilingualReplies.get(
+                    lang, "askService",
+                    "amount" to formatRupees(entries.sumOf { it.amountPaise })
+                ),
                 missing = listOf("service")
             )
         }
         if (missingMode) {
             val total = entries.sumOf { it.amountPaise }
             return AiParseResult.Clarify(
-                "${formatRupees(total)} payment Cash mein mila ya UPI mein?",
+                MultilingualReplies.get(lang, "askMode", "amount" to formatRupees(total)),
                 partial = AiAction.DailyEntries(entries, context.dayEpoch),
                 missing = listOf("payment mode")
             )
         }
         val action = AiAction.DailyEntries(entries, context.dayEpoch)
-        return AiParseResult.Action(action, previewDaily(entries))
+        return AiParseResult.Action(action, previewDaily(entries, lang))
     }
 
     /** Preview text for a daily-entries action (shown before confirm). */
-    fun previewDaily(entries: List<AiDailyEntry>): String = buildString {
-        appendLine("Maine ye samjha hai — confirm karein to save karunga:")
+    fun previewDaily(entries: List<AiDailyEntry>, lang: AiLanguage = AiLanguage.HINGLISH): String = buildString {
+        appendLine(MultilingualReplies.get(lang, "previewHeader"))
         entries.forEach {
             appendLine("• ${it.serviceLabel} ${formatRupees(it.amountPaise)} ${it.mode.name}")
         }
-        appendLine("Total: ${formatRupees(entries.sumOf { it.amountPaise })}")
+        appendLine(MultilingualReplies.get(lang, "totalLine", "total" to formatRupees(entries.sumOf { it.amountPaise })))
     }
 
-    private fun parseExpense(q: String, context: AiConversationContext): AiParseResult {
+    private fun parseExpense(
+        q: String,
+        context: AiConversationContext,
+        lang: AiLanguage = AiLanguage.HINGLISH
+    ): AiParseResult {
         val amount = mainAmount(q) ?: return AiParseResult.Clarify(
             "Kitne rupaye kharch hue? Misal: \"Aaj 200 rupaye machine repair mein kharch hue\".",
             missing = listOf("amount")
@@ -622,7 +682,7 @@ object AiAssistantParser {
         val mode = detectMode(q)
         if (mode == null) {
             return AiParseResult.Clarify(
-                "${formatRupees(rupeesToPaise(amount))} kharcha Cash se hua ya UPI se?",
+                MultilingualReplies.get(lang, "askMode", "amount" to formatRupees(rupeesToPaise(amount))),
                 partial = AiAction.Expense(
                     AiExpenseDraft(category, rupeesToPaise(amount), null, service, "AI expense: $category"),
                     context.dayEpoch
@@ -641,22 +701,32 @@ object AiAssistantParser {
     private fun parseAgentPayment(
         q: String,
         context: AiConversationContext,
-        knownAgents: List<String>
+        knownAgents: List<String>,
+        lang: AiLanguage = AiLanguage.HINGLISH
     ): AiParseResult {
         val amount = mainAmount(q) ?: return AiParseResult.Clarify(
             "Agent ko kitne rupaye diye? Misal: \"Agent Ramesh ko 500 rupaye diye\".",
             missing = listOf("amount")
         )
         // Name: the word(s) after "agent" up to "ko" / "ne" / amount.
+        // UPDATE 13: bare particles ("ko", "ne", "se" — "Agent ko 500
+        // dena baki hai", "Agent ne 500 rupiya aapvana che") are NOT a
+        // name; they mean the name is missing and must be asked. A name
+        // followed by a possessive particle ("Ramesh nu", "Ramesh de")
+        // keeps only the words before the particle.
         val nameMatch = Regex("agent\\s+([a-zA-Z ]+?)(?:\\s+ko|\\s+ne|\\s+\\d|$)").find(q)
-        val spokenName = nameMatch?.groupValues?.get(1)?.trim()?.takeIf { it.isNotBlank() }
+        val rawName = nameMatch?.groupValues?.get(1)?.trim()?.takeIf { it.isNotBlank() }
+        val particles = setOf("ko", "ne", "se", "ka", "ki", "ke", "nu", "de", "da", "che", "ni", "na", "no", "thi")
+        val spokenName = rawName
+            ?.split(" ").takeWhile { it.lowercase() !in particles }.joinToString(" ")
+            ?.trim()?.takeIf { it.isNotBlank() }
         val resolved = spokenName?.let { name ->
             knownAgents.firstOrNull { it.equals(name, ignoreCase = true) }
                 ?: knownAgents.firstOrNull { it.lowercase().startsWith(name.lowercase()) }
         }
         if (spokenName == null && knownAgents.size != 1) {
             return AiParseResult.Clarify(
-                "Kis agent ko ${formatRupees(rupeesToPaise(amount))} diye? Agent ka naam bata dein.",
+                MultilingualReplies.get(lang, "askAgent", "amount" to formatRupees(rupeesToPaise(amount))),
                 missing = listOf("agent")
             )
         }
@@ -677,7 +747,7 @@ object AiAssistantParser {
         val mode = detectMode(q)
         if (mode == null) {
             return AiParseResult.Clarify(
-                "Agent $agentName ko ${formatRupees(rupeesToPaise(amount))} — Cash se diye ya UPI se?",
+                MultilingualReplies.get(lang, "askMode", "amount" to formatRupees(rupeesToPaise(amount))),
                 partial = AiAction.AgentPayment(agentName, null, rupeesToPaise(amount), null, context.dayEpoch),
                 missing = listOf("payment mode")
             )
@@ -689,7 +759,11 @@ object AiAssistantParser {
         )
     }
 
-    private fun parseMoneyTransfer(q: String, context: AiConversationContext): AiParseResult {
+    private fun parseMoneyTransfer(
+        q: String,
+        context: AiConversationContext,
+        lang: AiLanguage = AiLanguage.HINGLISH
+    ): AiParseResult {
         val amounts = findAmounts(q)
         val commissionWord = q.contains("commission")
         val principalWord = q.contains("transfer") || q.contains("bheja") || q.contains("bheje")
@@ -699,7 +773,7 @@ object AiAssistantParser {
             val mode = detectMode(q)
             if (mode == null) {
                 return AiParseResult.Clarify(
-                    "Money Transfer commission ${formatRupees(commission)} — Cash mein mila ya UPI mein?",
+                    MultilingualReplies.get(lang, "askMode", "amount" to formatRupees(commission)),
                     partial = AiAction.DailyEntries(
                         listOf(
                             AiDailyEntry(
@@ -742,8 +816,7 @@ object AiAssistantParser {
         }
         if (amounts.size == 1 && principalWord) {
             return AiParseResult.Clarify(
-                "Money Transfer ${formatRupees(amounts[0] * 100)} — commission kitna mila? " +
-                    "(Commission bataye bina main profit galat nahi likhna chahta.)",
+                MultilingualReplies.get(lang, "askCommission", "amount" to formatRupees(amounts[0] * 100)),
                 missing = listOf("commission")
             )
         }
@@ -756,15 +829,15 @@ object AiAssistantParser {
     private fun parseCustomerDue(
         q: String,
         context: AiConversationContext,
-        knownCustomers: List<String>
+        knownCustomers: List<String>,
+        lang: AiLanguage = AiLanguage.HINGLISH
     ): AiParseResult {
         val amount = mainAmount(q) ?: return AiParseResult.Unknown
         val name = knownCustomers.firstOrNull { q.contains(it.lowercase()) }
         val service = detectService(q) ?: context.lastService
         if (name == null) {
             return AiParseResult.Clarify(
-                "${formatRupees(rupeesToPaise(amount))} kis customer ka due hai? Customer ka naam bata dein — " +
-                    "due ko main income nahi likhunga, sirf uska udhaar record karunga.",
+                MultilingualReplies.get(lang, "askCustomer", "amount" to formatRupees(rupeesToPaise(amount))),
                 partial = AiAction.RecordCustomerDue(null, rupeesToPaise(amount), service),
                 missing = listOf("customer")
             )
@@ -786,7 +859,8 @@ object AiAssistantParser {
     private fun parseCustomerPayment(
         q: String,
         context: AiConversationContext,
-        knownCustomers: List<String>
+        knownCustomers: List<String>,
+        lang: AiLanguage = AiLanguage.HINGLISH
     ): AiParseResult? {
         val name = knownCustomers.firstOrNull { q.contains(it.lowercase()) } ?: return null
         val amount = mainAmount(q) ?: return null
@@ -796,7 +870,7 @@ object AiAssistantParser {
         val mode = detectMode(q)
         if (mode == null) {
             return AiParseResult.Clarify(
-                "$name ne ${formatRupees(rupeesToPaise(amount))} diye — Cash mein ya UPI se?",
+                MultilingualReplies.get(lang, "askMode", "amount" to formatRupees(rupeesToPaise(amount))),
                 partial = AiAction.CustomerPayment(name, null, rupeesToPaise(amount), null, context.dayEpoch),
                 missing = listOf("payment mode")
             )
@@ -808,7 +882,11 @@ object AiAssistantParser {
         )
     }
 
-    private fun parseAddCustomer(q: String, context: AiConversationContext): AiParseResult {
+    private fun parseAddCustomer(
+        q: String,
+        context: AiConversationContext,
+        lang: AiLanguage = AiLanguage.HINGLISH
+    ): AiParseResult {
         val service = detectService(q) ?: context.lastService
         // Name: after "customer" / "naya" — best effort; ask if missing.
         val nameMatch = Regex("(?:naya customer|new customer|customer add karo|customer)\\s+([a-zA-Z ]+)").find(q)
@@ -861,14 +939,16 @@ object AiAssistantParser {
     // ------------------------------------------------------------------
     fun isAffirmative(q: String): Boolean {
         val n = normalise(q)
-        return n == "haan" || n == "ha" || n == "yes" || n == "ok" || n == "okay" ||
+        return Multilingual.isAffirmative(n) ||
+            n == "haan" || n == "ha" || n == "yes" || n == "ok" || n == "okay" ||
             n.startsWith("haan ") || n.startsWith("yes ") || n.contains("save kar") ||
             n.contains("confirm") || n == "kar do" || n == "kardo" || n.contains("theek hai")
     }
 
     fun isNegative(q: String): Boolean {
         val n = normalise(q)
-        return n == "nahi" || n == "nahin" || n == "no" || n.startsWith("nahi ") ||
+        return Multilingual.isNegative(n) ||
+            n == "nahi" || n == "nahin" || n == "no" || n.startsWith("nahi ") ||
             n.contains("cancel") || n.contains("mat karo") || n.contains("rehnedo") ||
             n.contains("rehne do")
     }

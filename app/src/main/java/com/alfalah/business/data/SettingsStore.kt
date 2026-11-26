@@ -25,6 +25,7 @@ class SettingsStore(context: Context) {
     private val MOBILE = stringPreferencesKey("mobile")
     private val DISABLED_MODULES = stringPreferencesKey("disabled_modules")
     private val AI_KEY = stringPreferencesKey("ai_key")
+    private val AI_LANGUAGE_PREF = stringPreferencesKey("ai_language_pref")
     private val CUSTOM_SERVICES = stringPreferencesKey("custom_services")
 
     /** Theme mode: LIGHT, DARK or SYSTEM (default SYSTEM — follows the phone). */
@@ -175,5 +176,19 @@ class SettingsStore(context: Context) {
 
     suspend fun clearAiKey() {
         store.edit { it.remove(AI_KEY) }
+    }
+
+    // --- BizKhata AI Assistant language (UPDATE 13) ---
+    // Manual preference for the language the assistant replies in and
+    // listens with (voice input). "AUTO" (default) = detect it from each
+    // message — the user is NEVER forced to pick a language before
+    // chatting, and mid-conversation switching still works. Any other
+    // value is an AiLanguage code ("gu", "ta", "en", "hinglish", …).
+    // Stored app-wide in v1, like the UI language.
+
+    val aiLanguagePref: Flow<String> = store.data.map { it[AI_LANGUAGE_PREF] ?: "AUTO" }
+
+    suspend fun setAiLanguagePref(code: String) {
+        store.edit { it[AI_LANGUAGE_PREF] = code.trim().ifBlank { "AUTO" } }
     }
 }

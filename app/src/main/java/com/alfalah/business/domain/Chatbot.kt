@@ -242,7 +242,7 @@ object BuiltInChatbotResponder {
 
     private fun isCash(q: String) = q.contains("cash")
 
-    private fun isUpi(q: String) = q.contains("upi")
+    private fun isUpi(q: String) = Regex("\\bupi\\b").containsMatchIn(q)
 
     private fun isProfit(q: String) =
         q.contains("profit") || q.contains("munafa") || q.contains("faayda") ||

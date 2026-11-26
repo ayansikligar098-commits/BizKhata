@@ -107,6 +107,9 @@ fun ChatbotScreen(
     val isLoading by vm.isLoading.collectAsState()
     val aiEnabled by vm.aiEnabled.collectAsState()
     val pendingPreviewId by vm.pendingPreviewId.collectAsState()
+    // UPDATE 13: voice recogniser language follows the chat language
+    // (detected per message, or the Settings preference).
+    val voiceLanguageTag by vm.voiceLanguageTag.collectAsState()
     val searchQuery by vm.searchQuery.collectAsState()
     var input by remember { mutableStateOf("") }
     var showSearch by remember { mutableStateOf(false) }
@@ -129,7 +132,7 @@ fun ChatbotScreen(
     ) { granted ->
         if (granted) {
             voiceError = null
-            voiceHelper.startListening()
+            voiceHelper.startListening(voiceLanguageTag)
         } else {
             voiceError = "Microphone ki permission nahi mili — type karke bhej sakte hain."
         }

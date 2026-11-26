@@ -147,6 +147,7 @@ class MainActivity : ComponentActivity() {
             val hasPin by settings.hasPin.collectAsState(initial = false)
             val savedMobile by settings.mobile.collectAsState(initial = "")
             val aiKey by settings.aiKey.collectAsState(initial = "")
+            val aiLanguagePref by settings.aiLanguagePref.collectAsState(initial = "AUTO")
             var unlocked by remember { mutableStateOf(false) }
 
             // The active profile: the one the user picked, else the first one.
@@ -542,7 +543,9 @@ class MainActivity : ComponentActivity() {
                                         onRemovePin = { scope.launch { settings.clearPin() } },
                                         aiKey = aiKey,
                                         onSaveAiKey = { key -> scope.launch { settings.setAiKey(key) } },
-                                        onClearAiKey = { scope.launch { settings.clearAiKey() } }
+                                        onClearAiKey = { scope.launch { settings.clearAiKey() } },
+                                        aiLanguagePref = aiLanguagePref,
+                                        onAiLanguagePref = { code -> scope.launch { settings.setAiLanguagePref(code) } }
                                     )
                                 }
                             }

@@ -35,7 +35,7 @@ class VoiceInputHelper(
 
     fun isAvailable(): Boolean = SpeechRecognizer.isRecognitionAvailable(context)
 
-    fun startListening() {
+    fun startListening(languageTag: String = "hi-IN") {
         if (!isAvailable()) {
             onError("Is phone par voice input available nahi hai.")
             return
@@ -43,10 +43,13 @@ class VoiceInputHelper(
         stopListening()
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            // Hindi (India) covers Hinglish best on most devices; the
-            // user can also speak English — recognition returns the
-            // words either way and the parser handles both.
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
+            // UPDATE 13: the recogniser language follows the language the
+            // user is actually chatting in (detected per message, or the
+            // manual AI-language preference in Settings) — Gujarati
+            // speech gets gu-IN, Tamil gets ta-IN, and so on. The
+            // recognised text still only fills the input field: it is
+            // NEVER sent or executed automatically.
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, languageTag)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         }
