@@ -684,6 +684,7 @@ tbody tr:hover { background: var(--surface-2); }
 .chat-stop-btn { font-size: 12.5px; padding: 5px 12px; }
 .chat-failed-note { font-size: 12.5px; color: #b3261e; }
 .chat-stopped-note { font-size: 12.5px; color: var(--muted); }
+.chat-cloud-note { font-size: 12.5px; color: var(--muted); }
 .chat-md p { margin: 0 0 8px; }
 .chat-md p:last-child { margin-bottom: 0; }
 .chat-md h2, .chat-md h3, .chat-md h4 { margin: 10px 0 6px; line-height: 1.3; }

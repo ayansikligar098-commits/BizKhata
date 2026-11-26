@@ -297,27 +297,49 @@ export async function callConversationAIStream(
   const key = getAiServiceKey();
   if (!endpoint || !key) return { ok: false, reason: 'not-configured' };
   if (typeof fetch === 'undefined') return { ok: false, reason: 'unavailable' };
+  // The stream must never hang the chat: 30s total for the whole call.
+  // (The non-streaming call has a 10s timeout; the streaming path had
+  // none, so a slow endpoint left the thinking dots spinning for
+  // minutes and the user with no answer at all.) The user's own Stop
+  // still aborts immediately via the passed-in signal. A timeout is
+  // reported as reason 'timeout' (never as user-aborted) so the
+  // caller can fall back to the local reply.
+  const timeoutMs = 30000;
+  let timedOut = false;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, timeoutMs);
+  const onExternalAbort = () => ctrl.abort();
+  if (signal) {
+    if (signal.aborted) ctrl.abort();
+    else signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
+  const finish = (r: AiStreamResult): AiStreamResult => {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', onExternalAbort);
+    if (timedOut) return { ok: false, reason: 'timeout' };
+    return r;
+  };
   const payload = { endpoint, key, messages, systemPrompt };
   try {
     const res = await fetch('/api/ai-chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-      signal,
+      signal: ctrl.signal,
     });
     if (!res.ok) {
       // No Pages Function on this host (a deployed Function always
       // answers 200 with an SSE error event instead) — fall back to a
       // direct streaming call. Static servers answer an unknown POST
       // with 404/405/501.
-      return await streamDirect(endpoint, key, messages, systemPrompt, onChunk, signal);
+      return finish(await streamDirect(endpoint, key, messages, systemPrompt, onChunk, ctrl.signal));
     }
-    await consumeSSE(res, onChunk, signal);
-    return { ok: true };
+    await consumeSSE(res, onChunk, ctrl.signal);
+    return finish({ ok: true });
   } catch (e) {
-    if (e instanceof StreamError) return { ok: false, aborted: e.aborted, reason: e.aborted ? 'aborted' : 'stream-error' };
-    if (e instanceof Error && e.name === 'AbortError') return { ok: false, aborted: true, reason: 'aborted' };
-    return { ok: false, reason: 'network' };
+    if (e instanceof StreamError) return finish({ ok: false, aborted: e.aborted && !timedOut, reason: e.aborted && !timedOut ? 'aborted' : 'stream-error' });
+    if (e instanceof Error && e.name === 'AbortError') return finish({ ok: false, aborted: !timedOut, reason: timedOut ? 'timeout' : 'aborted' });
+    return finish({ ok: false, reason: 'network' });
   }
 }
 

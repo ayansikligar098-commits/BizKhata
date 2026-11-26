@@ -95,6 +95,11 @@ interface ChatMsg {
   stopped?: boolean;
   /** Generation failed (network/stream error) — Retry is offered. */
   failed?: boolean;
+  /** The configured cloud service failed or timed out, so the reply
+   *  shown is the on-device engine's answer (fullText) instead — the
+   *  UI shows one honest line saying so. Never a silent substitution,
+   *  never a bare Retry with no answer. */
+  cloudFailed?: boolean;
   /** Where the reply came from: the on-device engine ('local') or the
    *  owner's configured service via real SSE ('cloud'). */
   source?: 'local' | 'cloud';
@@ -302,7 +307,21 @@ function useChat(onNavigateAway?: () => void) {
   React.useEffect(() => {
     if (!profileId) return;
     const loaded = loadConversations(profileId);
-    setConversations(loaded.conversations);
+    // A reply that was still streaming when the chat unmounted
+    // (navigation away mid-reply, page reload, crash) was persisted
+    // with streaming: true — and nothing ever completes it on remount,
+    // so its thinking indicator spins forever and any wait-for-idle
+    // check never resolves (found by the UPDATE 17 conversation drive:
+    // "Cash Book kholo" navigated away mid-reply, stranding it).
+    // Normalise on load: drop messages that never displayed anything,
+    // keep interrupted ones with their partial text, marked stopped.
+    const conversations = loaded.conversations.map((c) => ({
+      ...c,
+      messages: c.messages
+        .filter((m) => !(m.streaming && !m.text && !m.preview))
+        .map((m) => (m.streaming ? { ...m, streaming: false, stopped: m.text ? true : m.stopped } : m)),
+    }));
+    setConversations(conversations);
     setActiveId(loaded.activeId);
     draftRef.current = null;
     pendingRef.current = null;
@@ -344,11 +363,22 @@ function useChat(onNavigateAway?: () => void) {
 
   // Smooth auto-scroll as text grows — only if the user is already
   // near the bottom, so reading earlier messages is never yanked away.
+  // "Near the bottom" is judged against the height BEFORE this
+  // render's growth: a single send adds a user bubble + a thinking
+  // bubble (~200px) in one render, which would otherwise push the gap
+  // past the threshold in one step and strand the list away from the
+  // bottom for the whole reply (found by the UPDATE 17 drive: the gap
+  // jumped 0 → 203 on send, so the guard never engaged and every
+  // later reply typed out of view). A user who scrolled up before the
+  // send still has a large pre-growth gap and is left alone.
+  const prevShRef = React.useRef(0);
   React.useEffect(() => {
     const el = msgsRef.current;
     if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
-    if (nearBottom) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    const grew = el.scrollHeight - prevShRef.current;
+    prevShRef.current = el.scrollHeight;
+    const gapBeforeGrowth = el.scrollHeight - grew - el.scrollTop - el.clientHeight;
+    if (gapBeforeGrowth < 140) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
   }, [messages]);
 
   // Pin to the latest message on first open and when switching
@@ -784,7 +814,12 @@ function useChat(onNavigateAway?: () => void) {
    * Display one bot reply progressively. Two honest paths:
    *  - cloudJob: genuine SSE from the owner's configured service via
    *    /api/ai-chat — chunks feed the typewriter as they arrive; the
-   *    thinking indicator stays until the first chunk.
+   *    thinking indicator stays until the first chunk. If the service
+   *    fails or the 30s stream timeout hits, the on-device reply
+   *    (fullText, already computed) is typed out instead and the
+   *    message is flagged cloudFailed — the user always gets an
+   *    answer, with one honest line saying the cloud AI could not be
+   *    reached. A bare Retry with no answer is never shown.
    *  - local: the on-device engine already produced `fullText` — the
    *    typewriter reveals it at ~11 words/sec after a brief thinking
    *    pause. This is display pacing over local text, NOT a stream.
@@ -841,11 +876,15 @@ function useChat(onNavigateAway?: () => void) {
         } else if (res.aborted) {
           tw.stop(); // stopGeneration() already marked the message
         } else {
-          // Configured service failed: keep partial text, offer Retry.
-          // Never silently substitute the local reply for a failed
-          // configured service — the failure must be visible.
-          tw.stop();
-          markFailed(msgId, STREAM_UNREACHABLE_MSG);
+          // Configured service failed or timed out: fall back to the
+          // local reply the engine already produced (fullText) so the
+          // user always gets an answer — the on-device reply is typed
+          // out progressively, and the message is flagged cloudFailed
+          // so the UI shows one honest line that the cloud AI could
+          // not be reached. Never a silent substitution, never a bare
+          // Retry with no answer (that left the user with nothing).
+          updateMsg(msgId, (m) => ({ ...m, cloudFailed: true, source: 'local' }));
+          tw.setSource(fullText);
         }
       } else {
         // Brief thinking pause so the indicator is genuinely visible,
@@ -1042,9 +1081,21 @@ function useChat(onNavigateAway?: () => void) {
         setBusy(false);
         return;
       }
-      // Navigation — actually open the page.
+      // Navigation — actually open the page. The reply is posted
+      // complete, not typed: the user leaves this page immediately,
+      // and a streaming reply would be stranded half-typed by the
+      // unmount (see the load normalisation above). History keeps the
+      // whole reply for when they come back.
       if (res.kind === 'navigation' && res.navigateTo) {
-        botReply(res.text, { links: res.links });
+        pushMsg({
+          id: uid('m'),
+          role: 'bot',
+          text: res.text,
+          ts: new Date().toISOString(),
+          streaming: false,
+          source: 'local',
+          links: res.links,
+        });
         router.push(res.navigateTo);
         if (onNavigateAway) onNavigateAway();
         setBusy(false);
@@ -1340,6 +1391,9 @@ function ChatBody({ chat }: { chat: ReturnType<typeof useChat> }) {
             )}
             {m.role === 'bot' && m.stopped && (
               <div className="chat-stopped-note">Stopped — upar dikh raha jawab hi final hai.</div>
+            )}
+            {m.role === 'bot' && m.cloudFailed && !m.streaming && (
+              <div className="chat-cloud-note">Cloud AI se jawab nahi mila — ye jawab aapke record aur app ki madad se diya hai.</div>
             )}
             {m.preview && <PreviewCard msg={m} chat={chat} />}
             {m.result && <ResultCard msg={m} />}

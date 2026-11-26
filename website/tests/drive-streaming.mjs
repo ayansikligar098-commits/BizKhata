@@ -12,8 +12,9 @@
  *   → (6) blinking cursor while typing → (7) smooth scroll
  *   (scrollTop grows) → (8) long reply completes without freezing →
  *   (9) cursor gone at finish → (10) Stop keeps partial text and
- *   cancels → (11) Regenerate produces a fresh reply; Retry works
- *   after a forced failure (endpoint pointed at an invalid URL) →
+ *   cancels → (11) Regenerate produces a fresh reply; a forced cloud
+ *   failure falls back to the on-device reply with an honest cloud
+ *   note (never a bare Retry with no answer) →
  *   (12) Gujarati + Hindi + Hinglish + mixed-language replies render
  *   correctly (no U+FFFD, no split vowel signs) → (13) short reply
  *   total < ~4 s → (14) long reply never appears all at once
@@ -219,7 +220,12 @@ const regenIdle = await waitForIdle(page);
 const regenAfter = await lastBotText(page);
 check('11a', 'Regenerate produces a fresh reply', regenIdle && regenAfter.length > 50, `before=${regenBefore.length} chars after=${regenAfter.length} chars`);
 
-console.log('== Step 11b: Retry works after a forced failure ==');
+console.log('== Step 11b: forced cloud failure falls back to the local reply (never a bare Retry) ==');
+// 2026-11-27 fix (user-reported: "AI se help mangu to jawab hi nahi
+// deta"): when the configured cloud service fails or times out, the
+// chat must still answer with the on-device reply it already computed,
+// flagged with one honest cloud note — never a red "Retry" note with
+// no answer at all. Regenerate (not Retry) is the re-attempt path.
 await page.evaluate(() => {
   localStorage.setItem('bizkhata.ai.service.endpoint.v1', 'https://invalid.example.invalid/chat');
   localStorage.setItem('bizkhata.ai.service.key.v1', 'dummy-key-for-drive-test');
@@ -229,13 +235,17 @@ await sleep(1200);
 await page.getByTestId('chat-input').fill('Explain quantum entanglement in full detail with the latest research.');
 await page.getByTestId('chat-send').click();
 const failedIdle = await waitForIdle(page, 60000);
-const retryBtn = await page.getByTestId('chat-retry').count();
+const fallbackText = await lastBotText(page);
+const cloudNote = await page.locator('.chat-cloud-note').count();
 const failedNote = await page.locator('.chat-failed-note').count();
-check('11b', 'forced failure shows Retry + failed note (no silent local fallback)', failedIdle && retryBtn >= 1 && failedNote >= 1, `retry=${retryBtn} failedNote=${failedNote}`);
-await page.getByTestId('chat-retry').click();
+const retryBtn = await page.getByTestId('chat-retry').count();
+check('11b', 'forced failure shows the local reply + honest cloud note (no failed note, no bare Retry)', failedIdle && fallbackText.length > 20 && cloudNote >= 1 && failedNote === 0 && retryBtn === 0, `reply=${fallbackText.length} chars cloudNote=${cloudNote} failedNote=${failedNote} retry=${retryBtn}`);
+await page.getByTestId('chat-regenerate').click();
 const retryIdle = await waitForIdle(page, 60000);
-const retryBtn2 = await page.getByTestId('chat-retry').count();
-check('11b2', 'Retry re-attempts and fails again cleanly (same invalid endpoint)', retryIdle && retryBtn2 >= 1, `retry still present=${retryBtn2}`);
+const retryText = await lastBotText(page);
+const cloudNote2 = await page.locator('.chat-cloud-note').count();
+const failedNote2 = await page.locator('.chat-failed-note').count();
+check('11b2', 'Regenerate re-attempts and falls back to the local reply again (same invalid endpoint)', retryIdle && retryText.length > 20 && cloudNote2 >= 1 && failedNote2 === 0, `reply=${retryText.length} chars cloudNote=${cloudNote2} failedNote=${failedNote2}`);
 await page.evaluate(() => {
   localStorage.removeItem('bizkhata.ai.service.endpoint.v1');
   localStorage.removeItem('bizkhata.ai.service.key.v1');

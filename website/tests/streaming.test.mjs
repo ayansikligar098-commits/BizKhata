@@ -36,10 +36,21 @@ execSync(
   `npx tsc src/lib/streaming.ts src/lib/markdown.ts src/lib/conversation-ai.ts src/lib/languages.ts --outDir ${outDir} --module commonjs --target es2020 --esModuleInterop --skipLibCheck`,
   { cwd: root, stdio: 'pipe' },
 );
+// The Pages Function is compiled separately (its own root) so a
+// syntax error there — e.g. a duplicated constant — fails this suite
+// loudly. (The project tsconfig and `next build` never type-check
+// functions/, which is how a broken ai-chat.ts once slipped through.)
+const fnOutDir = '/tmp/bizkhata-streaming-test-fn';
+fs.rmSync(fnOutDir, { recursive: true, force: true });
+execSync(
+  `npx tsc functions/api/ai-chat.ts --outDir ${fnOutDir} --module commonjs --target es2020 --esModuleInterop --skipLibCheck`,
+  { cwd: root, stdio: 'pipe' },
+);
 
 const require = createRequire(import.meta.url);
 const streaming = require(path.join(outDir, 'streaming.js'));
 const md = require(path.join(outDir, 'markdown.js'));
+const aiFn = require(path.join(fnOutDir, 'ai-chat.js'));
 
 const results = {};
 function run(category, name, fn) {
@@ -439,8 +450,13 @@ cases.push(() => run('model', 'client DEFAULT_MODEL equals the agreed live model
 }));
 cases.push(() => run('model', 'Pages Function UPSTREAM_MODEL equals the agreed live model', () => {
   const src = readSource('functions/api/ai-chat.ts');
-  const m = src.match(/UPSTREAM_MODEL\s*=\s*'([^']+)'/);
-  return { ok: m !== null && m[1] === AGREED_MODEL, detail: ` UPSTREAM_MODEL=${m ? m[1] : '?'}` };
+  const decls = (src.match(/UPSTREAM_MODEL\s*=/g) || []).length;
+  return { ok: aiFn.UPSTREAM_MODEL === AGREED_MODEL && decls === 1 && typeof aiFn.onRequest === 'function', detail: ` UPSTREAM_MODEL=${aiFn.UPSTREAM_MODEL} declarations=${decls}` };
+}));
+cases.push(() => run('model', 'client DEFAULT_MODEL is declared exactly once', () => {
+  const client = readSource('src/lib/conversation-ai.ts');
+  const decls = (client.match(/DEFAULT_MODEL\s*=/g) || []).length;
+  return { ok: decls === 1, detail: ` declarations=${decls}` };
 }));
 cases.push(() => run('model', 'all three call paths send a model field', () => {
   const client = readSource('src/lib/conversation-ai.ts');
