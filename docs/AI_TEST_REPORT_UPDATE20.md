@@ -2,8 +2,9 @@
 
 Date: 2026-11-27. Scope: mirror of the website's UPDATE 20/21/22 AI upgrade
 in the Android code (`~/workspace/al-falah-app/android/`). The website's own
-report (`website/docs/AI_TEST_REPORT_UPDATE20.md`) does not exist yet, so the
-Android results live here; the coordinator can merge the counts.
+report lives at `website/docs/AI_TEST_REPORT_UPDATE20.md` (200 single-turn
+cases + multi-turn, written by the website worker); the Android mirror
+results live here, for the coordinator to merge into it.
 
 ## Verdict
 
