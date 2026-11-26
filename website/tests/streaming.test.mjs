@@ -436,7 +436,7 @@ cases.push(() => run('migration', 'active profile preferred when several profile
 // the Pages Function constant must agree, and the value must never
 // appear in any UI file. Models get shut down — re-check this value
 // against Google's models page periodically.
-const AGREED_MODEL = 'gemini-3.8-flash';
+const AGREED_MODEL = 'gemini-3.5-flash-lite';
 const DEAD_MODEL = 'gemini-2.0-flash';
 function readSource(rel) { return fs.readFileSync(path.join(root, rel), 'utf8'); }
 function allSourceFiles(dir, acc = []) {

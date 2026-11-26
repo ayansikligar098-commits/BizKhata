@@ -65,7 +65,7 @@ const ENDPOINT_STORAGE = 'bizkhata.ai.service.endpoint.v1';
  * value is SHUT DOWN (June 1, 2026 — the page lists it under
  * "Previous models" as "(Shut down)"), and the 2.5 Flash model is
  * deprecated (routes to the 3.5 Flash-Lite model from Dec 1, 2026).
- * `gemini-3.8-flash` is the live Stable Flash model, free-tier, and
+ * `gemini-3.5-flash-lite` is the live Stable Flash-Lite model, free-tier, and
  * works at the OpenAI-compatible endpoint (the model string is passed
  * through unchanged). It matches Android's AI_MODEL constant — the two
  * surfaces must always agree. MODELS GET SHUT DOWN: re-check this
@@ -75,7 +75,7 @@ const ENDPOINT_STORAGE = 'bizkhata.ai.service.endpoint.v1';
  * tests/streaming.test.mjs 'model' checks, which fail the suite if
  * the constants drift apart or name a dead model.
  */
-export const DEFAULT_MODEL = 'gemini-3.8-flash';
+export const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 /** Legacy state + profile field from the pre-UPDATE-12 Settings card.
  *  This is the ONLY place the old field name appears: it is read here
  *  purely to migrate a key the owner entered early on (see the header

@@ -234,8 +234,8 @@ own device with their own key — the VM has no key and cannot verify it.
 
 **Model value (UPDATE 19).** Every cloud call sends a `model` field
 (`DEFAULT_MODEL` in `src/lib/conversation-ai.ts`, `UPSTREAM_MODEL` in
-the repo-root `functions/api/ai-chat.ts`, both `gemini-3.8-flash` — the live Stable
-Flash model, free tier, verified 2026-11-27 against Google's own
+the repo-root `functions/api/ai-chat.ts`, both `gemini-3.5-flash-lite` — the live Stable
+Flash-Lite model, free tier, verified 2026-11-27 against Google's own
 models page; the previous value was shut down June 1, 2026). The
 model name is internal only and never appears in the UI. Models get
 shut down — re-check this value against Google's models page
