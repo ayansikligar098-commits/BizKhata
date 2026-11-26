@@ -40,10 +40,13 @@ execSync(
 // syntax error there — e.g. a duplicated constant — fails this suite
 // loudly. (The project tsconfig and `next build` never type-check
 // functions/, which is how a broken ai-chat.ts once slipped through.)
+// The Function lives at the REPO root (../functions/), NOT under
+// website/ — website/functions/ never deploys (live POSTs 405).
+const fnPath = path.join(root, '..', 'functions', 'api', 'ai-chat.ts');
 const fnOutDir = '/tmp/bizkhata-streaming-test-fn';
 fs.rmSync(fnOutDir, { recursive: true, force: true });
 execSync(
-  `npx tsc functions/api/ai-chat.ts --outDir ${fnOutDir} --module commonjs --target es2020 --esModuleInterop --skipLibCheck`,
+  `npx tsc ../functions/api/ai-chat.ts --outDir ${fnOutDir} --module commonjs --target es2020 --esModuleInterop --skipLibCheck`,
   { cwd: root, stdio: 'pipe' },
 );
 
@@ -449,9 +452,14 @@ cases.push(() => run('model', 'client DEFAULT_MODEL equals the agreed live model
   return { ok: ai.DEFAULT_MODEL === AGREED_MODEL, detail: ` DEFAULT_MODEL=${ai.DEFAULT_MODEL}` };
 }));
 cases.push(() => run('model', 'Pages Function UPSTREAM_MODEL equals the agreed live model', () => {
-  const src = readSource('functions/api/ai-chat.ts');
+  const src = fs.readFileSync(fnPath, 'utf8');
   const decls = (src.match(/UPSTREAM_MODEL\s*=/g) || []).length;
   return { ok: aiFn.UPSTREAM_MODEL === AGREED_MODEL && decls === 1 && typeof aiFn.onRequest === 'function', detail: ` UPSTREAM_MODEL=${aiFn.UPSTREAM_MODEL} declarations=${decls}` };
+}));
+cases.push(() => run('model', 'Pages Function lives at the repo root, not under website/', () => {
+  const atRoot = fs.existsSync(fnPath);
+  const underWebsite = fs.existsSync(path.join(root, 'functions', 'api', 'ai-chat.ts'));
+  return { ok: atRoot && !underWebsite, detail: atRoot ? (underWebsite ? ' still present under website/functions/ (never deploys)' : ' repo-root only') : ' missing at repo root' };
 }));
 cases.push(() => run('model', 'client DEFAULT_MODEL is declared exactly once', () => {
   const client = readSource('src/lib/conversation-ai.ts');
@@ -460,14 +468,14 @@ cases.push(() => run('model', 'client DEFAULT_MODEL is declared exactly once', (
 }));
 cases.push(() => run('model', 'all three call paths send a model field', () => {
   const client = readSource('src/lib/conversation-ai.ts');
-  const fn = readSource('functions/api/ai-chat.ts');
+  const fn = fs.readFileSync(fnPath, 'utf8');
   const clientUses = (client.match(/model:\s*DEFAULT_MODEL/g) || []).length;
   const fnUses = (fn.match(/model:\s*UPSTREAM_MODEL/g) || []).length;
   return { ok: clientUses === 2 && fnUses === 1, detail: ` client=${clientUses} function=${fnUses}` };
 }));
 cases.push(() => run('model', 'dead (shut-down) model appears nowhere in src/ or functions/', () => {
   const bad = [];
-  for (const f of [...allSourceFiles(path.join(root, 'src')), ...allSourceFiles(path.join(root, 'functions'))]) {
+  for (const f of [...allSourceFiles(path.join(root, 'src')), ...allSourceFiles(path.join(root, '..', 'functions'))]) {
     if (fs.readFileSync(f, 'utf8').includes(DEAD_MODEL)) bad.push(path.relative(root, f));
   }
   return { ok: bad.length === 0, detail: bad.length ? ` found in: ${bad.join(', ')}` : '' };

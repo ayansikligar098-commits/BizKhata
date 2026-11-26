@@ -207,8 +207,11 @@ The AI Assistant has two reply paths, and they are not the same thing:
 
 - **Configured service → genuine backend streaming.** When the owner
   adds an AI service address + key in Settings → AI Chat, chat calls the
-  Cloudflare Pages Function `POST /api/ai-chat` (`functions/api/ai-chat.ts`,
-  free tier), which forwards the request to the owner's own configured
+  Cloudflare Pages Function `POST /api/ai-chat` (repo-root
+  `functions/api/ai-chat.ts`, free tier — it MUST live at the repo root,
+  because the Pages project builds from the repo root; when it sat at
+  `website/functions/` it never deployed and live POSTs returned 405),
+  which forwards the request to the owner's own configured
   endpoint asking for a streaming response and relays the SSE stream to
   the browser (`src/lib/streaming.ts` parses it). The key and endpoint
   are never stored server-side and never logged. The reply appears
@@ -231,7 +234,7 @@ own device with their own key — the VM has no key and cannot verify it.
 
 **Model value (UPDATE 19).** Every cloud call sends a `model` field
 (`DEFAULT_MODEL` in `src/lib/conversation-ai.ts`, `UPSTREAM_MODEL` in
-`functions/api/ai-chat.ts`, both `gemini-3.8-flash` — the live Stable
+the repo-root `functions/api/ai-chat.ts`, both `gemini-3.8-flash` — the live Stable
 Flash model, free tier, verified 2026-11-27 against Google's own
 models page; the previous value was shut down June 1, 2026). The
 model name is internal only and never appears in the UI. Models get

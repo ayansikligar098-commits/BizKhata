@@ -7,9 +7,11 @@
  *
  *   1. BACKEND STREAMING (genuine SSE): when the owner has configured an
  *      AI service in Settings (endpoint + key), the chat UI calls the
- *      Cloudflare Pages Function at /api/ai-chat (functions/api/ai-chat.ts),
- *      which forwards the request to the owner's own configured endpoint
- *      asking for a streaming response and relays the SSE stream back.
+ *      Cloudflare Pages Function at /api/ai-chat (repo-root
+ *      `functions/api/ai-chat.ts` — NOT website/functions/, which never
+ *      deploys), which forwards the request to the owner's own
+ *      configured endpoint asking for a streaming response and relays
+ *      the SSE stream back.
  *      `consumeSSE` below parses that stream. The key + endpoint come
  *      from the owner's own Settings and are never stored server-side.
  *

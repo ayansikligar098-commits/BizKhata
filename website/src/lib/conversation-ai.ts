@@ -17,9 +17,9 @@
  * A local template fallback is NEVER the main conversation engine.
  *
  * UPDATE 17 — streaming: when a service IS configured, the chat UI
- * calls the Cloudflare Pages Function at /api/ai-chat (see
- * functions/api/ai-chat.ts) through callConversationAIStream() below,
- * and the reply arrives as a real SSE stream (parsed by
+ * calls the Cloudflare Pages Function at /api/ai-chat (see the
+ * repo-root `functions/api/ai-chat.ts` — NOT website/functions/, which
+ * never deploys) and the reply arrives as a real SSE stream (parsed by
  * lib/streaming.ts). If the Function is not deployed (local static
  * server), the client falls back to a direct streaming call to the
  * configured endpoint, and finally to the non-streaming call.
@@ -71,7 +71,7 @@ const ENDPOINT_STORAGE = 'bizkhata.ai.service.endpoint.v1';
  * surfaces must always agree. MODELS GET SHUT DOWN: re-check this
  * value against Google's models page periodically, and update it in
  * ALL THREE places together (here, streamDirect below, and
- * UPSTREAM_MODEL in functions/api/ai-chat.ts) — see
+ * UPSTREAM_MODEL in the repo-root functions/api/ai-chat.ts) — see
  * tests/streaming.test.mjs 'model' checks, which fail the suite if
  * the constants drift apart or name a dead model.
  */

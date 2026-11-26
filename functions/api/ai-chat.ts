@@ -1,6 +1,17 @@
 /**
  * BizKhata AI chat — Cloudflare Pages Function (free tier).
  *
+ * PLACEMENT — READ BEFORE MOVING: this file MUST live at the repo
+ * root, `functions/api/ai-chat.ts`. The Cloudflare Pages project
+ * "bizkhata" builds from the repo root (`cd website && npm install
+ * && npm run build`, output `website/out`), and Pages only deploys
+ * Functions from the project root's `functions/` directory. When this
+ * file sat at `website/functions/api/ai-chat.ts` it never deployed:
+ * POST https://bizkhata.pages.dev/api/ai-chat returned HTTP 405 live
+ * (verified 2026-11-27), so the Function path never ran and every
+ * cloud call fell back to a direct browser→endpoint call. Moved to
+ * the repo root 2026-11-27; do NOT move it back under website/.
+ *
  * POST /api/ai-chat
  *   Body: { endpoint, key, messages, systemPrompt }
  *   (endpoint + key come from the owner's own Settings on their device)
