@@ -44,6 +44,19 @@ export type UnifiedIntent =
 export type CasualKind = 'greeting' | 'bored' | 'thanks' | 'mood' | 'morning' | 'doing' | 'advice' | 'helpOffer';
 
 const HAS_AMOUNT = /\d/;
+
+/**
+ * A digit is only a MONEY amount when a money word is near it — "Kal
+ * PAN Card ke 5 application karne hain" carries the count 5 (five
+ * applications to do tomorrow), not ₹5. Without this distinction the
+ * plan guard below would treat a future plan as a financial action
+ * and ask "kitne rupaye hue?" for work that has not happened yet.
+ */
+export function hasMoneyAmount(raw: string): boolean {
+  if (!/\d/.test(raw)) return false;
+  const s = norm(raw);
+  return /(₹|\brs\b|rupees?|rupaye|rupay|paise|paisa|cash|upi|nagad|kharcha|kharach|commission|transfer|diye|diya|mila|mile|hue|hua|jama|payment|bill|due|udhaar|udhar|bheja|bheje|add\s*kar)/.test(s);
+}
 const MONEY_WORDS = /\b(cash|upi|nagad|rupaye|rupees?|rs\.?|₹|hue|hua|mile|mila|diye|diya|kharcha|expense|commission|transfer|jama|add kar|payment)\b/;
 
 function norm(raw: string): string {
@@ -124,7 +137,7 @@ const STATEMENT_FACTS: { re: RegExp; fact: string; replyHi: string; replyEn: str
  */
 export function isPlanOrStatement(raw: string): boolean {
   const s = norm(raw);
-  if (HAS_AMOUNT.test(raw)) return false;
+  if (hasMoneyAmount(raw)) return false;
   if (/kitne (rupaye|paise)|how much (money|rupees)|rupaye hue|paise hue/.test(s)) return false;
   // Explicit plan: tomorrow/day-after + work verb, or "mujhe ... banani/banane/karna hai".
   // Bare "chahiye" alone is NOT a plan ("Mujhe ek business idea chahiye"

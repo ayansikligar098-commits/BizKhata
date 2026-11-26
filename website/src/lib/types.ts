@@ -54,6 +54,14 @@ export interface BusinessProfile {
    *  English, or 'auto' (default) — the assistant detects the user's
    *  language from each message and replies in the same language/style. */
   aiLanguage?: AiLangCode | 'auto';
+  /** Voice (UPDATE 18): speak AI replies aloud, speech rate
+   *  (0.5 slow … 1.5 fast), keep listening across turns, and the
+   *  preferred speech-voice name per language code ('default' = any
+   *  language). Browser voices only — no cloud voice, no key. */
+  voiceReplies?: boolean;
+  voiceRate?: number;
+  voiceContinuous?: boolean;
+  voiceByLang?: Record<string, string>;
   theme: Theme;
   createdAt: string;
 }

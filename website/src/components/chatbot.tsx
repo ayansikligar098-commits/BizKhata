@@ -11,8 +11,10 @@ import {
   type ActionDraft,
 } from '@/lib/chatbot';
 import { applyAssistantAction, type AssistantAction, type ExecResult } from '@/lib/assistant';
-import { buildSystemPrompt, callConversationAI, hasAiServiceKey, type AiChatMessage } from '@/lib/conversation-ai';
+import { buildSystemPrompt, callConversationAIStream, hasAiServiceKey, type AiChatMessage } from '@/lib/conversation-ai';
 import { langName, respondToMessage } from '@/lib/conversation';
+import { STREAM_UNREACHABLE_MSG, Typewriter } from '@/lib/streaming';
+import { markdownToHtml } from '@/lib/markdown';
 import { type ChatContext, type KnowledgeTable } from '@/lib/knowledge';
 import { loadState } from '@/lib/store';
 import { formatINR } from '@/lib/money';
@@ -53,6 +55,15 @@ interface ChatMsg {
   role: 'user' | 'bot';
   text: string;
   ts: string;
+  /** Reply still being generated (typewriter / stream in progress). */
+  streaming?: boolean;
+  /** Generation was stopped by the user — kept text is final. */
+  stopped?: boolean;
+  /** Generation failed (network/stream error) — Retry is offered. */
+  failed?: boolean;
+  /** Where the reply came from: the on-device engine ('local') or the
+   *  owner's configured service via real SSE ('cloud'). */
+  source?: 'local' | 'cloud';
   preview?: PreviewData;
   result?: { ok: boolean; lines: string[]; verified?: boolean; link?: { label: string; path: string } };
   table?: KnowledgeTable;
@@ -219,6 +230,13 @@ function useChat(onNavigateAway?: () => void) {
   const draftRef = React.useRef<ActionDraft | null>(null);
   const pendingRef = React.useRef<{ msgId: string; preview: PreviewData } | null>(null);
   const recogRef = React.useRef<{ stop: () => void } | null>(null);
+  // UPDATE 17 streaming state: one generation at a time, cancellable.
+  const [streaming, setStreaming] = React.useState(false);
+  const streamingRef = React.useRef(false);
+  const streamMsgIdRef = React.useRef<string | null>(null);
+  const typewriterRef = React.useRef<Typewriter | null>(null);
+  const abortRef = React.useRef<AbortController | null>(null);
+  const genRef = React.useRef(0);
 
   const active = conversations.find((c) => c.id === activeId) || conversations[0];
   const messages = active?.messages || [];
@@ -244,10 +262,26 @@ function useChat(onNavigateAway?: () => void) {
     }
   }, [conversations, activeId, profileId]);
 
+  // Abort any active stream + stop the typewriter when the chat
+  // panel/page unmounts, and never leave a generation running.
+  React.useEffect(() => () => {
+    genRef.current++;
+    streamingRef.current = false;
+    abortRef.current?.abort();
+    typewriterRef.current?.stop();
+    abortRef.current = null;
+    typewriterRef.current = null;
+    streamMsgIdRef.current = null;
+  }, []);
+
+  // Smooth auto-scroll as text grows — only if the user is already
+  // near the bottom, so reading earlier messages is never yanked away.
   React.useEffect(() => {
     const el = msgsRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, busy]);
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+    if (nearBottom) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+  }, [messages]);
 
   function updateActive(fn: (c: Conversation) => Conversation) {
     setConversations((prev) => prev.map((c) => (c.id === activeId ? fn(c) : c)));
@@ -277,6 +311,7 @@ function useChat(onNavigateAway?: () => void) {
   }
 
   function newChat() {
+    stopGeneration();
     const c = newConversation();
     setConversations((prev) => [c, ...prev]);
     setActiveId(c.id);
@@ -287,6 +322,7 @@ function useChat(onNavigateAway?: () => void) {
 
   function clearHistory() {
     if (!window.confirm('Saari chat history delete karni hai? Financial records par koi asar nahi padega.')) return;
+    stopGeneration();
     const c = newConversation();
     setConversations([c]);
     setActiveId(c.id);
@@ -393,23 +429,194 @@ function useChat(onNavigateAway?: () => void) {
     pendingRef.current = null;
   }
 
+  /* ================= UPDATE 17 — streaming reply engine ================= */
+
+  /** Stop the active generation cleanly: abort the stream request,
+   *  stop the typewriter, keep exactly the text shown so far, and mark
+   *  the message stopped. Safe to call when nothing is streaming. */
+  function stopGeneration() {
+    if (!streamingRef.current) return;
+    genRef.current++;
+    streamingRef.current = false;
+    setStreaming(false);
+    abortRef.current?.abort();
+    abortRef.current = null;
+    typewriterRef.current?.stop();
+    typewriterRef.current = null;
+    const id = streamMsgIdRef.current;
+    streamMsgIdRef.current = null;
+    if (id) {
+      updateMsg(id, (m) => (m.streaming ? { ...m, streaming: false, stopped: true } : m));
+    }
+  }
+
+  /** Mark a streaming message as failed (network/stream error): keep
+   *  any partial text, show Retry. `fallbackText` is used only when
+   *  nothing arrived at all. */
+  function markFailed(msgId: string, fallbackText: string) {
+    streamingRef.current = false;
+    setStreaming(false);
+    abortRef.current = null;
+    typewriterRef.current = null;
+    streamMsgIdRef.current = null;
+    updateMsg(msgId, (m) => {
+      if (!m.streaming) return m;
+      return { ...m, streaming: false, failed: true, text: m.text || fallbackText };
+    });
+  }
+
+  /**
+   * Display one bot reply progressively. Two honest paths:
+   *  - cloudJob: genuine SSE from the owner's configured service via
+   *    /api/ai-chat — chunks feed the typewriter as they arrive; the
+   *    thinking indicator stays until the first chunk.
+   *  - local: the on-device engine already produced `fullText` — the
+   *    typewriter reveals it at ~11 words/sec after a brief thinking
+   *    pause. This is display pacing over local text, NOT a stream.
+   * The message is created empty by botReply() below; this only fills
+   * it in. Completion marks the message done and speaks it (if voice
+   * replies are on). A newer generation (higher gen token) silently
+   * supersedes this one.
+   */
+  async function displayText(
+    msgId: string,
+    fullText: string,
+    opts: { source: 'local' | 'cloud'; cloudJob?: { history: AiChatMessage[]; system: string } },
+  ) {
+    const token = genRef.current + 1;
+    genRef.current = token;
+    streamingRef.current = true;
+    setStreaming(true);
+    streamMsgIdRef.current = msgId;
+    const abort = new AbortController();
+    abortRef.current = abort;
+    const tw = new Typewriter({
+      onUpdate: (displayed) => {
+        if (token !== genRef.current) return;
+        updateMsg(msgId, (m) => (m.streaming ? { ...m, text: displayed } : m));
+      },
+      onDone: (displayed) => {
+        if (token !== genRef.current) return;
+        streamingRef.current = false;
+        setStreaming(false);
+        abortRef.current = null;
+        typewriterRef.current = null;
+        streamMsgIdRef.current = null;
+        updateMsg(msgId, (m) => (m.streaming ? { ...m, text: displayed, streaming: false, ts: new Date().toISOString() } : m));
+        speak(displayed);
+      },
+    });
+    typewriterRef.current = tw;
+    try {
+      if (opts.cloudJob) {
+        let gotChunk = false;
+        const res = await callConversationAIStream(
+          opts.cloudJob.history,
+          opts.cloudJob.system,
+          (chunk) => {
+            if (token !== genRef.current) return;
+            gotChunk = true;
+            tw.append(chunk);
+          },
+          abort.signal,
+        );
+        if (token !== genRef.current) return; // stopped / superseded
+        if (res.ok && gotChunk) {
+          tw.end();
+        } else if (res.aborted) {
+          tw.stop(); // stopGeneration() already marked the message
+        } else {
+          // Configured service failed: keep partial text, offer Retry.
+          // Never silently substitute the local reply for a failed
+          // configured service — the failure must be visible.
+          tw.stop();
+          markFailed(msgId, STREAM_UNREACHABLE_MSG);
+        }
+      } else {
+        // Brief thinking pause so the indicator is genuinely visible,
+        // then type the locally generated reply out progressively.
+        await new Promise((r) => setTimeout(r, 280));
+        if (token !== genRef.current) return;
+        tw.setSource(fullText);
+      }
+    } catch {
+      if (token !== genRef.current) return;
+      tw.stop();
+      markFailed(msgId, STREAM_UNREACHABLE_MSG);
+    }
+  }
+
+  /**
+   * Create a bot message (empty + streaming) and display its reply
+   * progressively. Returns the message immediately so callers can
+   * attach a preview to it (Confirm & Save flow) — the text fills in
+   * afterwards. Voice is spoken on completion, not on creation.
+   */
+  function botReply(
+    text2: string,
+    extra?: Partial<ChatMsg>,
+    cloudJob?: { history: AiChatMessage[]; system: string },
+  ): ChatMsg {
+    const msg: ChatMsg = {
+      id: uid('m'),
+      role: 'bot',
+      text: '',
+      ts: new Date().toISOString(),
+      ...extra,
+      streaming: true,
+      source: cloudJob ? 'cloud' : 'local',
+    };
+    pushMsg(msg);
+    void displayText(msg.id, text2, cloudJob ? { source: 'cloud', cloudJob } : { source: 'local' });
+    return msg;
+  }
+
+  /** Re-run the last user message with the same conversation context,
+   *  replacing the last bot reply. Disabled while streaming. */
+  async function regenerate() {
+    if (streamingRef.current) return;
+    const conv = convRef.current.conversations.find((c) => c.id === convRef.current.activeId);
+    if (!conv) return;
+    let lastUserIdx = -1;
+    for (let i = conv.messages.length - 1; i >= 0; i--) {
+      if (conv.messages[i].role === 'user') { lastUserIdx = i; break; }
+    }
+    if (lastUserIdx < 0) return;
+    const q = conv.messages[lastUserIdx].text;
+    updateActive((c) => ({ ...c, messages: c.messages.slice(0, lastUserIdx + 1) }));
+    await respond(q);
+  }
+
+  /** Retry a failed generation: same message, same context. */
+  async function retryFailed() {
+    await regenerate();
+  }
+
+  /** Switch conversation — a running generation is stopped first so
+   *  its text never lands in the wrong conversation. */
+  function switchConversation(id: string) {
+    stopGeneration();
+    setActiveId(id);
+  }
+
   async function send(text: string) {
     const q = text.trim();
-    if (!q || busy) return;
+    if (!q) return;
+    // Sending while streaming stops the current generation cleanly
+    // first, then sends the new message (never two generations at once).
+    if (streamingRef.current) stopGeneration();
     setInput('');
     setBusy(true);
     const userMsg: ChatMsg = { id: uid('m'), role: 'user', text: q, ts: new Date().toISOString() };
     pushMsg(userMsg);
+    await respond(q);
+    setBusy(false);
+  }
+
+  async function respond(q: string) {
     const ctx: ChatContext = (convRef.current.conversations.find((c) => c.id === convRef.current.activeId)?.ctx) || {};
     const state = app.state;
     const profile = app.profile;
-
-    const botReply = (text2: string, extra?: Partial<ChatMsg>) => {
-      const msg: ChatMsg = { id: uid('m'), role: 'bot', text: text2, ts: new Date().toISOString(), ...extra };
-      pushMsg(msg);
-      speak(text2);
-      return msg;
-    };
     const setCtx = (patch: ChatContext) => {
       updateActive((c) => ({ ...c, ctx: { ...c.ctx, ...patch } }));
     };
@@ -519,35 +726,35 @@ function useChat(onNavigateAway?: () => void) {
         return;
       }
 
-      // 4. Dynamic conversational AI (UPDATE 15): when the local engine
-      //    cannot genuinely answer (res.cloudNeeded) AND the owner has
-      //    configured an AI service in Settings, ask that service with
-      //    the conversation history + ledger facts. The service never
-      //    performs financial actions and never sees the whole database.
-      //    On any failure, fall back to the honest local reply — never
-      //    a technical error, never an invented answer.
-      let replyText = res.text;
+      // 4. Dynamic conversational AI (UPDATE 15) — streaming (UPDATE 17):
+      //    when the local engine cannot genuinely answer (res.cloudNeeded)
+      //    AND the owner has configured an AI service in Settings, the
+      //    reply streams from that service via /api/ai-chat (real SSE,
+      //    see conversation-ai.ts). The service never performs financial
+      //    actions and never sees the whole database. If the configured
+      //    service fails, the message shows Retry — it never silently
+      //    substitutes the local reply for a failed configured service.
+      //    With no service configured, the honest local reply is typed
+      //    out progressively by the typewriter instead.
+      let cloudJob: { history: AiChatMessage[]; system: string } | undefined;
       if (res.cloudNeeded && hasAiServiceKey()) {
-        try {
-          const history: AiChatMessage[] = (convRef.current.conversations.find((c) => c.id === convRef.current.activeId)?.messages || [])
-            .filter((m) => !m.preview)
-            .slice(-10)
-            .map((m) => ({ role: m.role === 'user' ? 'user' as const : 'assistant' as const, content: m.text }));
-          history.push({ role: 'user', content: q });
-          const facts = computeFacts(state, profile);
-          const system = buildSystemPrompt({
-            lang: res.newCtx.lastLanguage || 'hi',
-            langName: langName(res.newCtx.lastLanguage || 'hi'),
-            profileName: profile.name,
-            category: profile.category,
-            services: profile.services,
-            factsSummary: factsSummary(facts),
-          });
-          const ai = await callConversationAI(history, system);
-          if (ai.ok && ai.text) replyText = ai.text;
-        } catch { /* local honest reply stands */ }
+        const history: AiChatMessage[] = (convRef.current.conversations.find((c) => c.id === convRef.current.activeId)?.messages || [])
+          .filter((m) => !m.preview)
+          .slice(-10)
+          .map((m) => ({ role: m.role === 'user' ? 'user' as const : 'assistant' as const, content: m.text }));
+        history.push({ role: 'user', content: q });
+        const facts = computeFacts(state, profile);
+        const system = buildSystemPrompt({
+          lang: res.newCtx.lastLanguage || 'hi',
+          langName: langName(res.newCtx.lastLanguage || 'hi'),
+          profileName: profile.name,
+          category: profile.category,
+          services: profile.services,
+          factsSummary: factsSummary(facts),
+        });
+        cloudJob = { history, system };
       }
-      botReply(replyText, { table: res.table, links: res.links });
+      botReply(res.text, { table: res.table, links: res.links }, cloudJob);
       setBusy(false);
     } catch (e) {
       botReply('Sorry, kuch gadbad hui — AI abhi available nahi hai, baad me try karo. Aapka data safe hai, kuch save nahi hua.');
@@ -603,10 +810,11 @@ function useChat(onNavigateAway?: () => void) {
 
   return {
     messages, input, setInput, busy, send, msgsRef,
-    conversations, activeId, setActiveId, newChat, clearHistory,
+    conversations, activeId, setActiveId: switchConversation, newChat, clearHistory,
     historyQuery, setHistoryQuery, showHistory, setShowHistory,
     confirmPreview, cancelPreview, applyEdit, updateMsg,
     listening, toggleMic, speakOn, setSpeakOn,
+    streaming, stopGeneration, regenerate, retryFailed,
     profileName: app.profile?.name || '',
   };
 }
@@ -694,15 +902,85 @@ function ResultCard({ msg }: { msg: ChatMsg }) {
 
 function ChatBody({ chat }: { chat: ReturnType<typeof useChat> }) {
   const router = useRouter();
+  const [copiedId, setCopiedId] = React.useState<string | null>(null);
+  const lastBot = [...chat.messages].reverse().find((m) => m.role === 'bot');
+
+  async function copyText(id: string, text: string) {
+    const done = () => {
+      setCopiedId(id);
+      window.setTimeout(() => setCopiedId((cur) => (cur === id ? null : cur)), 1500);
+    };
+    try {
+      await navigator.clipboard.writeText(text);
+      done();
+    } catch {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        done();
+      } catch { /* clipboard unavailable — nothing to show */ }
+    }
+  }
+
   return (
     <>
       <div className="chat-msgs" ref={chat.msgsRef}>
         {chat.messages.map((m) => (
           <div key={m.id} className={`chat-msg-wrap ${m.role}`}>
-            <div className={`chat-msg ${m.role}`} data-testid={m.role === 'user' ? 'chat-user-msg' : 'chat-bot-msg'}>
-              {m.text}
-              <span className="chat-time">{timeStr(m.ts)}</span>
+            <div
+              className={`chat-msg ${m.role}${m.streaming ? ' streaming' : ''}`}
+              data-testid={m.role === 'user' ? 'chat-user-msg' : 'chat-bot-msg'}
+              data-streaming={m.streaming ? 'true' : 'false'}
+            >
+              {m.role === 'user' ? (
+                m.text
+              ) : m.streaming && !m.text ? (
+                <span className="chat-thinking" data-testid="chat-thinking">
+                  <span className="chat-dot" />
+                  <span className="chat-dot" />
+                  <span className="chat-dot" />
+                  <span className="chat-thinking-text">BizKhata AI is thinking...</span>
+                </span>
+              ) : (
+                <span className="chat-md" dangerouslySetInnerHTML={{ __html: markdownToHtml(m.text) }} />
+              )}
+              {m.streaming && m.text ? <span className="chat-cursor" aria-hidden="true" /> : null}
+              {!m.streaming && <span className="chat-time">{timeStr(m.ts)}</span>}
             </div>
+            {m.role === 'bot' && m.streaming && (
+              <div className="chat-msg-actions">
+                <button className="btn btn-secondary chat-stop-btn" onClick={chat.stopGeneration} data-testid="chat-stop">
+                  ■ Stop Generating
+                </button>
+              </div>
+            )}
+            {m.role === 'bot' && !m.streaming && m.text && (
+              <div className="chat-msg-actions">
+                <button className="chat-action-btn" onClick={() => copyText(m.id, m.text)} data-testid="chat-copy">
+                  {copiedId === m.id ? '✓ Copied' : '⧉ Copy'}
+                </button>
+                {lastBot && m.id === lastBot.id && !m.failed && (
+                  <button className="chat-action-btn" onClick={() => chat.regenerate()} disabled={chat.streaming} data-testid="chat-regenerate">
+                    ↻ Regenerate
+                  </button>
+                )}
+                {m.failed && (
+                  <button className="chat-action-btn" onClick={() => chat.retryFailed()} disabled={chat.streaming} data-testid="chat-retry">
+                    ↻ Retry
+                  </button>
+                )}
+              </div>
+            )}
+            {m.role === 'bot' && m.failed && (
+              <div className="chat-failed-note">Jawab poora nahi mila — Retry dabakar dobara try karo.</div>
+            )}
+            {m.role === 'bot' && m.stopped && (
+              <div className="chat-stopped-note">Stopped — upar dikh raha jawab hi final hai.</div>
+            )}
             {m.preview && <PreviewCard msg={m} chat={chat} />}
             {m.result && <ResultCard msg={m} />}
             {m.table && (
@@ -731,11 +1009,10 @@ function ChatBody({ chat }: { chat: ReturnType<typeof useChat> }) {
             )}
           </div>
         ))}
-        {chat.busy && <div className="chat-msg bot">Soch raha hoon…</div>}
       </div>
       <div className="chat-chips">
         {QUICK_QUESTIONS.map((q) => (
-          <button key={q} className="chat-chip" onClick={() => chat.send(q)} disabled={chat.busy}>
+          <button key={q} className="chat-chip" onClick={() => chat.send(q)}>
             {q}
           </button>
         ))}
@@ -758,13 +1035,14 @@ function ChatBody({ chat }: { chat: ReturnType<typeof useChat> }) {
           aria-label="Ask the AI assistant"
           data-testid="chat-input"
         />
-        <button className="btn" onClick={() => chat.send(chat.input)} disabled={chat.busy || !chat.input.trim()} data-testid="chat-send">
+        <button className="btn" onClick={() => chat.send(chat.input)} disabled={!chat.input.trim()} data-testid="chat-send">
           Send
         </button>
       </div>
       <div className="chat-note">
         BizKhata AI Assistant • Figures always from your real records — nothing is sent anywhere.
         {chat.listening ? ' • 🎙️ Sun raha hoon…' : ''}
+        {chat.streaming ? ' • Generating…' : ''}
       </div>
     </>
   );

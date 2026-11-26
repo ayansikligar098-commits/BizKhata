@@ -332,8 +332,9 @@ export function extractAmounts(raw: string): FoundAmount[] {
     const before = text.slice(Math.max(0, m.index - 14), m.index);
     const after = text.slice(m.index + m[0].length, m.index + m[0].length + 14);
     const near = `${before} ${after}`.toLowerCase();
-    // A count, not money: "5 customers", "10 pages", "3 copies".
-    if (/^\s*(customers?|clients?|pages?|copies|photos?|jobs?|log|pieces?|items?)\b/.test(after.toLowerCase())) continue;
+    // A count, not money: "5 customers", "10 pages", "3 copies",
+    // "5 applications" (PAN Card applications to do — not ₹5).
+    if (/^\s*(customers?|clients?|pages?|copies|photos?|jobs?|log|pieces?|items?|applications?|forms?)\b/.test(after.toLowerCase())) continue;
     const moneyWord = /(₹|rs\.?|rupees?|rupaye|rupay|paise|paisa|cash|upi|nagad|kharcha|kharach|diye|diya|mila|mile|hua|hue|hoga|payment|transfer|commission|bill|due|udhaar|udhar|bheja|bheje|add|aur)\b/.test(near);
     if (!moneyWord && Number(digits) > 100000) continue;
     const value = parseFloat(digits);
@@ -672,14 +673,15 @@ export function parseAssistantMessage(
     return { kind: 'action', action, previewLines: [`Agent payment: ${agentName} ko ${money(amounts[0].paise)} (${method.toUpperCase()})`, 'Ye agent payment hai — customer kharcha nahi.'], totalPaise: amounts[0].paise };
   }
 
-  // --- Agent payable (owed, not paid): "Agent ko 500 dena baaki hai".
+  // --- Agent payable (owed, not paid): "Agent ko 500 dena baaki hai",
+  // "Agent ne 500 rupaye dene hain" (infinitive "dene" = obligation).
   // This is NOT a payment — it is a question/record request. If no
   // agent is named, ask which one (never invent an agent). If one is
   // named, fall through to the knowledge Q&A, which quotes the real
   // payable. Recording a NEW payable needs a job (payable lives on
   // jobs), so the draft flow asks for the job/service next instead of
   // inventing a payable entry.
-  if (/agent/.test(q) && /(dena|baki|baaki|payable|aapvana)/.test(q) && amounts.length >= 1 && !/diye|diya|\bpaid\b|\bpayment\b|\bpay\b|de\s*diye/.test(q)) {
+  if (/agent/.test(q) && /(dena|dene|baki|baaki|payable|aapvana)/.test(q) && amounts.length >= 1 && !/diye|diya|\bpaid\b|\bpayment\b|\bpay\b|de\s*diye/.test(q)) {
     const agentName = findNameIn(q, state.agents.filter((a) => a.profileId === profile.id).map((a) => a.name));
     if (!agentName) {
       const names = state.agents.filter((a) => a.profileId === profile.id).map((a) => a.name);
@@ -748,19 +750,39 @@ export function parseAssistantMessage(
     const segments = splitServiceSegments(text, profile.services);
     const hasServiceWord = segments.some((s) => s.service !== null);
     const hasMoneyWord = /cash|upi|nagad|rupaye|rupees?|rs\.?|₹|hue|hua|hoga|mila|mile|collection|kamai|earning|dhandha/.test(q);
-    const followUp = /^(aur|or|also|bhi|add|aur\s+ek|phir)/.test(q) || /\b(aur|bhi)\b/.test(q);
+    // Follow-up = the message STARTS with aur/bhi/add ("Aur 200 UPI bhi
+    // add kar do"), or it carries aur/bhi AND a service is already in
+    // context. A mid-sentence "aur" joining two amounts ("300 cash aur
+    // 200 UPI hue") is NOT a follow-up — without a service in context
+    // that message must ask which service, not guess one.
+    const followUp = /^(aur|or|also|bhi|add|aur\s+ek|phir)\b/.test(q)
+      || (/\b(aur|bhi)\b/.test(q) && !!ctx.lastService);
     if ((hasServiceWord && amounts.length >= 1) || (followUp && amounts.length >= 1 && ctx.lastService) || (hasServiceWord && amounts.length >= 1 && hasMoneyWord)) {
-      const entries: { service: string; amountPaise: number; method: PayMethod; customerName?: string }[] = [];
+      const entries: { service: string; amountPaise: number; method: PayMethod | null; customerName?: string }[] = [];
       const globalMethods = (text.match(/\b(cash|upi|nagad|online|gpay|phonepe|paytm)\b/g) || []).map((w) => extractMethod(w));
       const uniqueGlobal = [...new Set(globalMethods)];
       let lastService = ctx.lastService || null;
       let missingMethod = false;
       let missingService = false;
+      // Per-amount methods for the no-service draft, so answering the
+      // service later keeps "300 cash, 200 UPI" as cash + UPI instead
+      // of flattening both to one mode.
+      let missingServiceMethods: (PayMethod | null)[] = [];
       for (const seg of segments) {
         const segAmounts = extractAmounts(seg.text);
         if (segAmounts.length === 0) continue;
         const service = seg.service || lastService;
-        if (!service) { missingService = true; continue; }
+        if (!service) {
+          missingService = true;
+          for (let ai = 0; ai < segAmounts.length; ai++) {
+            const a = segAmounts[ai];
+            const amtLen = String(a.paise / 100).length;
+            let m = methodNear(seg.text, a.index, amtLen, ai + 1 < segAmounts.length ? segAmounts[ai + 1].index : undefined);
+            if (!m && uniqueGlobal.length === 1) m = uniqueGlobal[0];
+            missingServiceMethods.push(m);
+          }
+          continue;
+        }
         for (let ai = 0; ai < segAmounts.length; ai++) {
           const a = segAmounts[ai];
           // Per-amount payment mode ("300 cash, 200 UPI" — not one mode
@@ -769,12 +791,12 @@ export function parseAssistantMessage(
           let method = methodNear(seg.text, a.index, amtLen, ai + 1 < segAmounts.length ? segAmounts[ai + 1].index : undefined);
           if (!method && uniqueGlobal.length === 1) method = uniqueGlobal[0];
           if (!method) missingMethod = true;
-          entries.push({ service, amountPaise: a.paise, method: method || 'cash' });
+          entries.push({ service, amountPaise: a.paise, method });
         }
         lastService = service;
       }
       if (missingService && entries.length === 0) {
-        return draftFor('service', askIn(rawText, 'askService', { amount: money(amounts[0].paise), services: profile.services.join(', ') }), { pendingAmounts: amounts.map((a) => a.paise), date }, rawText);
+        return draftFor('service', askIn(rawText, 'askService', { amount: money(amounts[0].paise), services: profile.services.join(', ') }), { pendingAmounts: amounts.map((a) => a.paise), pendingMethods: missingServiceMethods, date }, rawText);
       }
       if (entries.length === 0) {
         return draftFor('amount', askIn(rawText, 'askAmount', { service: segments[0]?.service || ctx.lastService || 'Service' }), { pendingService: segments[0]?.service || ctx.lastService, date }, rawText);
@@ -788,9 +810,9 @@ export function parseAssistantMessage(
       if (custName && entries.some((e) => e.method === 'other')) {
         for (const e of entries) if (e.method === 'other') e.customerName = custName;
       }
-      const action: AssistantAction = { kind: 'daily_income', date, entries: entries.map((e) => ({ service: e.service, amountPaise: e.amountPaise, method: e.method, customerName: e.customerName })) };
+      const action: AssistantAction = { kind: 'daily_income', date, entries: entries.map((e) => ({ service: e.service, amountPaise: e.amountPaise, method: e.method || 'cash', customerName: e.customerName })) };
       const total = entries.reduce((a, e) => a + e.amountPaise, 0);
-      const previewLines = entries.map((e) => `${e.service} ${money(e.amountPaise)} ${e.method === 'other' ? '(due — abhi mile nahi)' : `(${e.method.toUpperCase()})`}${e.customerName ? ` — ${e.customerName}` : ''}`);
+      const previewLines = entries.map((e) => `${e.service} ${money(e.amountPaise)} ${e.method === 'other' ? '(due — abhi mile nahi)' : `(${(e.method || 'cash').toUpperCase()})`}${e.customerName ? ` — ${e.customerName}` : ''}`);
       const dup = findDuplicateWarning(state, profile.id, action);
       return { kind: 'action', action, previewLines, totalPaise: total, duplicateWarning: dup || undefined };
     }
@@ -800,8 +822,11 @@ export function parseAssistantMessage(
       return draftFor('amount', askIn(rawText, 'askAmount', { service: svc || 'Service' }), { pendingService: svc, date }, rawText);
     }
     // Amount + money words but no service → ask for service (unless follow-up with context).
+    // Carry the per-amount methods along, so answering the service
+    // later keeps "300 cash, 200 UPI" as cash + UPI.
     if (amounts.length >= 1 && !hasServiceWord && hasMoneyWord && !followUp && !/kharcha|expense/.test(q)) {
-      return draftFor('service', askIn(rawText, 'askService', { amount: money(amounts[0].paise), services: profile.services.join(', ') }), { pendingAmounts: amounts.map((a) => a.paise), date }, rawText);
+      const pendingMethods = amounts.map((a, i) => methodNear(text, a.index, String(a.paise / 100).length, i + 1 < amounts.length ? amounts[i + 1].index : undefined));
+      return draftFor('service', askIn(rawText, 'askService', { amount: money(amounts[0].paise), services: profile.services.join(', ') }), { pendingAmounts: amounts.map((a) => a.paise), pendingMethods, date }, rawText);
     }
   }
 
@@ -823,9 +848,12 @@ export function applyDraftAnswer(
   if (draft.missing === 'method' && p.pendingEntries) {
     const method = extractMethod(q);
     if (!method) return draftFor('method', 'Cash ya UPI — kaunsa mode tha?', p, draft.original);
-    const entries = (p.pendingEntries as { service: string; amountPaise: number; method: PayMethod }[]).map((e) => ({ ...e, method }));
+    // Fill ONLY the entries whose mode is still unknown — entries
+    // whose mode the user already stated keep it ("300 cash, 200 UPI"
+    // never flattens to one mode).
+    const entries = (p.pendingEntries as { service: string; amountPaise: number; method: PayMethod | null }[]).map((e) => ({ ...e, method: e.method || method }));
     const date = (p.date as string) || todayISO();
-    const action: AssistantAction = { kind: 'daily_income', date, entries: entries.map((e) => ({ service: e.service, amountPaise: e.amountPaise, method: e.method })) };
+    const action: AssistantAction = { kind: 'daily_income', date, entries: entries.map((e) => ({ service: e.service, amountPaise: e.amountPaise, method: e.method || 'cash' })) };
     const total = entries.reduce((a, e) => a + e.amountPaise, 0);
     const dup = findDuplicateWarning(state, profile.id, action);
     return { kind: 'action', action, previewLines: entries.map((e) => `${e.service} ${formatINR(e.amountPaise)} ${e.method === 'other' ? '(due — abhi mile nahi)' : `(${e.method.toUpperCase()})`}`), totalPaise: total, duplicateWarning: dup || undefined };
@@ -834,16 +862,19 @@ export function applyDraftAnswer(
     const svc = findServiceIn(q, profile.services);
     if (!svc) return draftFor('service', `Service samajh nahi aaya. Services: ${profile.services.join(', ')}.`, p, draft.original);
     const method = extractMethod(q);
-    if (!method) {
-      const entries = (p.pendingAmounts as number[]).map((a) => ({ service: svc, amountPaise: a, method: 'cash' as PayMethod }));
+    // Per-amount modes from the original message ("300 cash, 200 UPI")
+    // survive: the reply's mode fills only the amounts whose mode is
+    // still unknown, it never overwrites a stated mode.
+    const pendingMethods = (p.pendingMethods as (PayMethod | null)[] | undefined) || [];
+    const entries = (p.pendingAmounts as number[]).map((a, i) => ({ service: svc, amountPaise: a, method: (pendingMethods[i] || method || null) as PayMethod | null }));
+    if (entries.some((e) => !e.method)) {
       return draftFor('method', `${svc} ke ${formatINR(entries[0].amountPaise)} — Cash mein mile ya UPI mein?`, { pendingEntries: entries, date: p.date }, draft.original);
     }
     const date = (p.date as string) || todayISO();
-    const entries = (p.pendingAmounts as number[]).map((a) => ({ service: svc, amountPaise: a, method }));
-    const action: AssistantAction = { kind: 'daily_income', date, entries };
+    const action: AssistantAction = { kind: 'daily_income', date, entries: entries.map((e) => ({ service: e.service, amountPaise: e.amountPaise, method: e.method || 'cash' })) };
     const total = entries.reduce((a, e) => a + e.amountPaise, 0);
     const dup = findDuplicateWarning(state, profile.id, action);
-    return { kind: 'action', action, previewLines: entries.map((e) => `${e.service} ${formatINR(e.amountPaise)} (${e.method.toUpperCase()})`), totalPaise: total, duplicateWarning: dup || undefined };
+    return { kind: 'action', action, previewLines: entries.map((e) => `${e.service} ${formatINR(e.amountPaise)} (${(e.method || 'cash').toUpperCase()})`), totalPaise: total, duplicateWarning: dup || undefined };
   }
   if (draft.missing === 'amount' && p.pendingService) {
     if (amounts.length === 0) return draftFor('amount', 'Amount kitna tha? Sirf number likho (jaise: 300).', p, draft.original);

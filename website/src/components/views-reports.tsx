@@ -918,6 +918,10 @@ export function SettingsView({ ctx, section }: { ctx: Ctx; section?: string }) {
             {aiKeySaved && <Btn kind="secondary" onClick={() => { clearAiServiceKey(); setAiKeySaved(false); setMsg('AI chat key removed.'); setTimeout(() => setMsg(''), 2000); }}>Remove Key</Btn>}
           </div>
           <p className="field-hint">Without a key, the assistant says so honestly and still handles everything about your accounts. No provider or service name is shown anywhere in the app.</p>
+          <p className="field-hint">Streaming: when a service is configured here, replies stream in live while you watch them being typed. Without a service, the assistant answers on-device and its replies are typed out at a natural pace instead.</p>
+          {aiKeySaved && !aiEndpointInput.trim() && (
+            <p className="field-hint">Key saved ✓ — add the AI chat service address above to switch on cloud replies. Without an address, the assistant keeps answering on-device. (A key entered in an earlier version of the app is carried over automatically; the address was never stored, so it needs adding once.)</p>
+          )}
         </Card></div>
 
         <Card title={t(lang, 'theme')}>

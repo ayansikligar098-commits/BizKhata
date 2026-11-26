@@ -201,6 +201,34 @@ npx wrangler pages deploy out --project-name bizkhata
 
 Every push to the GitHub repo re-deploys automatically with Option A.
 
+## Streaming architecture
+
+The AI Assistant has two reply paths, and they are not the same thing:
+
+- **Configured service → genuine backend streaming.** When the owner
+  adds an AI service address + key in Settings → AI Chat, chat calls the
+  Cloudflare Pages Function `POST /api/ai-chat` (`functions/api/ai-chat.ts`,
+  free tier), which forwards the request to the owner's own configured
+  endpoint asking for a streaming response and relays the SSE stream to
+  the browser (`src/lib/streaming.ts` parses it). The key and endpoint
+  are never stored server-side and never logged. The reply appears
+  word by word as it arrives, with a three-dot "BizKhata AI is
+  thinking..." indicator until the first word, a blinking cursor while
+  typing, and working Stop / Regenerate / Copy / Retry controls.
+- **No service configured → on-device engine + typewriter display.**
+  The built-in engine (`src/lib/conversation.ts`, `general.ts`,
+  `intent.ts`) generates the whole reply on the device, and the
+  typewriter (`src/lib/streaming.ts`, ~11 words/sec) reveals it
+  progressively. This is a display animation over locally generated
+  text — it is NOT backend streaming, and nothing in the UI claims it
+  is. A key entered in an earlier version of the app is carried over
+  automatically into the new key slot (see `migrateLegacyAiKey` in
+  `src/lib/conversation-ai.ts`); the service address was never stored,
+  so it needs adding once in Settings → AI Chat.
+
+Live cloud streaming is unverified until the owner tests it on their
+own device with their own key — the VM has no key and cannot verify it.
+
 ## Data & privacy
 
 - **Local-first**: all data is stored in the browser's localStorage on the user's
