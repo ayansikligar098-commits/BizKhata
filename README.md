@@ -38,13 +38,13 @@ the same accounting rules.
   money (customer due), agent payables, Money Transfer commission
   (principal is never profit) and fund from the brother. Built-in
   responder (`domain/Chatbot.kt`) always works with no key; when the
-  owner adds his own free Gemini key in Settings ("AI Assistant
-  (Gemini)"), `domain/GeminiChatbotClient` (free tier only, model
-  `gemini-2.0-flash`, plain HttpURLConnection, no new dependency)
-  summarises the same real figures — and if Gemini fails it falls back
-  to the built-in answer and says so. No key is ever embedded or
-  shipped; no number is ever invented; empty data gets a plain "Abhi
-  koi record nahi hai". The Reports AI Insight stays in Reports.
+  owner adds his own AI key in Settings ("AI key" under BizKhata AI
+  Assistant), `domain/CloudAiClient` (provider-neutral, plain
+  HttpURLConnection, no new dependency) summarises the same real
+  figures — and if the cloud AI is unavailable it falls back to the
+  built-in answer and says so. No key is ever embedded or shipped; no
+  number is ever invented; empty data gets a plain "Abhi koi record
+  nahi hai". The AI Business Insights section stays in Reports.
   **Still NOT compiled: this VM has no JDK.** First compile + unit tests
   must happen in Android Studio (`./gradlew testDebugUnitTest`).
 - **DAILY BUSINESS HUB (2026-11-26): the Daily Dhandha screen is now the
@@ -114,10 +114,9 @@ the same accounting rules.
 - `domain/` — pure Kotlin, no Android dependency: `Models` (enums,
   `BusinessCategory` ×15, `JobStatus` ×7), `CategorySetup` (ready-made
   setup per category), `AccountingEngine` (all money rules, paise as
-  `Long`, never `Double`), `AiFeatures` (Gemini free-tier only, off
-  without a key), `Chatbot` (business snapshot + built-in responder —
+  `Long`, never `Double`), `AiFeatures` (cloud AI, off without a key), `Chatbot` (business snapshot + built-in responder —
   every figure from the real ledgers, paise as `Long`),
-  `GeminiChatbotClient` (free-tier Gemini summary of those same facts),
+  `CloudAiClient` (cloud-AI summary of those same facts),
   `Branding` (single place for the app name: `BizKhata`),
   `DailyBusiness` (Daily Business service lists + the MT commission label
   constant — one spelling used by the repository, the ViewModel, Reports
@@ -139,7 +138,7 @@ the same accounting rules.
   (bar chart, Daily Business tab), Difference Finder, Audit Log, Recycle Bin, Customization
   Studio (module toggles + your own services), Settings, Auth (mobile + PIN), Language, Category Pick,
   Chatbot / AI Assistant (message bubbles, suggestion chips, loading +
-  Gemini-failure fallback states, key entry in Settings).
+  cloud-AI failure fallback states, key entry in Settings).
 - `navigation/` — `Routes`, one route per module.
 
 ## Accounting rules (non-negotiable, enforced in `AccountingEngine`)
@@ -193,7 +192,7 @@ Still to do (see `DECISIONS.md` for the full list):
   Android file picker wiring is remaining.
 - Auth: Google Sign-In + mobile login (v2 spec §A) — the scaffold runs
   single-owner local-first for now; add auth before multi-device sync.
-- Gemini key storage hardening: the owner's free key currently lives in
+- AI key storage hardening: the owner's key currently lives in
   app-private DataStore (never in code/git, removable in Settings);
   move it to EncryptedSharedPreferences / server-side when the backend
   is built, so it never sits in plain preferences.
@@ -202,7 +201,7 @@ Still to do (see `DECISIONS.md` for the full list):
 
 Free only. Kotlin/Compose/Room are free; local-first storage; no paid
 hosting, no paid API, no paid service anywhere. WhatsApp reminders are
-manual via share link. The Gemini API is free tier only, with graceful
+manual via share link. Cloud AI is used on its free tier only, with graceful
 fallback when no key is set.
 
 ## Decisions

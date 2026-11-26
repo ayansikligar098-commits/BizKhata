@@ -147,3 +147,20 @@ New facts applied from the original chat:
   does not contain it; login read found no chats).
 - CSC vs plain gold-fill poster choice (asked 2026-11-26 11:38 IST,
   still unanswered).
+
+## UPDATE 12 — remove provider names from the UI (2026-11-26 22:16 IST, owner order)
+
+- The owner sent a screenshot of the live website showing visible
+  third-party AI provider references and ordered ALL of them removed
+  from the whole application. For Android: no provider name, no tier
+  wording, no technical error text in any user-visible string.
+- Branding ONLY: "BizKhata AI Assistant" / "Your Intelligent Business
+  Assistant"; insights heading "AI Business Insights". Settings labels
+  the key entry neutrally as "AI key" (masked, never shown). Errors are
+  plain Hinglish, e.g. "AI abhi available nahi hai, baad me try karo".
+- The AI feature itself is PRESERVED. The underlying cloud provider is
+  unchanged and still free-tier; only its name was removed from the UI.
+  The single remaining provider string in `app/src` is the model
+  identifier value in `AiFeatures.AI_MODEL` (code config, never shown).
+- `domain/GeminiChatbot.kt` was renamed to the provider-neutral
+  `domain/CloudAiClient.kt`; `SettingsStore` key is now neutral `ai_key`.

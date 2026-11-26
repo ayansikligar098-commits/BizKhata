@@ -128,7 +128,93 @@ for f in kt_files:
     # Raw text on purpose: strip_code() removes string literals, and a
     # hardcoded key would hide inside one.
     if "AIza" in f.read_text():
-        fails.append(f"{f.name}: hardcoded Gemini key prefix found (never ship a key)")
+        fails.append(f"{f.name}: hardcoded AI key prefix found (never ship a key)")
+
+# 11. UPDATE 12 — no third-party AI provider name in the app (user-visible
+#     or otherwise), except the single model-identifier constant value in
+#     AiFeatures.kt (code config, never shown in the UI). No "free tier"
+#     wording anywhere in app source.
+for f in kt_files:
+    raw = f.read_text()
+    low = raw.lower()
+    if "gemini" in low and f.name != "AiFeatures.kt":
+        fails.append(f"{f.name}: provider name 'gemini' still present (UPDATE 12)")
+    if f.name == "AiFeatures.kt":
+        for line in raw.splitlines():
+            if "gemini" in line.lower() and "AI_MODEL" not in line:
+                fails.append(f"AiFeatures.kt: provider name outside the AI_MODEL constant: {line.strip()[:80]}")
+    if "free tier" in low or "free-tier" in low:
+        fails.append(f"{f.name}: 'free tier' wording still present (UPDATE 12)")
+    if "http 404" in low or "http_code" in low:
+        fails.append(f"{f.name}: technical provider error text still present (UPDATE 12)")
+    if "GeminiChatbotClient" in raw:
+        fails.append(f"{f.name}: old provider-named client still referenced (use CloudAiClient)")
+
+# 12. AI Assistant files + wiring (UPDATE 9/10/11).
+ai_files = {
+    "domain/AiAssistant.kt": "parser + structured actions",
+    "domain/BusinessKnowledge.kt": "knowledge engine + app help + navigation",
+    "domain/CloudAiClient.kt": "provider-neutral cloud client",
+    "data/ChatHistoryStore.kt": "per-profile chat history",
+    "ui/chatbot/VoiceInput.kt": "SpeechRecognizer voice input",
+    "ui/chatbot/ChatbotViewModel.kt": "12-step execution ViewModel",
+    "ui/chatbot/ChatbotScreen.kt": "assistant screen",
+}
+for rel, what in ai_files.items():
+    if not (MAIN / rel).exists():
+        fails.append(f"AI file missing: {rel} ({what})")
+if (MAIN / "domain/GeminiChatbot.kt").exists():
+    fails.append("domain/GeminiChatbot.kt still exists (renamed to CloudAiClient.kt)")
+for f in kt_files:
+    if 'test' in str(f):
+        continue
+    if "RECORD_AUDIO" in f.read_text() and False:
+        pass
+manifest = (BASE / "../AndroidManifest.xml").read_text() if (BASE / "../AndroidManifest.xml").exists() else ""
+manifest_path = Path.home() / "workspace/al-falah-app/android/app/src/main/AndroidManifest.xml"
+if "RECORD_AUDIO" not in manifest_path.read_text():
+    fails.append("AndroidManifest.xml missing RECORD_AUDIO (voice input)")
+screen = (MAIN / "ui/chatbot/ChatbotScreen.kt").read_text()
+for needle in ["BizKhata AI Assistant", "Your Intelligent Business Assistant",
+               "Confirm & Save", "VoiceInputHelper", "New Chat"]:
+    if needle not in screen:
+        fails.append(f"ChatbotScreen.kt missing: {needle!r}")
+if "AI key" not in (MAIN / "ui/settings/SettingsScreen.kt").read_text():
+    fails.append("SettingsScreen.kt missing neutral 'AI key' label (UPDATE 12)")
+vm = (MAIN / "ui/chatbot/ChatbotViewModel.kt").read_text()
+for needle in ["executeAiAction", "KnowledgeSnapshot", "pendingAction",
+               "navigationEvents", "ChatHistoryStore", "CloudAiClient"]:
+    if needle not in vm:
+        fails.append(f"ChatbotViewModel.kt missing: {needle!r}")
+if "GeminiChatbotClient" in vm or "geminiApiKey" in vm:
+    fails.append("ChatbotViewModel.kt still uses provider-named client/key")
+repo = (MAIN / "data/repository/Repositories.kt").read_text()
+for needle in ["executeAiAction", "AiExecuteResult", "alreadyExecuted",
+               "possibleDuplicateDailyEntry", "addDailyEntry"]:
+    if needle not in repo:
+        fails.append(f"Repositories.kt missing AI executor piece: {needle!r}")
+# Entry points: assistant reachable from Dashboard (FAB), drawer,
+# Daily Business, Money Transfer, Services, ServiceJobs.
+for needle, where in [
+    ("Routes.CHATBOT", "MainActivity"),
+    ("onOpenAssistant", "MainActivity"),
+    ("Routes.CHATBOT", "DailyBusinessScreen"),
+    ("onOpenAssistant", "MoneyTransferScreen"),
+    ("onOpenAssistant", "ServicesScreen"),
+]:
+    fname = {"MainActivity": MAIN / "MainActivity.kt",
+             "DailyBusinessScreen": MAIN / "ui/dailybusiness/DailyBusinessScreen.kt",
+             "MoneyTransferScreen": MAIN / "ui/moneytransfer/MoneyTransferScreen.kt",
+             "ServicesScreen": MAIN / "ui/services/ServicesScreen.kt"}[where]
+    if needle not in fname.read_text():
+        fails.append(f"{where} missing assistant entry point {needle!r}")
+# AI test suite + Python mirror.
+if not (TEST / "AiAssistantTest.kt").exists():
+    fails.append("AiAssistantTest.kt missing (dedicated AI test suite, UPDATE 11 §15)")
+mirror = Path.home() / "workspace/al-falah-app/android/docs/ai_assistant_mirror.py"
+if not mirror.exists():
+    fails.append("docs/ai_assistant_mirror.py missing (JVM-free accuracy measurement)")
+
 
 # 11. Daily Business hub checks
 db_screen = MAIN / "ui/dailybusiness/DailyBusinessScreen.kt"

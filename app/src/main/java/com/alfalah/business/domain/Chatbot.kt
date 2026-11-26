@@ -9,7 +9,7 @@ import java.util.Locale
  *
  * Home: a purple floating chat button on the Dashboard, a "Chatbot / AI
  * Assistant" entry in the navigation drawer, route [Routes.CHATBOT].
- * The AI Insight in Reports stays where it is (reports-analysis entry).
+ * The AI Business Insights section in Reports stays where it is (reports-analysis entry).
  *
  * GOLDEN RULE: the chatbot NEVER invents numbers. Every figure it quotes
  * comes from [BusinessSnapshot], which is computed from the real Room
@@ -20,12 +20,12 @@ import java.util.Locale
  * Two answer paths:
  *  1. Built-in responder ([BuiltInChatbotResponder]) — always available,
  *     answers factual questions straight from the snapshot. Works with
- *     no key, no internet, no Gemini.
- *  2. Gemini (free tier only) — used ONLY for natural-language
- *     understanding / summary of the same snapshot facts, and ONLY when
- *     the owner has added his own free key in Settings. See
- *     [GeminiChatbotClient]. If Gemini fails, the answer falls back to
- *     (1) and says so — the user always gets a real answer.
+ *     no key, no internet, no cloud provider.
+ *  2. Cloud AI summary (provider-independent, configured server-side
+ *     — see [CloudAiClient]) — used ONLY to word the same snapshot
+ *     facts more naturally, and ONLY when a backend AI service is
+ *     configured. If it is unavailable, the answer falls back to (1)
+ *     and says so in plain words — the user always gets a real answer.
  */
 
 private val inFormat: NumberFormat =
@@ -86,8 +86,9 @@ data class BusinessSnapshot(
             moneyTransferPrincipalPaise != 0L || moneyTransferFundPaise != 0L
 }
 
-/** The snapshot as plain facts, handed to Gemini so it can only summarise
- *  real figures — it is told in the prompt never to invent numbers. */
+/** The snapshot as plain facts, handed to a cloud AI (if one is
+ *  configured) so it can only summarise real figures — it is told in
+ *  the prompt never to invent numbers. */
 fun snapshotFacts(snapshot: BusinessSnapshot): String = buildString {
     appendLine("Business facts (real saved records, paise are already converted to rupees):")
     appendLine("Today income (received): ${formatPaise(snapshot.todayIncomePaise)}")
@@ -257,6 +258,7 @@ object BuiltInChatbotResponder {
 
     private fun isIncome(q: String) =
         q.contains("income") || q.contains("kamai") || q.contains("aamad") ||
+            q.contains("dhandha") || q.contains("dhanda") ||
             q.contains("aaj kitni") || q.contains("kitni aayi")
 
     private fun incomeAnswer(snapshot: BusinessSnapshot): String {

@@ -33,6 +33,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.Row
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material3.IconButton
 import com.alfalah.business.domain.ServiceType
 import com.alfalah.business.navigation.Routes
 import com.alfalah.business.ui.components.BizCard
@@ -44,7 +48,10 @@ import com.alfalah.business.ui.components.BizCard
  * and the Dashboard, not from this grid.
  */
 @Composable
-fun ServicesScreen(onOpenService: (String) -> Unit) {
+fun ServicesScreen(
+    onOpenService: (String) -> Unit,
+    onOpenAssistant: () -> Unit = {}
+) {
     val services: List<Pair<ServiceType, ImageVector>> = listOf(
         ServiceType.PAN to Icons.Filled.Badge,
         ServiceType.AADHAAR to Icons.Filled.Fingerprint,
@@ -66,11 +73,17 @@ fun ServicesScreen(onOpenService: (String) -> Unit) {
         item(span = { GridItemSpan(maxLineSpan) }) {
             Column(Modifier.fillMaxWidth()) {
                 Spacer(Modifier.height(4.dp))
-                Text(
-                    "All Services",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
-                )
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "All Services",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = onOpenAssistant) {
+                        Icon(Icons.Filled.Chat, contentDescription = "AI Assistant", tint = com.alfalah.business.ui.theme.BizColors.Purple)
+                    }
+                }
                 Text(
                     "Tap a service to see its jobs and customers.",
                     style = MaterialTheme.typography.bodyMedium,

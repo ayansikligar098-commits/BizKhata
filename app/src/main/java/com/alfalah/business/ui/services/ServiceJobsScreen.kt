@@ -73,7 +73,8 @@ fun ServiceJobsScreen(
     repository: BusinessRepository,
     language: AppLanguage,
     service: ServiceType,
-    onOpenCustomer: (Long) -> Unit
+    onOpenCustomer: (Long) -> Unit,
+    onOpenAssistant: () -> Unit = {}
 ) {
     val jobs by repository.jobsForService(profileId, service).collectAsState(initial = emptyList())
     val customers by repository.searchCustomers(profileId, "").collectAsState(initial = emptyList())
@@ -140,6 +141,13 @@ fun ServiceJobsScreen(
                 onValueChange = { query = it },
                 placeholder = "Search by name, ref no..."
             )
+        }
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                androidx.compose.material3.TextButton(onClick = onOpenAssistant) {
+                    Text("Ask AI Assistant", color = com.alfalah.business.ui.theme.BizColors.Purple)
+                }
+            }
         }
         item {
             PrimaryButton("+ Add ${service.label} ${if (service == ServiceType.XEROX || service == ServiceType.PRINTING) "Job" else "Application"}") {

@@ -14,7 +14,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -67,7 +69,8 @@ import kotlinx.coroutines.launch
 fun MoneyTransferScreen(
     profileId: Long,
     repository: BusinessRepository,
-    language: AppLanguage
+    language: AppLanguage,
+    onOpenAssistant: () -> Unit = {}
 ) {
     val transfers by repository.observeMoneyTransfers(profileId).collectAsState(initial = emptyList())
     val funds by repository.observeFunds(profileId).collectAsState(initial = emptyList())
@@ -101,6 +104,15 @@ fun MoneyTransferScreen(
     val mtUpiBalance = AccountingEngine.moneyTransferClosingBalance(0, fundUpi + allUpiReceived, allUpiSent, 0)
 
     Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Money Transfer", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            IconButton(onClick = onOpenAssistant) {
+                Icon(Icons.Filled.Chat, contentDescription = "AI Assistant", tint = BizColors.Purple)
+            }
+        }
         TabRow(selectedTabIndex = tab) {
             listOf("Overview", "Transactions", "Settlement").forEachIndexed { i, label ->
                 Tab(selected = tab == i, onClick = { tab = i }, text = { Text(label) })

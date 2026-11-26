@@ -80,6 +80,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.alfalah.business.data.ChatHistoryStore
 import com.alfalah.business.data.SettingsStore
 import com.alfalah.business.data.entity.BusinessProfileEntity
 import com.alfalah.business.domain.AppLanguage
@@ -131,6 +132,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val app = application as AlFalahApp
         val settings = SettingsStore(this)
+        val chatHistory = ChatHistoryStore(applicationContext)
 
         setContent {
             val language by settings.language.collectAsState(initial = AppLanguage.ENGLISH)
@@ -144,7 +146,8 @@ class MainActivity : ComponentActivity() {
             val activeProfileId by settings.activeProfileId.collectAsState(initial = -1L)
             val hasPin by settings.hasPin.collectAsState(initial = false)
             val savedMobile by settings.mobile.collectAsState(initial = "")
-            val geminiApiKey by settings.geminiApiKey.collectAsState(initial = "")            var unlocked by remember { mutableStateOf(false) }
+            val aiKey by settings.aiKey.collectAsState(initial = "")
+            var unlocked by remember { mutableStateOf(false) }
 
             // The active profile: the one the user picked, else the first one.
             // Profiles are strictly isolated — every screen gets this id.
@@ -384,7 +387,10 @@ class MainActivity : ComponentActivity() {
                                     )
                                 }
                                 composable(Routes.SERVICES) {
-                                    ServicesScreen(onOpenService = { route -> nav.navigate(route) })
+                                    ServicesScreen(
+                                        onOpenService = { route -> nav.navigate(route) },
+                                        onOpenAssistant = { nav.navigate(Routes.CHATBOT) }
+                                    )
                                 }
                                 composable(Routes.CASH_BOOK) {
                                     val profile = activeProfile ?: return@composable
@@ -396,7 +402,12 @@ class MainActivity : ComponentActivity() {
                                 }
                                 composable(Routes.MONEY_TRANSFER) {
                                     val profile = activeProfile ?: return@composable
-                                    MoneyTransferScreen(profileId = profile.id, repository = app.repository, language = language)
+                                    MoneyTransferScreen(
+                                        profileId = profile.id,
+                                        repository = app.repository,
+                                        language = language,
+                                        onOpenAssistant = { nav.navigate(Routes.CHATBOT) }
+                                    )
                                 }
                                 composable(Routes.SERVICE) { backStackEntry ->
                                     val profile = activeProfile ?: return@composable
@@ -406,7 +417,8 @@ class MainActivity : ComponentActivity() {
                                         repository = app.repository,
                                         language = language,
                                         service = ServiceType.valueOf(serviceName),
-                                        onOpenCustomer = { id -> nav.navigate(Routes.customerDetail(id)) }
+                                        onOpenCustomer = { id -> nav.navigate(Routes.customerDetail(id)) },
+                                        onOpenAssistant = { nav.navigate(Routes.CHATBOT) }
                                     )
                                 }
                                 composable(Routes.CUSTOMER_DETAIL) { backStackEntry ->
@@ -494,8 +506,10 @@ class MainActivity : ComponentActivity() {
                                         profileId = profile.id,
                                         repository = app.repository,
                                         settings = settings,
+                                        chatHistory = chatHistory,
                                         language = language,
-                                        onOpenSettings = { nav.navigate(Routes.SETTINGS) }
+                                        onOpenSettings = { nav.navigate(Routes.SETTINGS) },
+                                        onOpenRoute = { route -> nav.navigate(route) }
                                     )
                                 }
                                 composable(Routes.DIFFERENCE_FINDER) {
@@ -526,9 +540,9 @@ class MainActivity : ComponentActivity() {
                                         onProfile = { id -> scope.launch { settings.setActiveProfile(id) } },
                                         onOpen = { route -> nav.navigate(route) },
                                         onRemovePin = { scope.launch { settings.clearPin() } },
-                                        geminiApiKey = geminiApiKey,
-                                        onSaveGeminiKey = { key -> scope.launch { settings.setGeminiApiKey(key) } },
-                                        onClearGeminiKey = { scope.launch { settings.clearGeminiApiKey() } }
+                                        aiKey = aiKey,
+                                        onSaveAiKey = { key -> scope.launch { settings.setAiKey(key) } },
+                                        onClearAiKey = { scope.launch { settings.clearAiKey() } }
                                     )
                                 }
                             }

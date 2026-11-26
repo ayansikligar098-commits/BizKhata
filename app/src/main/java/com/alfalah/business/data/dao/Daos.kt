@@ -115,6 +115,19 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions WHERE profileId = :profileId AND state = 'ACTIVE' ORDER BY dateEpochDay DESC")
     fun observeAll(profileId: Long): Flow<List<TransactionEntity>>
 
+    @Query("SELECT * FROM transactions WHERE id = :id")
+    suspend fun getById(id: Long): TransactionEntity?
+
+    /** AI search: find a transaction by amount / category / description
+     *  within one profile (used to identify the exact record a user
+     *  wants corrected or deleted — never across profiles). */
+    @Query(
+        "SELECT * FROM transactions WHERE profileId = :profileId AND state = 'ACTIVE' " +
+        "AND (category LIKE '%' || :query || '%' OR description LIKE '%' || :query || '%') " +
+        "ORDER BY dateEpochDay DESC LIMIT 20"
+    )
+    suspend fun search(profileId: Long, query: String): List<TransactionEntity>
+
     @Query("SELECT COALESCE(SUM(amountPaise), 0) FROM transactions WHERE profileId = :profileId AND kind = 'INCOME' AND mode = :mode AND state = 'ACTIVE' AND dateEpochDay = :day")
     suspend fun incomeOnDay(profileId: Long, mode: String, day: Long): Long
 
@@ -188,6 +201,12 @@ interface AgentDao {
 
     @Query("SELECT * FROM agent_payments WHERE agentId = :agentId AND state = 'ACTIVE' ORDER BY dateEpochDay DESC")
     fun observePayments(agentId: Long): Flow<List<AgentPaymentEntity>>
+
+    /** AI knowledge: all agent payments for a profile (one flow, so the
+     *  assistant can answer "is month agents ko kitna diya?" without
+     *  one query per agent). */
+    @Query("SELECT * FROM agent_payments WHERE profileId = :profileId AND state = 'ACTIVE' ORDER BY dateEpochDay DESC")
+    fun observeAllPayments(profileId: Long): Flow<List<AgentPaymentEntity>>
 }
 
 @Dao
@@ -228,6 +247,11 @@ interface DocumentDao {
 
     @Query("UPDATE documents SET state = 'DELETED' WHERE id = :id")
     suspend fun softDelete(id: Long)
+
+    /** AI knowledge: how many documents this profile has (metadata only —
+     *  the files themselves stay in private storage, never read by the AI). */
+    @Query("SELECT COUNT(*) FROM documents WHERE profileId = :profileId AND state = 'ACTIVE'")
+    suspend fun countForProfile(profileId: Long): Long
 }
 
 @Dao
@@ -245,6 +269,11 @@ interface ReceiptDao {
 interface MaintenanceDao {
     @Query("SELECT * FROM maintenance WHERE equipmentId = :equipmentId AND state = 'ACTIVE' ORDER BY dateEpochDay DESC")
     fun observeByEquipment(equipmentId: Long): Flow<List<MaintenanceEntity>>
+
+    /** AI knowledge: all maintenance rows for a profile (equipment
+     *  trends, "Epson par total kitna kharcha hua?"). */
+    @Query("SELECT * FROM maintenance WHERE profileId = :profileId AND state = 'ACTIVE' ORDER BY dateEpochDay DESC")
+    fun observeAll(profileId: Long): Flow<List<MaintenanceEntity>>
 
     @Query("SELECT COALESCE(SUM(costPaise), 0) FROM maintenance WHERE equipmentId = :equipmentId AND state = 'ACTIVE'")
     suspend fun lifetimeCost(equipmentId: Long): Long
@@ -269,4 +298,11 @@ interface AuditLogDao {
     fun observeRecent(profileId: Long): Flow<List<AuditLogEntity>>
 
     @Insert suspend fun insert(log: AuditLogEntity): Long
+
+    /** Idempotency ledger (UPDATE 9 §13, UPDATE 11 §5): how many audit
+     *  rows already carry this AI action key. > 0 means the action was
+     *  already executed — a retry must NOT write it again. The key is a
+     *  random-looking hex string; it never contains money or names. */
+    @Query("SELECT COUNT(*) FROM audit_log WHERE profileId = :profileId AND newValue LIKE '%' || :key || '%'")
+    suspend fun countWithKey(profileId: Long, key: String): Long
 }

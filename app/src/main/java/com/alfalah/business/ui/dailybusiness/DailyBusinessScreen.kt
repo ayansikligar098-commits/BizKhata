@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.AlertDialog
@@ -101,7 +102,12 @@ fun DailyBusinessScreen(
     ) {
         item {
             Spacer(Modifier.height(4.dp))
-            Text("Daily Business", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Daily Business", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                IconButton(onClick = { onOpen(Routes.CHATBOT) }) {
+                    Icon(Icons.Filled.Chat, contentDescription = "AI Assistant", tint = BizColors.Purple)
+                }
+            }
             Text(
                 "Daily Dhandha — all of today's small work in one place. Entries from the service modules appear here automatically; nothing is entered twice.",
                 style = MaterialTheme.typography.bodyMedium,

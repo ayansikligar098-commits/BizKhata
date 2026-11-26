@@ -1,62 +1,54 @@
 package com.alfalah.business.domain
 
 /**
- * AI features — Gemini API, FREE TIER ONLY (owner's decision, 2026-11-26:
- * "Esa Hoto Gemini Ki Api Use Kar Lena").
+ * AI features — BizKhata AI Assistant (owner order 2026-11-26 22:16 IST:
+ * REMOVE ALL third-party AI provider references from the app).
  *
- * Rules:
- *  - No paid plan, no paid API, no paid AI service — ever.
- *  - The Gemini API key is the OWNER's to provide later via secure setup
- *    if he wants AI switched on. NEVER invent, embed or ship a key.
- *    There is no sample key anywhere in this codebase.
- *  - AI is optional and future (v2 spec §AI): chatbot, sales insights,
- *    demand prediction, customer recommendations, voice commands.
- *  - Graceful fallback: when no key is set (or quota is used up) the app
- *    works fully without AI and tells the owner plainly that AI is off.
+ * Branding the user ever sees is ONLY "BizKhata AI Assistant" /
+ * "Your Intelligent Business Assistant" and "AI Business Insights".
+ * No provider name, no API key, no provider error text appears anywhere
+ * in the UI. The assistant's real work — understanding Hinglish, the
+ * knowledge engine, structured actions, confirmation, audit — is all
+ * built-in and works with no key, no internet and no cloud provider.
  *
- * Implementation plan (when the backend is built):
- *  - The key is stored server-side / in the secure credential store, never
- *    in the app binary and never in git.
- *  - All Gemini calls go through the backend (or a small repository layer),
- *    never directly from UI code, so the key never reaches the device.
- *  - Every AI answer is labelled as AI-generated and is never written into
- *    financial records automatically.
+ * Provider independence (UPDATE 12): the cloud call lives behind
+ * [CloudAiClient] under a provider-neutral name; its configuration is
+ * the owner's own key (Settings, labelled "AI key"), stored only in the
+ * app-private DataStore. The key value is never displayed and no
+ * provider name, error code or integration detail ever reaches the UI.
+ * If the cloud is unavailable the assistant says so in plain words and
+ * answers from the built-in assistant instead. AI functionality is
+ * PRESERVED — nothing was removed except provider-specific wording.
  *
- * IMPLEMENTED (2026-11-26) — the chatbot:
- *  - Home: purple floating chat button on the Dashboard + "Chatbot / AI
- *    Assistant" in the drawer, route Routes.CHATBOT.
- *  - [GeminiChatbotClient] implements [AiAssistant] (free tier only).
- *  - The built-in responder ([BuiltInChatbotResponder]) answers from the
- *    real Room ledgers with no key at all; Gemini only summarises those
- *    same facts when the owner added his key in Settings.
- *  - The Reports AI Insight stays in Reports as the reports-analysis
- *    entry point — the chatbot is the ask-anything entry point.
+ * (UPDATE 12, 2026-11-26 22:16 IST: the owner approved the underlying
+ * cloud provider, but its name must NEVER appear in the UI.)
  */
 object AiFeatures {
-    /** AI is OFF until the owner adds his own free-tier Gemini key. */
+    /** Cloud AI summary is off by default; the built-in assistant is always on. */
     const val AI_ENABLED_BY_DEFAULT = false
 
-    /** Free-tier model to use when AI is switched on. */
-    const val GEMINI_FREE_MODEL = "gemini-2.0-flash"
+    /** Cloud model identifier (provider configuration — never shown in the UI). */
+    const val AI_MODEL = "gemini-2.0-flash"
 
     sealed interface AiResult {
-        /** AI is not set up — show this, keep the app working. */
+        /** Cloud AI is not set up — show this, keep the app working. */
         data class NotAvailable(val reason: String) : AiResult
         data class Answer(val text: String) : AiResult
     }
 
-    /** Minimal contract the future Gemini repository will implement. */
+    /** Minimal contract a future backend-hosted AI service will implement.
+     *  The provider is chosen server-side; the app never knows its name. */
     interface AiAssistant {
-        /** Ask the assistant a business question (sales insights, advice). */
+        /** Ask the assistant a business question (insights, advice). */
         suspend fun ask(question: String, businessContext: String): AiResult
     }
 
-    /** Fallback used until a key is provided — the app stays fully usable. */
+    /** Fallback used until a backend AI service is configured — the app
+     *  stays fully usable on its built-in assistant. */
     class OfflineFallback : AiAssistant {
         override suspend fun ask(question: String, businessContext: String): AiResult =
             AiResult.NotAvailable(
-                "AI is off. Add your own free-tier Gemini API key in Settings " +
-                "to switch on the assistant. The app works fully without it."
+                "AI summary abhi band hai. BizKhata AI aapke real record se built-in jawab deta hai."
             )
     }
 }

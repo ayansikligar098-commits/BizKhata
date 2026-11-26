@@ -5,6 +5,8 @@
     <!-- No WebView is used anywhere in this app. Native Kotlin + Jetpack Compose only. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <!-- Voice input for the AI Assistant (SpeechRecognizer). Requested at runtime from the chat screen. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
 
     <application

@@ -24,7 +24,7 @@ class SettingsStore(context: Context) {
     private val PIN_HASH = stringPreferencesKey("pin_hash")
     private val MOBILE = stringPreferencesKey("mobile")
     private val DISABLED_MODULES = stringPreferencesKey("disabled_modules")
-    private val GEMINI_API_KEY = stringPreferencesKey("gemini_api_key")
+    private val AI_KEY = stringPreferencesKey("ai_key")
     private val CUSTOM_SERVICES = stringPreferencesKey("custom_services")
 
     /** Theme mode: LIGHT, DARK or SYSTEM (default SYSTEM — follows the phone). */
@@ -158,21 +158,22 @@ class SettingsStore(context: Context) {
         }
     }
 
-    // --- Gemini API key (chatbot AI summary, free tier only) ---
-    // The OWNER's own free-tier key, added by him in Settings. No key is
+    // --- BizKhata AI Assistant key (UPDATE 12, owner order 2026-11-26) ---
+    // The owner's own AI key, entered by him in Settings under the neutral
+    // label "AI key". No provider name appears anywhere in the UI, the key
+    // VALUE is never displayed (password-masked field only), and no key is
     // invented, embedded or shipped in the app. Stored in the app-private
     // DataStore (never in code, never in git); the owner can remove it at
     // any time, which switches the AI summary off. Without a key the
-    // chatbot still answers from real data with its built-in responder.
-    // (Future hardening: move to EncryptedSharedPreferences / server-side.)
+    // assistant still answers from real data with its built-in responder.
 
-    val geminiApiKey: Flow<String> = store.data.map { it[GEMINI_API_KEY] ?: "" }
+    val aiKey: Flow<String> = store.data.map { it[AI_KEY] ?: "" }
 
-    suspend fun setGeminiApiKey(key: String) {
-        store.edit { it[GEMINI_API_KEY] = key.trim() }
+    suspend fun setAiKey(key: String) {
+        store.edit { it[AI_KEY] = key.trim() }
     }
 
-    suspend fun clearGeminiApiKey() {
-        store.edit { it.remove(GEMINI_API_KEY) }
+    suspend fun clearAiKey() {
+        store.edit { it.remove(AI_KEY) }
     }
 }

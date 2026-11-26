@@ -15,8 +15,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -26,7 +26,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.alfalah.business.data.SettingsStore
 import com.alfalah.business.data.entity.BusinessProfileEntity
@@ -54,9 +53,9 @@ fun SettingsScreen(
     onProfile: (Long) -> Unit,
     onOpen: (String) -> Unit,
     onRemovePin: () -> Unit,
-    geminiApiKey: String = "",
-    onSaveGeminiKey: (String) -> Unit = {},
-    onClearGeminiKey: () -> Unit = {}
+    aiKey: String = "",
+    onSaveAiKey: (String) -> Unit = {},
+    onClearAiKey: () -> Unit = {}
 ) {
     var showLanguage by remember { mutableStateOf(false) }
     var showTheme by remember { mutableStateOf(false) }
@@ -64,8 +63,8 @@ fun SettingsScreen(
     var showAbout by remember { mutableStateOf(false) }
     var showReceiptSettings by remember { mutableStateOf(false) }
     var showSecurity by remember { mutableStateOf(false) }
-    var showGeminiKey by remember { mutableStateOf(false) }
-    var geminiKeyInput by remember { mutableStateOf("") }
+    var showAiKey by remember { mutableStateOf(false) }
+    var aiKeyInput by remember { mutableStateOf("") }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
@@ -91,11 +90,16 @@ fun SettingsScreen(
             SettingsRow("Service Settings", "Services, agents and job statuses") { onOpen(Routes.SERVICES) }
             SettingsRow("Categories", "Business category and ready-made setup") { onOpen(Routes.CATEGORY_PICK) }
             SettingsRow("Customization Studio", "Enable / disable modules") { onOpen(Routes.CUSTOMIZATION) }
+            // BizKhata AI Assistant — branding only, no provider name,
+            // no key, no provider details (owner order 2026-11-26 22:16 IST).
+            // BizKhata AI Assistant — branding only, no provider name.
+            // The key entry is labelled neutrally ("AI key"); the key
+            // value is never shown (UPDATE 12).
             SettingsRow(
-                "AI Assistant (Gemini)",
-                if (geminiApiKey.isNotBlank()) "AI summary ON — free tier key saved (tap to change / remove)"
-                else "AI summary OFF — tap to add your free Gemini key"
-            ) { geminiKeyInput = ""; showGeminiKey = true }
+                "BizKhata AI Assistant",
+                if (aiKey.isNotBlank()) "AI summary ON — key saved (tap to change / remove)"
+                else "AI summary OFF — tap to add your AI key"
+            ) { aiKeyInput = ""; showAiKey = true }
             SettingsRow("Audit Log", "Old → new values for every change") { onOpen(Routes.AUDIT_LOG) }
             SettingsRow("Recycle Bin", "Deleted jobs — restore them here") { onOpen(Routes.RECYCLE_BIN) }
             SettingsRow("Data & Backup", "CSV export, local backup") { onOpen(Routes.REPORTS) }
@@ -183,30 +187,30 @@ fun SettingsScreen(
         )
     }
 
-    if (showGeminiKey) {
+    if (showAiKey) {
         AlertDialog(
-            onDismissRequest = { showGeminiKey = false },
-            title = { Text("AI Assistant — Gemini Key (Free Tier)") },
+            onDismissRequest = { showAiKey = false },
+            title = { Text("BizKhata AI Assistant — AI Key") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Chatbot ka AI summary chalu karne ke liye apni FREE Gemini API key yahan daalein. " +
+                        "AI summary chalu karne ke liye apni AI key yahan daalein. " +
                             "Key sirf is phone me save hoti hai — app me ya git me koi key nahi hoti. " +
-                            "Key ke bina bhi chatbot aapke real record se built-in jawab deta hai; " +
+                            "Key ke bina bhi assistant aapke real record se built-in jawab deta hai; " +
                             "key sirf AI summary ke liye hai. Key hataane par AI summary band ho jata hai."
                     )
                     OutlinedTextField(
-                        value = geminiKeyInput,
-                        onValueChange = { geminiKeyInput = it },
-                        label = { Text("Gemini API key") },
-                        placeholder = { Text("Apni free key yahan paste karein") },
+                        value = aiKeyInput,
+                        onValueChange = { aiKeyInput = it },
+                        label = { Text("AI key") },
+                        placeholder = { Text("Apni AI key yahan paste karein") },
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
                         modifier = Modifier.fillMaxWidth()
                     )
-                    if (geminiApiKey.isNotBlank()) {
+                    if (aiKey.isNotBlank()) {
                         Button(
-                            onClick = { onClearGeminiKey(); showGeminiKey = false },
+                            onClick = { onClearAiKey(); showAiKey = false },
                             modifier = Modifier.fillMaxWidth()
                         ) { Text("Remove Key (AI summary band karein)") }
                     }
@@ -215,12 +219,12 @@ fun SettingsScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        if (geminiKeyInput.isNotBlank()) onSaveGeminiKey(geminiKeyInput)
-                        showGeminiKey = false
+                        if (aiKeyInput.isNotBlank()) onSaveAiKey(aiKeyInput)
+                        showAiKey = false
                     }
                 ) { Text("Save Key") }
             },
-            dismissButton = { TextButton(onClick = { showGeminiKey = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { showAiKey = false }) { Text("Cancel") } }
         )
     }
 
@@ -253,7 +257,7 @@ fun SettingsScreen(
                         "Native Android (Kotlin + Jetpack Compose), local-first Room database, free forever. " +
                         "Decisions (changeable): one profile per category; local-first with sync when online; " +
                         "backup/export PDF + Excel/CSV; WhatsApp reminders manual via share link; no inventory in CSC v1; " +
-                        "Gemini AI free tier only, off until the owner adds a key."
+                        "BizKhata AI Assistant answers from your real records."
                 )
             },
             confirmButton = {},
