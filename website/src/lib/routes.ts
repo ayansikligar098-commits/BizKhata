@@ -33,6 +33,7 @@ export const ROUTES: RouteDef[] = [
   { key: 'reports', path: '/reports', title: 'Reports', sub: 'Business, service, customer and agent reports', icon: '↗', i18n: 'reports', module: 'reports' },
   { key: 'difference', path: '/difference-finder', title: 'Difference Finder', sub: 'Expected vs recorded — suggestions only, never edits', icon: '≠', i18n: 'differenceFinder', module: 'differenceFinder' },
   { key: 'chatbot', path: '/chatbot', title: 'AI Assistant', sub: 'Ask about your business — profit, dues, agents, Money Transfer', icon: '💬' },
+  { key: 'module-requests', path: '/module-requests', title: 'Module Requests', sub: 'Development requests queued from the AI Assistant', icon: '▦' },
   { key: 'recycle', path: '/recycle-bin', title: 'Recycle Bin', sub: 'Deleted records — restore them here', icon: '↺', i18n: 'recycleBin' },
   { key: 'audit', path: '/audit-log', title: 'Audit Log', sub: 'Every change, old value → new value', icon: '☰', i18n: 'auditLog' },
   { key: 'customize', path: '/customization', title: 'Customization Studio', sub: 'Services, modules and dashboard cards for this profile', icon: '✦', i18n: 'customization' },

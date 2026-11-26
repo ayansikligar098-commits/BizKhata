@@ -121,14 +121,26 @@ const WELCOME =
   'Namaste! Main aapka BizKhata AI Assistant hoon — Your Intelligent Business Assistant. Aap mujhse apne business ke baare mein kuch bhi pooch sakte ho, ya aise hi bata do kya hua (jaise: "Aaj Xerox ke 300 cash hue"). Main pehle preview dikhaunga, aap confirm karoge, tabhi entry save hogi. Mere jawab aapke real record se aate hain.';
 
 const QUICK_QUESTIONS = [
-  'Aaj Xerox ke 300 cash hue',
   'Aaj ka dhandha kitna hua?',
-  'Is month Xerox se kitna kamaya?',
-  'Sabse zyada due kis customer ka hai?',
-  'Agent ko kitna dena hai?',
   'Cash Book kholo',
-  'Cash Book mein entry kaise add karu?',
+  'Kal ke kaam ki checklist banao',
 ];
+
+/**
+ * Context note for the cloud engine (UPDATE 20 §8): what the local
+ * router already knows about this conversation, so the cloud reply
+ * stays consistent with the pending offer / question / checklist
+ * instead of starting over.
+ */
+function cloudContextNote(ctx: ChatContext): string {
+  const parts: string[] = [];
+  if (ctx.lastTopic) parts.push(`Current topic: ${ctx.lastTopic}.`);
+  if (ctx.pendingOffer?.kind === 'checklist') parts.push(`You already offered a ${ctx.pendingOffer.topic} checklist for ${ctx.pendingOffer.when}; if the user says yes, confirm the checklist will be made.`);
+  if (ctx.pendingOffer?.kind === 'app_change' && ctx.pendingOffer.spec) parts.push(`You already showed a proposed plan for "${ctx.pendingOffer.spec.name}"; if the user says yes, confirm it will be saved to the development queue (it is NOT built yet).`);
+  if (ctx.pendingQuestion) parts.push(`You asked: how many ${ctx.pendingQuestion.label} (${ctx.pendingQuestion.topic})? The user may answer with just a number${ctx.pendingQuestion.answeredValue !== undefined ? ` (current value: ${ctx.pendingQuestion.answeredValue})` : ''}.`);
+  if (ctx.activeChecklist) parts.push(`There is an active checklist (${ctx.activeChecklist.topic}, ${ctx.activeChecklist.when}); the user may ask to edit it, translate it, or see it again.`);
+  return parts.join(' ');
+}
 
 function chatKey(profileId: string): string {
   return `bizkhata.chat.v1.${profileId}`;
@@ -260,6 +272,9 @@ function useChat(onNavigateAway?: () => void) {
   const [activeId, setActiveId] = React.useState('');
   const [input, setInput] = React.useState('');
   const [busy, setBusy] = React.useState(false);
+  /** Contextual follow-up chips for the last reply (UPDATE 20 §2).
+   *  Empty = no chips. Fresh chats show the starter set instead. */
+  const [suggestions, setSuggestions] = React.useState<string[]>([]);
   const [historyQuery, setHistoryQuery] = React.useState('');
   const [showHistory, setShowHistory] = React.useState(false);
   const msgsRef = React.useRef<HTMLDivElement>(null);
@@ -654,6 +669,7 @@ function useChat(onNavigateAway?: () => void) {
     setActiveId(c.id);
     draftRef.current = null;
     pendingRef.current = null;
+    setSuggestions([]);
     setShowHistory(false);
   }
 
@@ -1007,6 +1023,11 @@ function useChat(onNavigateAway?: () => void) {
           const preview = previewFromAction(parsed.action, parsed.previewLines, parsed.totalPaise, parsed.duplicateWarning);
           const msg = botReply('Ye entries save karun?', { preview });
           pendingRef.current = { msgId: msg.id, preview };
+          // Remember the service at preview time (UPDATE 21 §5): the
+          // next message ("Aur 200 UPI") resolves on the same service.
+          if (parsed.action.kind === 'daily_income' && parsed.action.entries.length > 0) {
+            setCtx({ lastService: parsed.action.entries[0].service });
+          }
           setBusy(false);
           return;
         }
@@ -1020,6 +1041,11 @@ function useChat(onNavigateAway?: () => void) {
 
       // 2. Confirm / cancel of a pending preview (pending context wins
       //    over the router — "haan" after a preview means "save it").
+      //    UPDATE 17 / BUG A: a bare "Ha" is ALSO how the owner accepts
+      //    a pending checklist offer — that must reach the router
+      //    (accept_offer), never the "no pending entry" line. And with
+      //    no pending preview AND no pending offer, "haan" confirms
+      //    nothing: say so honestly instead of claiming a missing entry.
       const parsed0 = parseAssistantMessage(q, state, profile, ctx);
       if (parsed0.kind === 'confirm') {
         if (pendingRef.current) {
@@ -1027,9 +1053,13 @@ function useChat(onNavigateAway?: () => void) {
           await confirmPreview(pendingRef.current.msgId);
           return;
         }
-        botReply('Confirm karne ke liye koi pending entry nahi hai. Pehle koi entry batao (jaise: "Aaj Xerox ke 300 cash hue").');
-        setBusy(false);
-        return;
+        if (!ctx.pendingOffer) {
+          botReply('Theek hai! Batao kis liye haan — koi entry save karni hai, checklist banana hai, ya kuch aur help chahiye?');
+          setBusy(false);
+          return;
+        }
+        // Checklist offer pending: fall through to the router below —
+        // classifyIntent resolves the bare yes against the offer.
       }
       if (parsed0.kind === 'cancel') {
         if (pendingRef.current) {
@@ -1037,9 +1067,13 @@ function useChat(onNavigateAway?: () => void) {
           setBusy(false);
           return;
         }
-        botReply('Cancel karne ke liye koi pending entry nahi hai.');
-        setBusy(false);
-        return;
+        if (!ctx.pendingOffer) {
+          botReply('Cancel karne ke liye koi pending entry nahi hai.');
+          setBusy(false);
+          return;
+        }
+        // An offer is pending: "Nahi" declines it — fall through to
+        // the router (decline_offer), never the pending-entry line.
       }
 
       // 3. Unified conversation router (UPDATE 14/15/16) — intent is
@@ -1109,17 +1143,18 @@ function useChat(onNavigateAway?: () => void) {
       }
 
       // 4. Dynamic conversational AI (UPDATE 15) — streaming (UPDATE 17):
-      //    when the local engine cannot genuinely answer (res.cloudNeeded)
-      //    AND the owner has configured an AI service in Settings, the
-      //    reply streams from that service via /api/ai-chat (real SSE,
-      //    see conversation-ai.ts). The service never performs financial
-      //    actions and never sees the whole database. If the configured
-      //    service fails, the message shows Retry — it never silently
-      //    substitutes the local reply for a failed configured service.
-      //    With no service configured, the honest local reply is typed
-      //    out progressively by the typewriter instead.
+      //    UPDATE 20 §8: for general / casual / unknown / plan questions
+      //    the cloud engine is the PRIMARY reasoning path when a key is
+      //    configured (with history + profile + tools + the pending
+      //    offer/question/checklist in the system prompt). The local
+      //    reply is only the fallback: if the service fails or times
+      //    out, displayText types the local reply with the grey cloud
+      //    note — never a silent substitution. Business-data questions
+      //    and financial actions keep local as primary (figures from
+      //    real ledgers; money never moves on a cloud reply).
+      const cloudPrimary = res.intent === 'general' || res.intent === 'casual' || res.intent === 'unknown' || res.intent === 'plan';
       let cloudJob: { history: AiChatMessage[]; system: string } | undefined;
-      if (res.cloudNeeded && hasAiServiceKey()) {
+      if (hasAiServiceKey() && (res.cloudNeeded || (cloudPrimary && res.kind === 'text' && !res.checklist))) {
         const history: AiChatMessage[] = (convRef.current.conversations.find((c) => c.id === convRef.current.activeId)?.messages || [])
           .filter((m) => !m.preview)
           .slice(-10)
@@ -1133,9 +1168,12 @@ function useChat(onNavigateAway?: () => void) {
           category: profile.category,
           services: profile.services,
           factsSummary: factsSummary(facts),
+          contextNote: cloudContextNote(res.newCtx),
         });
         cloudJob = { history, system };
       }
+      // Contextual follow-up chips for this reply (UPDATE 20 §2).
+      setSuggestions(res.suggestions || []);
       botReply(res.text, { table: res.table, links: res.links }, cloudJob);
       setBusy(false);
     } catch (e) {
@@ -1190,6 +1228,7 @@ function useChat(onNavigateAway?: () => void) {
     messages, input, setInput, busy, send, msgsRef,
     conversations, activeId, setActiveId: switchConversation, newChat, clearHistory,
     historyQuery, setHistoryQuery, showHistory, setShowHistory,
+    suggestions,
     confirmPreview, cancelPreview, applyEdit, updateMsg,
     listening, toggleMic, speakOn, setSpeakOn,
     voiceState, continuous, toggleContinuous, stopVoice, interim, speaking, voiceSupported,
@@ -1424,13 +1463,23 @@ function ChatBody({ chat }: { chat: ReturnType<typeof useChat> }) {
           </div>
         ))}
       </div>
-      <div className="chat-chips">
-        {QUICK_QUESTIONS.map((q) => (
-          <button key={q} className="chat-chip" onClick={() => chat.send(q)}>
-            {q}
-          </button>
-        ))}
-      </div>
+      {/* Contextual follow-up chips (UPDATE 20 §2): only suggestions
+          relevant to the last reply. A fresh chat shows the starter
+          set; after that, no chips unless the reply earned some. */}
+      {(() => {
+        const hasUser = chat.messages.some((m) => m.role === 'user');
+        const chips = hasUser ? chat.suggestions : QUICK_QUESTIONS;
+        if (chips.length === 0) return null;
+        return (
+          <div className="chat-chips">
+            {chips.map((q) => (
+              <button key={q} className="chat-chip" onClick={() => chat.send(q)}>
+                {q}
+              </button>
+            ))}
+          </div>
+        );
+      })()}
       <div className="chat-input-row">
         <button
           className={`icon-btn chat-mic ${chat.listening ? 'listening' : ''} ${chat.voiceState === 'speaking' ? 'speaking' : ''}`}
@@ -1495,11 +1544,11 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
           <div style={{ fontWeight: 700 }}>BizKhata AI Assistant</div>
           <div style={{ fontSize: 12, opacity: 0.85 }}>Your Intelligent Business Assistant • {chat.profileName}</div>
         </div>
-        <button className="icon-btn" style={{ color: '#fff' }} onClick={() => chat.setSpeakOn(!chat.speakOn)} aria-label={chat.speakOn ? 'Turn off voice replies' : 'Turn on voice replies'} title="Voice replies">
+        <button className="icon-btn" onClick={() => chat.setSpeakOn(!chat.speakOn)} aria-label={chat.speakOn ? 'Turn off voice replies' : 'Turn on voice replies'} title="Voice replies">
           {chat.speakOn ? '🔊' : '🔇'}
         </button>
-        <button className="icon-btn" style={{ color: '#fff' }} onClick={chat.newChat} aria-label="New chat" title="New chat">＋</button>
-        <button className="icon-btn" style={{ color: '#fff' }} onClick={onClose} aria-label="Close chat">✕</button>
+        <button className="icon-btn" onClick={chat.newChat} aria-label="New chat" title="New chat">＋</button>
+        <button className="icon-btn" onClick={onClose} aria-label="Close chat">✕</button>
       </div>
       <ChatBody chat={chat} />
     </div>
@@ -1573,7 +1622,7 @@ export function ChatPageView() {
             <div style={{ fontWeight: 700 }}>BizKhata AI Assistant</div>
             <div style={{ fontSize: 12, opacity: 0.85 }}>Your Intelligent Business Assistant • {chat.profileName} • Ask in any of 22 Indian languages — Hinglish, Gujarati, Marathi, Tamil…</div>
           </div>
-          <button className="icon-btn" style={{ color: '#fff' }} onClick={() => chat.setSpeakOn(!chat.speakOn)} aria-label={chat.speakOn ? 'Turn off voice replies' : 'Turn on voice replies'} title="Voice replies">
+          <button className="icon-btn" onClick={() => chat.setSpeakOn(!chat.speakOn)} aria-label={chat.speakOn ? 'Turn off voice replies' : 'Turn on voice replies'} title="Voice replies">
             {chat.speakOn ? '🔊' : '🔇'}
           </button>
           <button className="btn btn-secondary" style={{ background: 'rgba(255,255,255,.15)', color: '#fff', borderColor: 'transparent' }} onClick={() => chat.setShowHistory(!chat.showHistory)}>History</button>

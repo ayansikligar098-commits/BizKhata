@@ -343,6 +343,7 @@ tbody tr:hover { background: var(--surface-2); }
 }
 .cell-with-ico { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; background: var(--surface-2); color: var(--text); white-space: nowrap; }
+.chip { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; background: var(--surface-2); color: var(--text); white-space: nowrap; border: 1px solid var(--border); }
 .pill.paid, .pill.completed, .pill.delivered { background: #dff3e6; color: #0e7a5f; }
 .pill.due, .pill.pending { background: #fde8e6; color: #b3261e; }
 .pill.in-progress, .pill.submitted { background: #fff1d6; color: #8a5a00; }
@@ -409,6 +410,15 @@ tbody tr:hover { background: var(--surface-2); }
   background: linear-gradient(135deg, var(--purple), var(--purple-ink));
   color: #fff; padding: 12px 14px; display: flex; align-items: center; gap: 10px;
 }
+/* Header icon buttons sit ON the purple gradient: white glyphs on a
+   translucent white circle. The plain .icon-btn is a white circle, so
+   a white glyph on it was invisible (＋ / ✕ unreadable, BUG B). */
+.chat-panel-head .icon-btn {
+  background: rgba(255, 255, 255, .16);
+  border-color: rgba(255, 255, 255, .35);
+  color: #fff;
+}
+.chat-panel-head .icon-btn:hover { border-color: rgba(255, 255, 255, .75); }
 .chat-msgs { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
 .chat-msg {
   max-width: 88%; padding: 9px 12px; border-radius: 12px;

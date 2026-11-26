@@ -203,6 +203,7 @@ for (const [canon, ...variants] of VOCAB_ENTRIES) {
  *  Gujarati genitive "na/no" mid-sentence is never mistaken for "no". */
 const YES_WORDS = new Set([
   'haan', 'ha', 'haa', 'hanji', 'ho', 'yes', 'yep', 'ok', 'okay', 'theek', 'bilkul',
+  'हाँ', 'हां',
   'aamaam', 'aamam', 'avunu', 'haudu', 'athe', 'haanji', 'ji', 'hajo', 'hoy', 'barobar', 'hoi', 'aam', 'aah', 'ao',
 ]);
 const NO_WORDS = new Set([
@@ -301,8 +302,10 @@ export function normalizeMultilingual(raw: string): string {
   const converted = normalizeNumberWordsTokens(words.map((w) => w.toLowerCase()));
   // Rebuild preserving original spacing roughly (single spaces are fine for the parser).
   s = converted.join(' ');
-  // First-word yes/no → haan/nahi (confirmation handling).
-  const first = s.trim().split(/\s+/)[0]?.toLowerCase().replace(/[^\p{L}]/gu, '') || '';
+  // First-word yes/no → haan/nahi (confirmation handling). Keep
+  // combining marks (\p{M}) so Devanagari "हाँ" stays "हाँ" (and maps
+  // via YES_WORDS) instead of collapsing to "ह".
+  const first = s.trim().split(/\s+/)[0]?.toLowerCase().replace(/[^\p{L}\p{M}]/gu, '') || '';
   if (YES_WORDS.has(first)) s = s.replace(/^\S+/, 'haan');
   else if (NO_WORDS.has(first) && s.trim().split(/\s+/).length <= 3) s = s.replace(/^\S+/, 'nahi');
   return s;
@@ -342,8 +345,13 @@ export function detectLanguage(text: string): DetectedLanguage {
     // Strong Hinglish markers — one is enough ("Kaise ho bhai?" has
     // three: kaise + ho + bhai). Weaker markers need a second signal
     // so a shared word like "aaj" alone cannot force Hindi.
-    if (has(/\b(kaise|bhai|hoon|hun|mujhe|kaisa)\b/)
-      || (has(/\b(kya|hai|rahe|mera|tum|batao|banane|chahiye|tha)\b/) && has(/\b(aaj|kal|kitna|kaam|shop|hisab|dhandha|kharcha|rupaye|kaisa)\b/))) {
+    // UPDATE 20: "nahi / raha / chal / gaya" are Hindi too — without
+    // them "Internet nahi chal raha" scored as English (no marker hit).
+    // UPDATE 20 (drive): bare Indian greetings ("Namaste", "Salaam")
+    // are Hinglish too — without them a bare "Namaste" scored as
+    // English and the first reply came back in English.
+    if (has(/\b(kaise|bhai|hoon|hun|mujhe|kaisa|namaste|namaskar|salaam|adaab|ram ram)\b/)
+      || (has(/\b(kya|hai|rahe|mera|tum|batao|banane|chahiye|tha|nahi|nahin|raha|rahi|chal|gaya|hua)\b/) && has(/\b(aaj|kal|kitna|kaam|shop|hisab|dhandha|kharcha|rupaye|kaisa|internet|printer|phone|upi|payment|wifi|computer|mobile|slow|fail|band|garam|hang)\b/))) {
       return { code: 'hi', style: 'romanized', confidence: 0.85, languages: ['hi'], script: null };
     }
   }
@@ -365,7 +373,7 @@ export function detectLanguage(text: string): DetectedLanguage {
     or: ['aji', 'kete', 'kemiti', 'kana', 'gatakali', 'milila'],
     as: ['aji', 'kiman', 'ketiya', 'kowa', 'palo'],
     ur: ['aaj', 'kitna', 'batao', 'paisa', 'diye', 'kya', 'kaise'],
-    hi: ['aaj', 'kal', 'kitna', 'batao', 'munafa', 'kharcha', 'baaki', 'kaise', 'bhai', 'kya', 'hai', 'hoon', 'rahe', 'mujhe', 'mera', 'tum', 'karna', 'banane', 'chahiye', 'tha', 'kaisa'],
+    hi: ['aaj', 'kal', 'kitna', 'batao', 'munafa', 'kharcha', 'baaki', 'kaise', 'bhai', 'kya', 'hai', 'hoon', 'rahe', 'mujhe', 'mera', 'tum', 'karna', 'banane', 'chahiye', 'tha', 'kaisa', 'nahi', 'raha', 'chal', 'kaam', 'gaya', 'hua', 'namaste', 'namaskar', 'salaam', 'adaab'],
     ne: ['aaja', 'kati', 'kasari', 'kahile', 'paayo', 'hijo'],
     sa: ['adya', 'katham', 'labhah', 'vyayah'],
     ks: ['az', 'kith', 'kath', 'chhu'],

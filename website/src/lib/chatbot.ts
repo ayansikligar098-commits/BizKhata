@@ -246,7 +246,7 @@ export function answerLocally(question: string, f: BusinessFacts, preferred?: Ai
   }
 
   // Income.
-  if (has(q, /income|kamai|received|collection|aaya|mila/)) {
+  if (has(q, /income|kamai|kamaya|kamaye|received|collection|aaya|mila/)) {
     return { intent: 'income', text: t('income', { income: formatINR(f.todayIncomePaise), monthIncome: formatINR(f.monthIncomePaise) }) };
   }
 
@@ -737,7 +737,12 @@ export function parseAssistantMessage(
 
   // --- Expense: "machine repair mein 200 kharch hue". ---
   if (/kharcha|kharach|expense|repair|bijli|electricity|internet|kagaz|paper|\bink\b|kiraya|rent|transport|petrol/.test(q) && amounts.length >= 1 && !/money\s*transfer/.test(q)) {
-    const amt = amounts[0].paise;
+    // Amount NEAREST the expense word, not amounts[0]: "Xerox ke 300
+    // cash hue, aur 100 ka kagaz kharida" must expense ₹100 (kagaz),
+    // never ₹300 (the Xerox income mentioned first).
+    const expMatch = rawText.toLowerCase().match(/kharcha|kharach|expense|repair|bijli|electricity|internet|kagaz|paper|\bink\b|kiraya|rent|transport|petrol/);
+    const expIdx = expMatch?.index ?? 0;
+    const amt = amounts.reduce((best, a) => (Math.abs(a.index - expIdx) < Math.abs(best.index - expIdx) ? a : best), amounts[0]).paise;
     const category = expenseCategoryFor(q, profile);
     const svc = findServiceIn(q, profile.services) || 'General';
     const method = cashUpiMethod(extractMethod(q), 'cash');

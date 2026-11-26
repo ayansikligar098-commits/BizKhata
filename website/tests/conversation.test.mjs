@@ -39,6 +39,7 @@ const conv = require(path.join(outDir, 'conversation.js'));
 const chat = require(path.join(outDir, 'chatbot.js'));
 const lang = require(path.join(outDir, 'languages.js'));
 const gen = require(path.join(outDir, 'general.js'));
+const intentLib = require(path.join(outDir, 'intent.js'));
 const asst = require(path.join(outDir, 'assistant.js'));
 
 // Local calendar date — the app dates everything in the device's
@@ -281,6 +282,107 @@ run('u16', '"Mujhe Gujarati mein samjhao" executes the switch (reply language ch
   const r = R('Mujhe Gujarati mein samjhao.');
   const d = lang.detectLanguage(r.text);
   return { ok: r.languageChanged === 'gu' && d.code === 'gu', reply: r.text, detail: '' };
+});
+
+/* ================= UPDATE 17 — video-sequence regression (BUG A) =================
+ * Exact 21s screen-recording sequence on bizkhata.pages.dev:
+ *   "Kal Pan Card Banane Hai" → plan reply + checklist offer
+ *   "Ha" → REAL saved checklist (was: "Confirm karne ke liye koi
+ *   pending entry nahi hai")
+ *   "Kal Pan Card Banane Hai Checklist Bana Do" → REAL saved checklist
+ *   (was: the same plan reply again, no checklist ever built)
+ * Plus: bare "Ha" with no offer and no entry must never produce the
+ * pending-entry line as a financial confirm. */
+const NO_PENDING_ENTRY_LINE = /Confirm karne ke liye koi pending entry/i;
+run('u17', 'VIDEO (1) "Kal Pan Card Banane Hai" → plan + checklist offer + pendingOffer recorded', () => {
+  const { state, p1 } = emptyState();
+  const r = conv.respondToMessage({ message: 'Kal Pan Card Banane Hai', state, profile: p1, ctx: {} });
+  const ok = r.intent === 'plan' && /checklist/i.test(r.text) && /haan/i.test(r.text)
+    && r.newCtx.pendingOffer && r.newCtx.pendingOffer.kind === 'checklist'
+    && r.newCtx.pendingOffer.topic === 'pan' && r.newCtx.pendingOffer.when === 'kal';
+  return { ok: !!ok, reply: r.text, detail: ` intent=${r.intent} pendingOffer=${JSON.stringify(r.newCtx.pendingOffer)}` };
+});
+run('u17', 'VIDEO (2) "Ha" after the offer → real SAVED checklist, never the pending-entry line', () => {
+  const { state, p1 } = emptyState();
+  const first = conv.respondToMessage({ message: 'Kal Pan Card Banane Hai', state, profile: p1, ctx: {} });
+  const r = conv.respondToMessage({ message: 'Ha', state, profile: p1, ctx: first.newCtx });
+  const saved = gen.listChecklists(p1.id);
+  const ok = r.intent === 'accept_offer' && r.kind === 'checklist' && r.checklist
+    && r.checklist.items.length >= 5 && /Aadhaar Card/i.test(r.text)
+    && saved.length >= 1 && saved[0].id === r.checklist.id
+    && !NO_PENDING_ENTRY_LINE.test(r.text) && !r.newCtx.pendingOffer;
+  return { ok: !!ok, reply: r.text, detail: ` intent=${r.intent} kind=${r.kind} items=${r.checklist ? r.checklist.items.length : 0} saved=${saved.length}` };
+});
+run('u17', 'VIDEO (3) "Kal Pan Card Banane Hai Checklist Bana Do" → do_checklist, real saved checklist (not the plan reply)', () => {
+  const { state, p1 } = emptyState();
+  const r = conv.respondToMessage({ message: 'Kal Pan Card Banane Hai Checklist Bana Do', state, profile: p1, ctx: {} });
+  const saved = gen.listChecklists(p1.id);
+  const ok = r.intent === 'do_checklist' && r.kind === 'checklist' && r.checklist
+    && r.checklist.items.length >= 5 && /Aadhaar Card/i.test(r.text)
+    && saved.length >= 1 && saved[0].id === r.checklist.id && !/Kitne applications hain/i.test(r.text);
+  return { ok: !!ok, reply: r.text, detail: ` intent=${r.intent} kind=${r.kind} items=${r.checklist ? r.checklist.items.length : 0} saved=${saved.length}` };
+});
+run('u17', 'VIDEO full sequence, threaded ctx: plan → "Ha" (checklist) → explicit request (2nd checklist, offer consumed)', () => {
+  const p1 = profile('profU17seq', 'Al Falah Communication');
+  const state = emptyState().state;
+  state.profiles = [p1]; state.activeProfileId = 'profU17seq';
+  let ctx = {};
+  const r1 = conv.respondToMessage({ message: 'Kal Pan Card Banane Hai', state, profile: p1, ctx });
+  ctx = r1.newCtx;
+  const r2 = conv.respondToMessage({ message: 'Ha', state, profile: p1, ctx });
+  ctx = r2.newCtx;
+  const r3 = conv.respondToMessage({ message: 'Kal Pan Card Banane Hai Checklist Bana Do', state, profile: p1, ctx });
+  const saved = gen.listChecklists('profU17seq');
+  const ok = r1.intent === 'plan' && r2.intent === 'accept_offer' && r2.kind === 'checklist'
+    && r3.intent === 'do_checklist' && r3.kind === 'checklist'
+    && saved.length >= 2 && !NO_PENDING_ENTRY_LINE.test(r2.text) && !NO_PENDING_ENTRY_LINE.test(r3.text);
+  return { ok: !!ok, reply: `1) ${r1.text}\n2) ${r2.text}\n3) ${r3.text}`, detail: ` intents=${r1.intent}/${r2.intent}/${r3.intent} saved=${saved.length}` };
+});
+run('u17', '"Ha" with NO pending offer and NO pending entry → honest reply, never the pending-entry line, never a checklist', () => {
+  const r = R('Ha');
+  const ok = r.intent !== 'accept_offer' && r.kind !== 'checklist' && !NO_PENDING_ENTRY_LINE.test(r.text);
+  return { ok: !!ok, reply: r.text, detail: ` intent=${r.intent} kind=${r.kind}` };
+});
+run('u17', 'Offer clears on topic change: plan → profit question → "Ha" is NOT an acceptance', () => {
+  const { state, p1 } = emptyState();
+  const first = conv.respondToMessage({ message: 'Kal Pan Card Banane Hai', state, profile: p1, ctx: {} });
+  const mid = conv.respondToMessage({ message: 'Aaj kitna profit hua?', state, profile: p1, ctx: first.newCtx });
+  const r = conv.respondToMessage({ message: 'Ha', state, profile: p1, ctx: mid.newCtx });
+  const ok = !mid.newCtx.pendingOffer && r.intent !== 'accept_offer' && r.kind !== 'checklist' && !NO_PENDING_ENTRY_LINE.test(r.text);
+  return { ok: !!ok, reply: r.text, detail: ` midPendingOffer=${JSON.stringify(mid.newCtx.pendingOffer)} intent=${r.intent}` };
+});
+run('u17', 'Phrasings → do_checklist: "checklist bana do" / "checklist bana de" / "list bana do" / "checklist bana dijiye" / "checklist banake do"', () => {
+  const services = ['PAN Card', 'Aadhaar Services', 'Xerox'];
+  const cases = ['checklist bana do', 'checklist bana de', 'list bana do', 'checklist bana dijiye', 'checklist banake do', 'checklist bana dena', 'checklist banakar do', 'kaam ki list bana do'];
+  const bad = cases.filter((c) => intentLib.classifyIntent(c, {}, services) !== 'do_checklist');
+  return { ok: bad.length === 0, reply: cases.map((c) => `${c} → ${intentLib.classifyIntent(c, {}, services)}`).join('\n'), detail: bad.length ? ` missed: ${bad.join(', ')}` : '' };
+});
+run('u17', 'Phrasings → do_summary (same space bug): "summary bana do" / "report bana do" / "hisab bana do"', () => {
+  const services = ['PAN Card', 'Aadhaar Services', 'Xerox'];
+  const cases = ['summary bana do', 'report bana do', 'hisab bana do', 'summary bana de'];
+  const bad = cases.filter((c) => intentLib.classifyIntent(c, {}, services) !== 'do_summary');
+  return { ok: bad.length === 0, reply: cases.map((c) => `${c} → ${intentLib.classifyIntent(c, {}, services)}`).join('\n'), detail: bad.length ? ` missed: ${bad.join(', ')}` : '' };
+});
+run('u17', 'Acceptance phrasings with a pending offer: "Bana do" / "Kar do" / "Theek hai" / bare "checklist" / "हाँ"', () => {
+  const services = ['PAN Card', 'Aadhaar Services', 'Xerox'];
+  const offerCtx = { pendingOffer: { kind: 'checklist', topic: 'pan', when: 'kal' } };
+  const cases = ['Bana do', 'Kar do', 'Theek hai', 'checklist', 'हाँ', 'Haan', 'Yes', 'bana dijiye'];
+  const bad = cases.filter((c) => intentLib.classifyIntent(c, offerCtx, services) !== 'accept_offer');
+  return { ok: bad.length === 0, reply: cases.map((c) => `${c} → ${intentLib.classifyIntent(c, offerCtx, services)}`).join('\n'), detail: bad.length ? ` missed: ${bad.join(', ')}` : '' };
+});
+run('u17', '"Ha, aur Xerox 300 cash hue" (yes + a real entry) is NOT swallowed as an offer acceptance', () => {
+  const offerCtx = { pendingOffer: { kind: 'checklist', topic: 'pan', when: 'kal' } };
+  const got = intentLib.classifyIntent('Ha, aur Xerox 300 cash hue', offerCtx, ['PAN Card', 'Xerox']);
+  return { ok: got !== 'accept_offer', reply: `intent=${got}`, detail: ` got ${got}` };
+});
+run('u17', '"Kal mujhe kya kya kaam karna chahiye?" list → "Ha" saves it as a checklist', () => {
+  const { state, p1 } = emptyState();
+  const first = conv.respondToMessage({ message: 'Kal mujhe kya kya kaam karna chahiye?', state, profile: p1, ctx: {} });
+  const r = conv.respondToMessage({ message: 'Ha', state, profile: p1, ctx: first.newCtx });
+  const saved = gen.listChecklists(p1.id);
+  const ok = first.newCtx.pendingOffer && first.newCtx.pendingOffer.topic === 'shop_day'
+    && r.intent === 'accept_offer' && r.kind === 'checklist' && saved.length >= 1;
+  return { ok: !!ok, reply: r.text, detail: ` intent=${r.intent} kind=${r.kind} saved=${saved.length}` };
 });
 
 /* ================= Summary ================= */

@@ -65,12 +65,78 @@ export function normalizeDevanagariWords(text: string): string {
   return normalizeMultilingual(text);
 }
 
+/** An offer the assistant made and is waiting on — e.g. after a plan
+ *  reply offered a checklist ("bas 'haan' bolo"), or after an
+ *  app-change reply showed a spec ("Haan, banao" queues it). A bare
+ *  yes while this is set EXECUTES the offer instead of being misread
+ *  as a financial confirm. Set when the offer is made, cleared when
+ *  it is acted on or the topic changes. */
+export interface PendingOffer {
+  kind: 'checklist' | 'app_change';
+  /** Checklist topic for buildChecklist ('pan', 'shop_day', ...). */
+  topic: string;
+  /** When the work is for ('kal', 'parso', 'aaj'). */
+  when: string;
+  /** Proposed change, for app_change offers (see dev-requests.ts). */
+  spec?: import('./dev-requests').AppChangeSpec;
+  /** The exact words the app change was asked with (for the queue record). */
+  requestedAs?: string;
+}
+
+/**
+ * A question the assistant asked and is waiting on — e.g. after a PAN
+ * plan reply asked "Kitne applications hain?". A bare follow-up
+ * ("5", "Nahi, 3 the, 5 nahi") resolves against this instead of
+ * falling through to the fixed not-understood reply (UPDATE 21).
+ * Kept while the user stays in the same topic; cleared on topic change.
+ */
+export interface PendingQuestion {
+  kind: 'count' | 'yesno' | 'choice';
+  /** Topic the question is about ('pan', 'shop_day', ...). */
+  topic: string;
+  /** Service the question is about, if any ('PAN Card'). */
+  service: string | null;
+  /** What is being asked, e.g. 'applications'. */
+  label: string;
+  /** Resolved value, once the user answered (for corrections). */
+  answeredValue?: number;
+}
+
+/**
+ * The checklist the conversation is currently working on. Follow-ups
+ * edit it ("documents bhi add karo"), re-render it in another language
+ * ("English mein likho") or show it again ("phir dikhao") — the
+ * content survives topic switches, so the user can return to it.
+ * Base items are derived from the topic + language; customItems are
+ * the user's own additions (kept verbatim across languages).
+ */
+export interface ActiveChecklist {
+  id: string;
+  topic: string;
+  when: string;
+  lang: AiLangCode;
+  /** Number the checklist is for (e.g. 5 PAN applications), if any. */
+  count?: number;
+  customItems: string[];
+}
+
 export interface ChatContext {
   lastService?: string;
   lastPeriodKey?: string;
   lastCustomer?: string;
   lastAgent?: string;
   lastTopic?: string;
+  /** Pending offer from the assistant (see PendingOffer). */
+  pendingOffer?: PendingOffer;
+  /** Question the assistant asked and is waiting on (see PendingQuestion). */
+  pendingQuestion?: PendingQuestion;
+  /** Checklist the conversation is currently working on (see ActiveChecklist). */
+  activeChecklist?: ActiveChecklist;
+  /** Financial preview the assistant just showed and is waiting on
+   *  (confirm / cancel / correct) — lets a correction ("Nahi, 250 the")
+   *  rebuild the preview instead of starting over. Cleared when the
+   *  topic changes or the action is confirmed/cancelled. */
+  pendingAction?: import('./assistant').AssistantAction;
   /** Facts the user told the assistant ("runs a CSC centre") — used to
    *  resolve follow-ups ("What about expenses?" → CSC expenses). */
   userFacts?: string[];
@@ -252,23 +318,55 @@ export function appHelp(q: string): KnowledgeAnswer | null {
     links: [{ label: linkLabel, path }],
     context: ctx,
   });
-  if (/cash\s*book/.test(s) && /kaise|how|add|entry/.test(s)) {
+  // Module-specific "kahan likhu" entries FIRST (UPDATE 20 §5): the
+  // generic Daily Business entry below used to swallow every "kahan
+  // record karu?" question — agent payments, MT fund, maintenance and
+  // PAN work all wrongly got the Daily Business answer.
+  if (/agent/.test(s) && /(payment|pay|de\b|record|likh|kahan|kaise)/.test(s)) {
+    return help('Agent ko payment dene ke liye:', ['Agents page kholo aur agent chuno.', '"Record Agent Payment" dabao.', 'Job aur amount chuno (due se zyada nahi).', 'Save dabao — payable kam ho jayega aur Cash/UPI Book mein entry banegi.'], '/agents', 'Open Agents');
+  }
+  if (/money transfer/.test(s) && /(fund|record|likh|kahan|kaise|add)/.test(s)) {
+    return help('Money Transfer ke liye:', ['Money Transfer page kholo.', 'Pehle "Add Fund" se bhai se mila fund add karo (UPI).', 'Phir "New Transfer" se receiver, amount aur commission likho.', 'Daily closing mein Starting + Fund − Sent − Expenses dikhega.'], '/money-transfer', 'Open Money Transfer');
+  }
+  if (/maintenance|machine/.test(s) && /(kahan|kaise|likh|record)/.test(s)) {
+    return help('Machine maintenance likhne ke liye:', ['Machine Maintenance page kholo.', 'Machine chuno (ya "Add Machine" se nayi machine add karo).', '"Add Maintenance" dabao — date, kaam, kharcha aur parts likho.', 'Save dabao — machine ka lifetime cost aur next maintenance date update ho jayega.'], '/machine-maintenance', 'Open Machine Maintenance');
+  }
+  if (/pan/.test(s) && /(kaam|kahan|likh|record|kaise)/.test(s)) {
+    return help('PAN Card ka kaam likhne ke liye:', ['PAN Card module kholo.', '"Add Job" dabao — customer ka naam, mobile aur documents likho.', 'Application date, fee aur status (New / In Progress / Completed) likho.', 'Save dabao — job PAN list aur Daily Business dono mein dikhega.'], '/services/pan-card', 'Open PAN Card');
+  }
+  if (/customer.*khata|khata/.test(s) && /(kahan|kaise|dikhao|likh|kya)/.test(s)) {
+    return help('Customer Khata dekhne ke liye:', ['Customer Khata page kholo.', 'Customer chuno — uska Ledger, Jobs aur Documents dikhenge.', 'Udhaar aur payment dono yahin dikhte hain; payment record karne ke liye "Add Payment" dabao.'], '/customer-khata', 'Open Customer Khata');
+  }
+  if (/cash\s*book/.test(s) && /(kahan|kaise|how|add|entry|dikhao)/.test(s)) {
     return help('Cash Book mein entry add karne ke liye:', ['Cash Book page kholo (neeche button se).', '"Add Entry" dabao.', 'Amount, Cash/UPI mode aur note likho.', 'Save dabao — entry Cash Book aur Daily Business dono mein dikhegi.'], '/cash-book', 'Open Cash Book');
   }
-  if (/upi\s*book/.test(s) && /kaise|how|add|entry/.test(s)) {
+  if (/upi\s*book/.test(s) && /(kahan|kaise|how|add|entry|dikhao)/.test(s)) {
     return help('UPI Book mein entry add karne ke liye:', ['UPI Book page kholo.', '"Add Entry" dabao.', 'Amount aur note likho (mode UPI hi hoga).', 'Save dabao.'], '/upi-book', 'Open UPI Book');
   }
-  if (/customer.*add|add.*customer|naya customer|new customer/.test(s)) {
-    return help('Naya customer add karne ke liye:', ['Customers page kholo.', '"Add Customer" dabao.', 'Naam aur mobile number likho.', 'Save dabao — customer Customer Khata mein bhi dikhega.'], '/customers', 'Open Customers');
+  if (/report/.test(s) && /(kahan|kaise|download|dikhao|kya)/.test(s)) {
+    return help('Report dekhne / download karne ke liye:', ['Reports page kholo.', 'Period chuno — Today / Week / Month / Year.', 'Business Summary, service-wise income aur chart dikhenge.', '"Download PDF" ya "Export" se report download karo.'], '/reports', 'Open Reports');
   }
-  if (/agent.*payment|agent ko.*(pay|de|payment)|pay.*agent/.test(s) && /kaise|how/.test(s)) {
-    return help('Agent ko payment dene ke liye:', ['Agents page kholo aur agent chuno.', '"Record Agent Payment" dabao.', 'Job aur amount chuno (due se zyada nahi).', 'Save dabao — payable kam ho jayega aur Cash/UPI Book mein entry banegi.'], '/agents', 'Open Agents');
+  if (/settings/.test(s)) {
+    return help('Settings kholne ke liye:', ['Settings page kholo (neeche More menu se ya yahan button se).', 'Language, business profile, backup, AI Chat aur theme yahin se badalte hain.'], '/settings', 'Open Settings');
   }
   if (/receipt/.test(s) && /kaise|how|generate|ban/.test(s)) {
     return help('Receipt banane ke liye:', ['Receipt Generator kholo.', 'Customer, service, total aur paid amount likho.', 'Layout chuno — A4 ya Thermal.', '"Generate" dabao, phir Print / PDF / WhatsApp share karo.'], '/receipt-generator', 'Open Receipt Generator');
   }
-  if (/daily.*report|daily business|dhandha.*report/.test(s) && /kahan|kaha|where|kaise|how/.test(s)) {
+  if (/daily.*report|daily business|daily dhandha|dhandha.*report/.test(s) && /kahan|kaha|where|kaise|how/.test(s)) {
     return help('Daily report dekhne ke liye:', ['Daily Business page kholo.', 'Today / Week / Month / Year chuno.', 'Collection, kharcha aur net earnings upar dikhenge; neeche service-wise breakdown hai.', 'CSV export bhi kar sakte ho.'], '/daily-business', 'Open Daily Business');
+  }
+  // Where to record the day's mixed shop work (UPDATE 20 §1/§5):
+  // "Mene jo dukan se dhandha kara use ye website me kha likhu?" —
+  // Daily Business is the place for combined daily service
+  // collections. This now runs AFTER the module-specific entries
+  // above, so it only answers the generic "dhandha kahan likhu?"
+  // question.
+  if (/\b(kha|kahan|kidhar|where)\b.*(likh|likhu|likhna|entry|note|record|daal)/.test(s)
+    || /(dhandha|kamai|collection)\b.*\b(kha|kahan|kidhar|likh)/.test(s)) {
+    return help('Dukan ka dhandha likhne ke liye — Daily Business:', ['Daily Business page kholo — yehi jagah hai din bhar ki mixed service collection likhne ki (Xerox, Printing, PAN Card, sab ek jagah).', '"Add Entry" dabao.', 'Service chuno (Xerox, Printing, PAN Card...), amount aur Cash/UPI likho.', 'Save dabao — entry Daily Business ke saath-saath Cash Book / UPI Book aur service report mein bhi dikhegi.', 'Sirf Cash ki entry ke liye Cash Book, sirf UPI ke liye UPI Book bhi hai — par din ka total dhandha Daily Business mein likha jata hai.'], '/daily-business', 'Open Daily Business');
+  }
+  if (/customer.*add|add.*customer|naya customer|new customer/.test(s)) {
+    return help('Naya customer add karne ke liye:', ['Customers page kholo.', '"Add Customer" dabao.', 'Naam aur mobile number likho.', 'Save dabao — customer Customer Khata mein bhi dikhega.'], '/customers', 'Open Customers');
   }
   if (/profile.*change|business.*(change|switch|badlo)|profile.*badlo/.test(s)) {
     return help('Business profile badalne ke liye:', ['Upar top bar mein business ka naam (profile switcher) dabao.', 'Jo business kholna hai use chuno.', 'Poora app usi business ka data dikhane lagega — profiles ka data kabhi mix nahi hota.'], '/dashboard', 'Open Dashboard');
@@ -282,9 +380,6 @@ export function appHelp(q: string): KnowledgeAnswer | null {
   if (/difference finder/.test(s)) {
     return help('Difference Finder use karne ke liye:', ['Difference Finder kholo.', 'Scope chuno — Cash, UPI, Money Transfer, Service ya General.', 'Apna ginna hua (expected) balance likho.', '"Find Possible Causes" dabao — app batayega kahan fark ho sakta hai. Ye kabhi entry khud nahi badalta.'], '/difference-finder', 'Open Difference Finder');
   }
-  if (/money transfer/.test(s) && /kaise|how|add|fund/.test(s)) {
-    return help('Money Transfer ke liye:', ['Money Transfer page kholo.', 'Pehle "Add Fund" se bhai se mila fund add karo (UPI).', 'Phir "New Transfer" se receiver, amount aur commission likho.', 'Daily closing mein Starting + Fund − Sent − Expenses dikhega.'], '/money-transfer', 'Open Money Transfer');
-  }
   if (/backup/.test(s)) {
     return help('Backup lene ke liye:', ['Settings kholo.', '"Download Backup" dabao — poora data JSON file mein download hoga.', 'Wapas lane ke liye "Import Backup" se wahi file chuno.'], '/settings', 'Open Settings');
   }
@@ -297,6 +392,7 @@ export const NAV_ROUTES: { re: RegExp; path: string; label: string }[] = [
   { re: /upi\s*book/, path: '/upi-book', label: 'UPI Book' },
   { re: /money\s*transfer/, path: '/money-transfer', label: 'Money Transfer' },
   { re: /daily\s*business|daily\s*dhandha/, path: '/daily-business', label: 'Daily Business' },
+  { re: /module\s*requests?/, path: '/module-requests', label: 'Module Requests' },
   { re: /customer\s*khata|khata/, path: '/customer-khata', label: 'Customer Khata' },
   { re: /customers?/, path: '/customers', label: 'Customers' },
   { re: /agents?/, path: '/agents', label: 'Agents' },

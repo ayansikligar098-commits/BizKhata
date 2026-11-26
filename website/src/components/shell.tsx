@@ -317,6 +317,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
           {!reportsOpen && navLink('difference')}
           <div className="nav-section">System</div>
           {navLink('chatbot')}
+          {navLink('module-requests')}
           {navLink('recycle')}
           {navLink('audit')}
           {navLink('customize')}
