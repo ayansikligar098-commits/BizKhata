@@ -3,18 +3,20 @@ import React from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { useApp } from '@/lib/app-context';
 import {
-  answerLocally,
   applyDraftAnswer,
   computeFacts,
+  factsSummary,
   findDuplicateWarning,
   parseAssistantMessage,
   type ActionDraft,
 } from '@/lib/chatbot';
 import { applyAssistantAction, type AssistantAction, type ExecResult } from '@/lib/assistant';
-import { computeKnowledge, type ChatContext, type KnowledgeTable } from '@/lib/knowledge';
+import { buildSystemPrompt, callConversationAI, hasAiServiceKey, type AiChatMessage } from '@/lib/conversation-ai';
+import { langName, respondToMessage } from '@/lib/conversation';
+import { type ChatContext, type KnowledgeTable } from '@/lib/knowledge';
 import { loadState } from '@/lib/store';
 import { formatINR } from '@/lib/money';
-import { detectLanguage, replyIn, voiceLangFor } from '@/lib/languages';
+import { detectLanguage, voiceLangFor } from '@/lib/languages';
 import { uid } from '@/lib/types';
 
 /**
@@ -439,7 +441,8 @@ function useChat(onNavigateAway?: () => void) {
         // Fell through — parse the message fresh below.
       }
 
-      // 2. Confirm / cancel of a pending preview.
+      // 2. Confirm / cancel of a pending preview (pending context wins
+      //    over the router — "haan" after a preview means "save it").
       const parsed0 = parseAssistantMessage(q, state, profile, ctx);
       if (parsed0.kind === 'confirm') {
         if (pendingRef.current) {
@@ -461,44 +464,90 @@ function useChat(onNavigateAway?: () => void) {
         setBusy(false);
         return;
       }
-      if (parsed0.kind === 'action') {
+
+      // 3. Unified conversation router (UPDATE 14/15/16) — intent is
+      //    decided FIRST, before any business-data path, so a greeting
+      //    or a plan can never become a money question. Financial
+      //    actions return here as structured actions (preview below);
+      //    do-commands (navigation / checklist / summary / language
+      //    switch) are EXECUTED, not described.
+      const res = respondToMessage({ message: q, state, profile, ctx, preferredLang: profile.aiLanguage || 'auto' });
+      setCtx(res.newCtx);
+
+      // Language switch: apply it to the profile immediately so the
+      // next reply (and the whole app) uses the new language.
+      if (res.languageChanged) {
+        const code = res.languageChanged;
+        app.mutate((s) => {
+          const p = s.profiles.find((x) => x.id === profile.id);
+          if (p) p.aiLanguage = code;
+        });
+        botReply(res.text);
+        setBusy(false);
+        return;
+      }
+
+      // Financial action → preview → Confirm & Save (never saved here).
+      if (res.kind === 'action' && res.action) {
         supersedePending();
-        const preview = previewFromAction(parsed0.action, parsed0.previewLines, parsed0.totalPaise, parsed0.duplicateWarning);
-        const msg = botReply(replyIn(detectLanguage(q).code, 'confirmPrompt'), { preview });
+        const preview = previewFromAction(res.action, res.previewLines || [], res.totalPaise || 0, res.duplicateWarning);
+        const msg = botReply(res.text, { preview });
         pendingRef.current = { msgId: msg.id, preview };
         setBusy(false);
         return;
       }
-      if (parsed0.kind === 'draft') {
-        draftRef.current = parsed0.draft;
-        botReply(parsed0.draft.question);
+      // Clarification draft (missing method/service/amount/…) — ask the
+      // user instead of guessing.
+      if (res.draftQuestion && res.draft) {
+        draftRef.current = res.draft as ActionDraft;
+        botReply(res.draftQuestion);
         setBusy(false);
         return;
       }
-      if (parsed0.kind === 'error') {
-        botReply(parsed0.text);
+      // Navigation — actually open the page.
+      if (res.kind === 'navigation' && res.navigateTo) {
+        botReply(res.text, { links: res.links });
+        router.push(res.navigateTo);
+        if (onNavigateAway) onNavigateAway();
+        setBusy(false);
+        return;
+      }
+      // Checklist / summary — the real artefact, already built/saved.
+      if (res.kind === 'checklist' || res.kind === 'summary') {
+        botReply(res.text, { table: res.table, links: res.links });
         setBusy(false);
         return;
       }
 
-      // 3. Knowledge Q&A (business questions, comparisons, analysis,
-      //    app help, navigation) — scoped real records only.
-      const know = computeKnowledge(state, profile, q, ctx);
-      if (know) {
-        setCtx(know.context);
-        botReply(know.text, { table: know.table, links: know.links });
-        if (know.navigateTo) {
-          router.push(know.navigateTo);
-          if (onNavigateAway) onNavigateAway();
-        }
-        setBusy(false);
-        return;
+      // 4. Dynamic conversational AI (UPDATE 15): when the local engine
+      //    cannot genuinely answer (res.cloudNeeded) AND the owner has
+      //    configured an AI service in Settings, ask that service with
+      //    the conversation history + ledger facts. The service never
+      //    performs financial actions and never sees the whole database.
+      //    On any failure, fall back to the honest local reply — never
+      //    a technical error, never an invented answer.
+      let replyText = res.text;
+      if (res.cloudNeeded && hasAiServiceKey()) {
+        try {
+          const history: AiChatMessage[] = (convRef.current.conversations.find((c) => c.id === convRef.current.activeId)?.messages || [])
+            .filter((m) => !m.preview)
+            .slice(-10)
+            .map((m) => ({ role: m.role === 'user' ? 'user' as const : 'assistant' as const, content: m.text }));
+          history.push({ role: 'user', content: q });
+          const facts = computeFacts(state, profile);
+          const system = buildSystemPrompt({
+            lang: res.newCtx.lastLanguage || 'hi',
+            langName: langName(res.newCtx.lastLanguage || 'hi'),
+            profileName: profile.name,
+            category: profile.category,
+            services: profile.services,
+            factsSummary: factsSummary(facts),
+          });
+          const ai = await callConversationAI(history, system);
+          if (ai.ok && ai.text) replyText = ai.text;
+        } catch { /* local honest reply stands */ }
       }
-
-      // 4. Factual fallback (profit, balance, due, agent, MT, overview).
-      const facts = computeFacts(state, profile);
-      const local = answerLocally(q, facts, profile.aiLanguage || 'auto');
-      botReply(local.text);
+      botReply(replyText, { table: res.table, links: res.links });
       setBusy(false);
     } catch (e) {
       botReply('Sorry, kuch gadbad hui — AI abhi available nahi hai, baad me try karo. Aapka data safe hai, kuch save nahi hua.');

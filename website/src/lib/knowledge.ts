@@ -71,6 +71,14 @@ export interface ChatContext {
   lastCustomer?: string;
   lastAgent?: string;
   lastTopic?: string;
+  /** Facts the user told the assistant ("runs a CSC centre") — used to
+   *  resolve follow-ups ("What about expenses?" → CSC expenses). */
+  userFacts?: string[];
+  /** Last unified intent (intent.ts) + reply language, for context. */
+  lastIntent?: string;
+  lastLanguage?: AiLangCode;
+  /** Honest no-key notice already shown once in this conversation. */
+  keyNoticeShown?: boolean;
 }
 
 export interface KnowledgeLink {
@@ -725,11 +733,20 @@ export function computeKnowledge(
     const received = hub.totalCollection;
     const mtP = hub.mtCommission;
     const inE = expenses.filter((e) => e.date >= range.start && e.date <= range.end);
+    // Localised period label — the Hindi sentence must say "Aaj ka
+    // profit", never the mixed "today ka profit".
+    const rangeLabel = range.key === 'today' ? t('Aaj', 'today')
+      : range.key === 'yesterday' ? t('Kal', 'yesterday')
+      : range.key === 'month' ? t('Is mahine', 'this month')
+      : range.key === 'last_month' ? t('Pichhle mahine', 'last month')
+      : range.key === 'last7' ? t('Pichhle 7 din', 'last 7 days')
+      : range.key === 'year' ? t('Is saal', 'this year')
+      : range.label;
     return {
       text: tt('profit',
         { profit: formatINR(profit), income: formatINR(received), expense: formatINR(inE.reduce((a, e) => a + e.amountPaise, 0)), monthProfit: formatINR(profit) },
-        `${range.label} ka profit ${formatINR(profit)} hai. Calculation: collection ${formatINR(received)} (is me MT commission ${formatINR(mtP)} shamil hai) − agent charges − kharcha ${formatINR(inE.reduce((a, e) => a + e.amountPaise, 0))}. (Sirf mila hua paisa income hai — due/billing nahi.)`,
-        `Profit for ${range.label} is ${formatINR(profit)}. Calculation: collection ${formatINR(received)} (including MT commission ${formatINR(mtP)}) − agent charges − expenses ${formatINR(inE.reduce((a, e) => a + e.amountPaise, 0))}. (Only money actually received counts as income — not billing/due.)`,
+        `${rangeLabel} ka profit ${formatINR(profit)} hai. Calculation: collection ${formatINR(received)} (is me MT commission ${formatINR(mtP)} shamil hai) − agent charges − kharcha ${formatINR(inE.reduce((a, e) => a + e.amountPaise, 0))}. (Sirf mila hua paisa income hai — due/billing nahi.)`,
+        `Profit for ${rangeLabel} is ${formatINR(profit)}. Calculation: collection ${formatINR(received)} (including MT commission ${formatINR(mtP)}) − agent charges − expenses ${formatINR(inE.reduce((a, e) => a + e.amountPaise, 0))}. (Only money actually received counts as income — not billing/due.)`,
       ),
       links: [{ label: 'View Profit Report', path: '/reports/profit' }],
       context: { ...baseCtx, lastPeriodKey: range.key, lastTopic: 'profit' },

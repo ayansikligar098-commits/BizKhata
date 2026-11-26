@@ -24,6 +24,7 @@ import { findAssistantTargets } from './assistant';
 import type { ChatContext } from './knowledge';
 import { detectLanguage, normalizeDigitsMultilingual, normalizeMultilingual, replyIn, resolveReplyLang, type AiLangCode, type ReplyKey } from './languages';
 import { SERVICE_ALIASES, findNameIn, findServiceIn, normalizeDevanagariWords, parseDateRange } from './knowledge';
+import { isPlanOrStatement } from './intent';
 
 export interface DueEntry {
   name: string;
@@ -202,17 +203,22 @@ export function answerLocally(question: string, f: BusinessFacts, preferred?: Ai
 
   const t = (key: ReplyKey, values: Record<string, string | number> = {}) => replyIn(lang, key, values);
 
-  // Greeting / help first (they contain no figures).
-  if (has(q, /^(hi|hii+|hello|hey|namaste|namaskar|ram\s*ram|good\s(morning|afternoon|evening)|salaam|adaab|vanakkam|namaskaram|sat\s*sri\s*akal|johar|khurumjari|adaab|namaskara)\b/)) {
+  // Greeting / help first (they contain no figures). The greeting
+  // regex matches ANYWHERE in the message (not just at the start) and
+  // includes "kaise ho" — the UPDATE 14 bug was a start-anchored
+  // regex that missed "Kaise Ho Bhai". (The unified router in
+  // intent.ts normally answers casual messages before this runs.)
+  if (has(q, /\b(hi|hii+|hello|hey|namaste|namaskar|ram\s*ram|good\s(morning|afternoon|evening)|salaam|adaab|vanakkam|namaskaram|sat\s*sri\s*akal|johar|khurumjari|namaskara)\b|kaise ho|how are you|kem cho/)) {
     return { intent: 'greeting', text: t('greeting') };
   }
   if (has(q, /help|madad|kya kar sakte|what can you|kaise (use|kaam)|how (to|do)/)) {
     return { intent: 'help', text: t('help') };
   }
 
-  if (noData) {
-    return { intent: 'unknown', text: t('noData') };
-  }
+  // UPDATE 14: no blanket no-data reply any more. Profit / income /
+  // expense / balance / overview quote the REAL figure — ₹0.00 on an
+  // empty store is an honest figure, not "no data". The noData text is
+  // used only for the final unknown fallback below.
 
   // Agent payable (check before customer due — both mention "dena").
   if (has(q, /agent/)) {
@@ -264,14 +270,16 @@ export function answerLocally(question: string, f: BusinessFacts, preferred?: Ai
   }
 
   // Overview / summary.
-  if (has(q, /overview|summary|haal|hisab|report|sab kuch|kul|aaj ka (kya|kaise)|today/)) {
+  if (has(q, /overview|summary|haal|hisab|dhandha|total|report|sab kuch|kul|aaj ka (kya|kaise)|today/)) {
     return {
       intent: 'overview',
       text: t('overview', { income: formatINR(f.todayIncomePaise), expense: formatINR(f.todayExpensePaise), profit: formatINR(f.todayProfitPaise), due: formatINR(f.customerDuePaise), agent: formatINR(f.agentPayablePaise), commission: formatINR(f.mtTodayCommissionPaise), cash: formatINR(f.cashPaise), upi: formatINR(f.upiPaise) }),
     };
   }
 
-  return { intent: 'unknown', text: t('unknown') };
+  // Unknown question: with no data at all, say so plainly; with data,
+  // point at what the assistant can answer.
+  return { intent: 'unknown', text: noData ? t('noData') : t('unknown') };
 }
 
 /* ================= Natural-language action parsing =================
@@ -525,6 +533,13 @@ export function parseAssistantMessage(
   // --- Confirm / cancel (handled by the chat UI's pending action). ---
   if (/^(haan|ha+|yes|yep|confirm|save|kar\s*do|karo|theek\s*hai|ok+|save\s*kar|confirm\s*kar|bilkul|ji\s*haan)\b/.test(q)) return { kind: 'confirm' };
   if (/^(nahi|nahin|no|cancel|mat\s*karo|rehne\s*do|chhodo|ruk[o]?|cancel\s*kar)\b/.test(q)) return { kind: 'cancel' };
+
+  // --- UPDATE 15 plan guard: a statement/plan (future work, no
+  // amount, no money question) is NEVER a financial action and must
+  // never be answered with a money question. Return 'question' so the
+  // conversation router answers it as a plan ("Mujhe kal PAN Card
+  // banane hai" → plan acknowledgement, NOT "kitne rupaye hue?").
+  if (isPlanOrStatement(rawText)) return { kind: 'question' };
 
   // --- Correction: "Xerox 300 galat tha, 250 hona chahiye". ---
   if (/galat|wrong|correct|sahi|badal|theek\s*karo|galti/.test(q) && amounts.length >= 1) {

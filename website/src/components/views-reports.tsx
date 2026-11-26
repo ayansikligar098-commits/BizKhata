@@ -8,6 +8,7 @@ import { auditEntry, exportBackup, exportCSV } from '@/lib/store';
 import { t, LANG_OPTIONS } from '@/lib/i18n';
 import type { Lang, Theme } from '@/lib/types';
 import { SUPPORTED_LANGUAGES, type AiLangCode } from '@/lib/languages';
+import { clearAiServiceKey, getAiServiceEndpoint, hasAiServiceKey, setAiServiceEndpoint, setAiServiceKey } from '@/lib/conversation-ai';
 import { todayISO } from '@/lib/types';
 import { BarChart, Btn, Card, Empty, Field, Pager, Stat, formatDate, pageSlice, type Ctx } from './ui';
 import { jobServices } from '@/lib/routes';
@@ -783,6 +784,17 @@ export function SettingsView({ ctx, section }: { ctx: Ctx; section?: string }) {
   const [openingUpi, setOpeningUpi] = React.useState(String(profile.openingUpiPaise / 100));
   const [msg, setMsg] = React.useState('');
   const [importError, setImportError] = React.useState('');
+  // AI chat service (UPDATE 15): generic, unnamed. The key is stored
+  // only on this device, never in the business profile, never in
+  // backups/exports, never displayed. Without it the assistant still
+  // handles accounts, entries and app help; general conversation needs it.
+  const [aiKeyInput, setAiKeyInput] = React.useState('');
+  const [aiKeySaved, setAiKeySaved] = React.useState(false);
+  const [aiEndpointInput, setAiEndpointInput] = React.useState('');
+  React.useEffect(() => {
+    setAiKeySaved(hasAiServiceKey());
+    setAiEndpointInput(getAiServiceEndpoint());
+  }, []);
 
   // Deep link: /settings/<section> scrolls to that card.
   React.useEffect(() => {
@@ -885,6 +897,27 @@ export function SettingsView({ ctx, section }: { ctx: Ctx; section?: string }) {
             </select>
           </Field>
           <p className="muted" style={{ marginTop: 8 }}>The AI understands all 22 scheduled languages in native script and in Roman letters (Hinglish, Roman Gujarati, Roman Marathi…), including mixed-language sentences. You never have to pick a language before chatting.</p>
+        </Card></div>
+
+        <div id="settings-ai-chat"><Card title="AI Chat">
+          <p className="muted" style={{ marginTop: 0 }}>General conversation (jokes, ideas, explanations, everyday help) uses the AI chat service. Accounts questions, entries and app help work without it. The key stays only on this device — it is never shown, never saved in your business profile, and never included in backups.</p>
+          <Field label="AI chat service address (optional)">
+            <input className="input" value={aiEndpointInput} onChange={(e) => setAiEndpointInput(e.target.value)} placeholder="https://…" inputMode="url" autoComplete="off" />
+          </Field>
+          <Field label={aiKeySaved ? 'AI chat key — saved ✓ (type a new key to replace it)' : 'AI chat key (optional)'}>
+            <input className="input" type="password" value={aiKeyInput} onChange={(e) => setAiKeyInput(e.target.value)} placeholder="Paste your key here — it is never displayed again" autoComplete="off" />
+          </Field>
+          <div className="btn-row">
+            <Btn onClick={() => {
+              setAiServiceEndpoint(aiEndpointInput);
+              if (aiKeyInput.trim()) { setAiServiceKey(aiKeyInput); setAiKeyInput(''); }
+              setAiKeySaved(hasAiServiceKey());
+              setMsg('AI chat settings saved.');
+              setTimeout(() => setMsg(''), 2000);
+            }}>Save AI Chat Settings</Btn>
+            {aiKeySaved && <Btn kind="secondary" onClick={() => { clearAiServiceKey(); setAiKeySaved(false); setMsg('AI chat key removed.'); setTimeout(() => setMsg(''), 2000); }}>Remove Key</Btn>}
+          </div>
+          <p className="field-hint">Without a key, the assistant says so honestly and still handles everything about your accounts. No provider or service name is shown anywhere in the app.</p>
         </Card></div>
 
         <Card title={t(lang, 'theme')}>

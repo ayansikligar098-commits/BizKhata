@@ -325,9 +325,37 @@ export function detectLanguage(text: string): DetectedLanguage {
   // Romanized scoring: count distinct vocab words per language.
   // We approximate per-language scoring with marker words per language.
   const lower = text.toLowerCase();
+  // UPDATE 14 guard (the "Kaise Ho Bhai" screenshot bug): Roman-script
+  // Hinglish must never be detected as Marathi/Gujarati. Distinctive
+  // Roman markers decide FIRST; generic scoring only runs when none
+  // of them fire. A lone "ho" scores nothing anywhere (see markers).
+  if (!script) {
+    const has = (re: RegExp) => re.test(lower);
+    // Distinctive Roman Gujarati ("Aaje su chale chhe?", "batavo").
+    if (has(/\b(aaje|aje|su|chhe|kem|ketlo|ketla|nafo|thaya|malyo|batavo|kharcho|aapvana|tamaro)\b/)) {
+      return { code: 'gu', style: 'romanized', confidence: 0.85, languages: ['gu'], script: null };
+    }
+    // Distinctive Roman Marathi.
+    if (has(/\b(kiti|kaay|kasa|nako|barobar|aajcha|tumcha)\b/)) {
+      return { code: 'mr', style: 'romanized', confidence: 0.85, languages: ['mr'], script: null };
+    }
+    // Strong Hinglish markers — one is enough ("Kaise ho bhai?" has
+    // three: kaise + ho + bhai). Weaker markers need a second signal
+    // so a shared word like "aaj" alone cannot force Hindi.
+    if (has(/\b(kaise|bhai|hoon|hun|mujhe|kaisa)\b/)
+      || (has(/\b(kya|hai|rahe|mera|tum|batao|banane|chahiye|tha)\b/) && has(/\b(aaj|kal|kitna|kaam|shop|hisab|dhandha|kharcha|rupaye|kaisa)\b/))) {
+      return { code: 'hi', style: 'romanized', confidence: 0.85, languages: ['hi'], script: null };
+    }
+  }
   const markers: Partial<Record<AiLangCode, string[]>> = {
-    gu: ['aaje', 'thaya', 'malyo', 'nakh', 'batao', 'kem', 'shu', 'aapvana', 'chhe', 'kharcho', 'nafo', 'jamma'],
-    mr: ['aaj', 'kiti', 'kaay', 'kasa', 'nako', 'ho', 'barobar', 'kharcha'],
+    // NOTE (UPDATE 14): 'ho' was removed from Marathi/Santali markers —
+    // in Roman Hinglish "ho" is the verb "are" ("Kaise ho bhai?"), and a
+    // lone "ho" must NEVER flip a Hinglish message to Marathi. 'batao'
+    // was removed from Gujarati markers (it is Hindi; Gujarati is
+    // 'batavo'). 'aaj' stays in several lists but the Hinglish guard
+    // below outranks single shared words.
+    gu: ['aaje', 'thaya', 'malyo', 'nakh', 'kem', 'shu', 'aapvana', 'chhe', 'kharcho', 'nafo', 'jamma', 'batavo'],
+    mr: ['kiti', 'kaay', 'kasa', 'nako', 'barobar', 'kharcha', 'aajcha', 'tumcha'],
     bn: ['aajke', 'koto', 'kemon', 'diyechi', 'baki', 'taka', 'khoroch'],
     pa: ['ajj', 'hanji', 'kinna', 'ditta', 'kiven', 'kiddan'],
     ta: ['inniki', 'evvalavu', 'enna', 'sollunga', 'aamaam', 'kidaithadhu'],
@@ -337,7 +365,7 @@ export function detectLanguage(text: string): DetectedLanguage {
     or: ['aji', 'kete', 'kemiti', 'kana', 'gatakali', 'milila'],
     as: ['aji', 'kiman', 'ketiya', 'kowa', 'palo'],
     ur: ['aaj', 'kitna', 'batao', 'paisa', 'diye', 'kya', 'kaise'],
-    hi: ['aaj', 'kal', 'kitna', 'batao', 'munafa', 'kharcha', 'baaki'],
+    hi: ['aaj', 'kal', 'kitna', 'batao', 'munafa', 'kharcha', 'baaki', 'kaise', 'bhai', 'kya', 'hai', 'hoon', 'rahe', 'mujhe', 'mera', 'tum', 'karna', 'banane', 'chahiye', 'tha', 'kaisa'],
     ne: ['aaja', 'kati', 'kasari', 'kahile', 'paayo', 'hijo'],
     sa: ['adya', 'katham', 'labhah', 'vyayah'],
     ks: ['az', 'kith', 'kath', 'chhu'],
@@ -347,7 +375,7 @@ export function detectLanguage(text: string): DetectedLanguage {
     brx: ['dinwi', 'bese', 'ma', 'gwdan'],
     doi: ['ajj', 'kitthe', 'kine', 'diyo'],
     mai: ['aaj', 'kati', 'kahiya', 'kehan'],
-    sat: ['tihin', 'chet', 'kana', 'ho'],
+    sat: ['tihin', 'chet', 'kana'],
   };
   const scores = new Map<AiLangCode, number>();
   for (const [code, words] of Object.entries(markers)) {
@@ -369,7 +397,16 @@ export function detectLanguage(text: string): DetectedLanguage {
     if (script.name.startsWith('Arabic')) scores.set('ur', (scores.get('ur') || 0) + 3);
   }
   const ranked = [...scores.entries()].sort((a, b) => b[1] - a[1]);
-  const top = ranked[0];
+  // Roman-script tie-break (UPDATE 14): Hindi and Urdu share the
+  // markers 'aaj'/'kitna'/'batao'/'kya'. For Roman text with no script
+  // and no distinctive Urdu words, this app's user writes Hinglish —
+  // a tie goes to Hindi, never to Urdu by accident. Distinctive
+  // Marathi/Gujarati/Bengali markers are already handled by the guard
+  // above, so they never reach this tie-break.
+  let top = ranked[0];
+  if (!script && ranked.length > 1 && ranked[1] && top && top[1] === ranked[1][1] && scores.get('hi') === top[1]) {
+    top = ['hi', top[1]];
+  }
   const second = ranked[1];
   const mixed = ranked.length >= 2 && second && second[1] >= 1 && top && top[1] <= second[1] + 2;
   // English: Latin script, no non-English markers, English words present.
@@ -407,7 +444,14 @@ export type ReplyKey =
   | 'dueNone' | 'due' | 'agentNone' | 'agent' | 'mtNone' | 'mt'
   | 'balance' | 'overview' | 'unknown' | 'askMethod' | 'askService'
   | 'askAmount' | 'askAgent' | 'askCustomer' | 'askCommission'
-  | 'saved' | 'cancelled' | 'confirmPrompt';
+  | 'saved' | 'cancelled' | 'confirmPrompt'
+  // UPDATE 14/15 — casual + plan + honest-limitation replies. Only
+  // en/hi/gu/mr carry full text below; every other language falls
+  // back to the English template via replyIn() (documented fallback —
+  // the content is correct, only the language is English). The varied
+  // multi-variant casual replies live in general.ts instead.
+  | 'casualGreeting' | 'casualBored' | 'casualThanks' | 'casualMood'
+  | 'planAck' | 'notUnderstood' | 'aiKeyNeeded';
 
 type TemplateSet = Partial<Record<ReplyKey, string>>;
 
@@ -437,6 +481,13 @@ export const REPLY_TEMPLATES: Record<AiLangCode, TemplateSet> = {
     saved: 'Saved and verified in your records.',
     cancelled: 'Cancelled — nothing was saved.',
     confirmPrompt: 'Shall I save these entries? Please check first, then press Confirm.',
+    casualGreeting: 'I am doing great, brother! How about you — how is everything going at the shop today?',
+    casualBored: 'Then let us do something interesting! Tell me — do you want to learn something new, need an idea, or just want to chat a bit?',
+    casualThanks: 'You are welcome, brother — that is what I am here for! Tell me if you need anything else.',
+    casualMood: 'Oh, feeling low today? Take a short break — have a chai, then tell me what happened. I am right here to listen.',
+    planAck: 'Got it! {plan} — I understand. {offer}',
+    notUnderstood: 'Sorry brother, I could not quite understand that. Please say it a little differently — I am solid at accounts, entries and app help, and I can also chat generally.',
+    aiKeyNeeded: 'For this question I need an AI chat key — add it in Settings. Without a key I can still handle accounts questions, entries and app help; general conversation needs the key.',
   },
   hi: {
     greeting: 'Namaste! Main aapka BizKhata AI Assistant hoon. Mujhse poochho: aaj ka profit, aaj ki kamai, kharcha, customer due, agent payable, Money Transfer commission, ya cash/UPI balance.',
@@ -463,6 +514,13 @@ export const REPLY_TEMPLATES: Record<AiLangCode, TemplateSet> = {
     saved: 'Save ho gaya aur records mein verify ho gaya.',
     cancelled: 'Cancelled — kuch bhi save nahi hua.',
     confirmPrompt: 'Ye entries save karun? Pehle check karo, phir Confirm dabao.',
+    casualGreeting: 'Main badhiya hoon bhai! Tum batao, sab kaisa chal raha hai? Aaj shop ka kaam kaisa raha?',
+    casualBored: 'Toh kuch interesting karte hain! Batao, kuch naya seekhna hai, koi idea chahiye, ya bas thodi baatein karein?',
+    casualThanks: 'Koi baat nahi bhai, ye to mera kaam hai! Aur kuch chahiye ho to batao.',
+    casualMood: 'Oh, mood kharab hai? Chalo, thoda break lo — chai peelo, phir batao kya hua. Main yahin hoon, sunne ke liye.',
+    planAck: 'Achha! {plan} — main samajh gaya. {offer}',
+    notUnderstood: 'Sorry bhai, ye baat main theek se samajh nahi paya. Thoda alag tareeke se batao — main hisaab-kitab, entries, aur app ki help mein pakka hoon, aur aam baat-cheet bhi kar sakta hoon.',
+    aiKeyNeeded: 'Is sawal ke liye mujhe AI chat ki key chahiye hoti hai — Settings mein jaakar key add karo. Bina key ke main hisaab-kitab wale sawaal, entries aur app ki help handle kar sakta hoon; aam baat-cheet ke liye key lagti hai.',
   },
   gu: {
     greeting: 'Namaste! Hu tamaro BizKhata AI Assistant chhu. Mane puchho: aaj no profit, aaj ni kamani, kharcho, customer due, agent payable, Money Transfer commission, ke cash/UPI balance.',
@@ -489,6 +547,13 @@ export const REPLY_TEMPLATES: Record<AiLangCode, TemplateSet> = {
     saved: 'Save thai gayu ane record ma verify thai gayu.',
     cancelled: 'Cancelled — kashu save thayu nathi.',
     confirmPrompt: 'Aa entries save karu? Pehla check karo, pachhi Confirm dabavo.',
+    casualGreeting: 'Hu majama chhu bhai! Tame kaho, badhu kem chale chhe? Aaj shop nu kaam kevu rahyu?',
+    casualBored: 'To chalo kai interesting karie! Kaho, kai navu shikhvu chhe, koi idea joie chhe, ke bas thodi vaato karvi chhe?',
+    casualThanks: 'Koi vaat nahi bhai, aa to maru kaam chhe! Biju kai joie to kaho.',
+    casualMood: 'Oh, mood kharab chhe? Thodo break lo — chai pivo, pachhi kaho shu thayu. Hu ahin chhu, sambhalva mate.',
+    planAck: 'Achha! {plan} — hu samji gayo. {offer}',
+    notUnderstood: 'Sorry bhai, aa vaat hu barabar samji na shakyo. Thodi alag rite kaho — hu hisab-kitab, entries ane app ni help ma pakko chhu, ane aam vaat-cheet pan kari shaku chhu.',
+    aiKeyNeeded: 'Aa sawal mate mane AI chat ni key joie chhe — Settings ma jaine key add karo. Key vagar hu hisab-kitab na sawal, entries ane app ni help sambhali shaku chhu; aam vaat-cheet mate key lagti chhe.',
   },
   mr: {
     greeting: 'Namaste! Mi tumcha BizKhata AI Assistant aahe. Mala vichara: aajcha profit, aajchi kamai, kharcha, customer due, agent payable, Money Transfer commission, kinva cash/UPI balance.',
@@ -515,6 +580,13 @@ export const REPLY_TEMPLATES: Record<AiLangCode, TemplateSet> = {
     saved: 'Save jhale ani records madhe verify jhale.',
     cancelled: 'Cancelled — kahi save jhale nahi.',
     confirmPrompt: 'Ha entries save karu? Pahile check kara, mag Confirm daba.',
+    casualGreeting: 'Mi mast aahe bhau! Tu sang, sagla kasa chalala aahe? Aaj shop cha kaam kasa hota?',
+    casualBored: 'Mag kahi interesting karuya! Sang, kahi navin shikaycha aahe, kahi idea havay, ki fakt thodya gappa maraychya aahet?',
+    casualThanks: 'Kahi harkat nahi bhau, hech maz kaam aahe! Ajun kahi havay asel tar sang.',
+    casualMood: 'Oh, mood kharab aahe? Thoda break ghe — chai ghe, mag sang kay jhala. Mi ithech aahe, aikayla.',
+    planAck: 'Achha! {plan} — mi samajlo. {offer}',
+    notUnderstood: 'Sorry bhau, hi gosht mi barobar samajlo nahi. Thoda veglya paddhatine sang — mi hisab-kitab, entries ani app chi madat madhe pakka aahe, ani aam gappa hi maru shakto.',
+    aiKeyNeeded: 'Ya prashnasathi mala AI chat chi key lagte — Settings madhe jaun key add kara. Key shivay mi hisab-kitab che prashna, entries ani app chi madat sambhalu shakto; aam gappansathi key lagte.',
   },
   bn: {
     greeting: 'Namaskar! Ami tomar BizKhata AI Assistant. Amake jiggasa koro: ajker profit, ajker income, khoroch, customer due, agent payable, Money Transfer commission, ba cash/UPI balance.',
