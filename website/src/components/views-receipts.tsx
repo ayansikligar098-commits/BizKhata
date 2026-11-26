@@ -4,7 +4,7 @@ import { formatINR } from '@/lib/money';
 import { auditEntry, nextReceiptNumber, whatsAppLink } from '@/lib/store';
 import type { Receipt } from '@/lib/types';
 import { uid } from '@/lib/types';
-import { Btn, Card, Empty, Field, formatDate, type Ctx } from './ui';
+import { Btn, Card, Empty, Field, Pager, formatDate, pageSlice, type Ctx } from './ui';
 
 export function ReceiptsView({ ctx }: { ctx: Ctx }) {
   const { state, profile } = ctx;
@@ -15,6 +15,8 @@ export function ReceiptsView({ ctx }: { ctx: Ctx }) {
   const [layout, setLayout] = React.useState<'A4' | 'Thermal'>('A4');
   const [viewReceipt, setViewReceipt] = React.useState<Receipt | null>(null);
   const [error, setError] = React.useState('');
+  const [page, setPage] = React.useState(1);
+  const pageReceipts = pageSlice(receipts, page, 8);
 
   function createReceipt() {
     const job = jobs.find((j) => j.id === jobId);
@@ -90,7 +92,7 @@ export function ReceiptsView({ ctx }: { ctx: Ctx }) {
             <table>
               <thead><tr><th>No.</th><th>Date</th><th>Customer</th><th>Service</th><th className="num">Total</th><th className="num">Paid</th><th className="num">Due</th><th></th></tr></thead>
               <tbody>
-                {receipts.map((r) => (
+                {pageReceipts.map((r) => (
                   <tr key={r.id}>
                     <td>{r.number}</td>
                     <td>{formatDate(r.date)}</td>
@@ -124,6 +126,7 @@ export function ReceiptsView({ ctx }: { ctx: Ctx }) {
                 ))}
               </tbody>
             </table>
+            <Pager total={receipts.length} page={page} pageSize={8} onPage={setPage} />
           </div>
         )}
       </Card>

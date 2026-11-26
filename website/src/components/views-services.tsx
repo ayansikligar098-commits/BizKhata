@@ -6,7 +6,7 @@ import { NON_OUTSOURCEABLE_SERVICES, JOB_STATUSES } from '@/lib/categories';
 import { auditEntry, whatsAppLink } from '@/lib/store';
 import type { DocFile, Job, JobStatus, Method } from '@/lib/types';
 import { todayISO, uid } from '@/lib/types';
-import { AmountInput, Btn, Card, Empty, Field, Modal, formatDate, type Ctx } from './ui';
+import { AmountInput, Btn, Card, Empty, Field, Modal, Pager, Stat, formatDate, initials, pageSlice, statusPill, type Ctx } from './ui';
 
 /** Upload a document (local only, max 2 MB). */
 export function DocUploader({ ctx, ownerType, ownerId }: { ctx: Ctx; ownerType: 'customer' | 'job'; ownerId: string }) {
@@ -63,11 +63,13 @@ export function ServicesView({ ctx }: { ctx: Ctx }) {
   const { state, profile } = ctx;
   const pid = profile.id;
   const [serviceFilter, setServiceFilter] = React.useState<string>('All');
+  const [statusFilter, setStatusFilter] = React.useState<string>('All');
   const [search, setSearch] = React.useState('');
   const [showForm, setShowForm] = React.useState(false);
   const [payJob, setPayJob] = React.useState<Job | null>(null);
   const [payAmount, setPayAmount] = React.useState(0);
   const [payMethod, setPayMethod] = React.useState<Method>('cash');
+  const [page, setPage] = React.useState(1);
 
   // form state
   const [service, setService] = React.useState(profile.services[0] || 'Xerox');
@@ -84,11 +86,30 @@ export function ServicesView({ ctx }: { ctx: Ctx }) {
   const [error, setError] = React.useState('');
 
   const agents = state.agents.filter((a) => a.profileId === pid && a.status === 'Active');
-  const jobs = state.jobs
-    .filter((j) => j.profileId === pid)
+  const allJobs = state.jobs.filter((j) => j.profileId === pid);
+  const jobs = allJobs
     .filter((j) => serviceFilter === 'All' || j.service === serviceFilter)
+    .filter((j) => statusFilter === 'All' || j.status === statusFilter)
     .filter((j) => !search || j.customerName.toLowerCase().includes(search.toLowerCase()) || j.mobile.includes(search))
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+
+  // Jump from dashboard quick-service buttons / sidebar service list.
+  const jumpNonce = ctx.serviceJump?.nonce;
+  React.useEffect(() => {
+    if (!ctx.serviceJump) return;
+    setServiceFilter(ctx.serviceJump.service);
+    setService(ctx.serviceJump.service);
+    setStatusFilter('All');
+    if (ctx.serviceJump.openForm) setShowForm(true);
+  }, [jumpNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const sumTotal = jobs.reduce((s, j) => s + j.totalPaise, 0);
+  const sumReceived = jobs.reduce((s, j) => s + j.receivedPaise, 0);
+  const sumDue = jobs.reduce((s, j) => s + jobDuePaise(j), 0);
+  const countCompleted = jobs.filter((j) => j.status === 'Completed' || j.status === 'Delivered').length;
+  const countPending = jobs.filter((j) => j.status === 'Pending' || j.status === 'In Progress' || j.status === 'New').length;
+  const pageJobs = pageSlice(jobs, page, 8);
+  React.useEffect(() => { setPage(1); }, [serviceFilter, statusFilter, search]);
 
   const isPan = service === 'PAN Card';
 
@@ -143,6 +164,23 @@ export function ServicesView({ ctx }: { ctx: Ctx }) {
 
   return (
     <div>
+      {serviceFilter !== 'All' && (
+        <div className="page-head">
+          <div>
+            <h2 style={{ margin: 0 }}>{serviceFilter}</h2>
+            <p className="page-sub" style={{ margin: 0 }}>{jobs.length} job{jobs.length === 1 ? '' : 's'} • {formatINR(sumReceived)} received • {formatINR(sumDue)} due</p>
+          </div>
+          <Btn kind="secondary" onClick={() => setServiceFilter('All')}>← All Services</Btn>
+        </div>
+      )}
+      <div className="summary-strip">
+        <div className="summary-chip"><div className="sc-label">Total Jobs</div><div className="sc-value">{jobs.length}</div></div>
+        <div className="summary-chip"><div className="sc-label">Completed</div><div className="sc-value">{countCompleted}</div></div>
+        <div className="summary-chip"><div className="sc-label">Pending</div><div className="sc-value">{countPending}</div></div>
+        <div className="summary-chip"><div className="sc-label">Billed</div><div className="sc-value">{formatINR(sumTotal)}</div></div>
+        <div className="summary-chip"><div className="sc-label">Received</div><div className="sc-value">{formatINR(sumReceived)}</div></div>
+        <div className="summary-chip"><div className="sc-label">Due</div><div className="sc-value" style={{ color: 'var(--danger)' }}>{formatINR(sumDue)}</div></div>
+      </div>
       <Card
         title="Service Jobs"
         right={<Btn onClick={() => setShowForm(true)}>+ Add Job</Btn>}
@@ -158,6 +196,13 @@ export function ServicesView({ ctx }: { ctx: Ctx }) {
             <input className="input" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Name or mobile" />
           </Field>
         </div>
+        <div className="pills" style={{ marginBottom: 12 }} aria-label="Status filter">
+          {['All', 'New', 'In Progress', 'Submitted', 'Pending', 'Completed', 'Delivered'].map((s) => (
+            <button key={s} className={statusFilter === s ? 'active' : ''} onClick={() => setStatusFilter(s)}>
+              {s === 'All' ? `All (${allJobs.length})` : `${s} (${allJobs.filter((j) => j.status === s).length})`}
+            </button>
+          ))}
+        </div>
         {jobs.length === 0 ? (
           <Empty text="No jobs yet. Add your first job — the app starts empty." />
         ) : (
@@ -165,11 +210,19 @@ export function ServicesView({ ctx }: { ctx: Ctx }) {
             <table>
               <thead><tr><th>Customer</th><th>Service</th><th>Status</th><th className="num">Total</th><th className="num">Received</th><th className="num">Due</th><th className="num">Margin</th><th>Agent</th><th></th></tr></thead>
               <tbody>
-                {jobs.map((j) => {
+                {pageJobs.map((j) => {
                   const agent = state.agents.find((a) => a.id === j.agentId);
                   return (
                     <tr key={j.id}>
-                      <td>{j.customerName}<br /><span className="field-hint">{j.mobile}{j.refNo ? ` • Ref ${j.refNo}` : ''}</span></td>
+                      <td>
+                        <div className="cell-with-ico">
+                          <span className="avatar sm">{initials(j.customerName)}</span>
+                          <span>
+                            <span className="cell-main">{j.customerName}</span><br />
+                            <span className="cell-sub">{j.mobile}{j.refNo ? ` • Ref ${j.refNo}` : ''}</span>
+                          </span>
+                        </div>
+                      </td>
                       <td>{j.service}</td>
                       <td>
                         <select className="input" style={{ padding: '6px', minWidth: 120 }} value={j.status} onChange={(e) => {
@@ -201,6 +254,7 @@ export function ServicesView({ ctx }: { ctx: Ctx }) {
                 })}
               </tbody>
             </table>
+            <Pager total={jobs.length} page={page} pageSize={8} onPage={setPage} />
           </div>
         )}
         <p className="field-hint">Margin = received − agent charges. Customer due and agent payable are separate ledgers.</p>
@@ -288,17 +342,17 @@ export function CustomersView({ ctx }: { ctx: Ctx }) {
   const { state, profile } = ctx;
   const pid = profile.id;
   const [search, setSearch] = React.useState('');
-  const [selected, setSelected] = React.useState<string | null>(null);
   const [name, setName] = React.useState('');
   const [mobile, setMobile] = React.useState('');
   const [notes, setNotes] = React.useState('');
+  const [page, setPage] = React.useState(1);
 
   const customers = state.customers
     .filter((c) => c.profileId === pid)
     .filter((c) => !search || c.name.toLowerCase().includes(search.toLowerCase()) || c.mobile.includes(search))
     .sort((a, b) => a.name.localeCompare(b.name));
-  const sel = customers.find((c) => c.id === selected) || null;
-  const selJobs = sel ? state.jobs.filter((j) => j.profileId === pid && (j.mobile === sel.mobile || j.customerName === sel.name)) : [];
+  const pageCustomers = pageSlice(customers, page, 8);
+  React.useEffect(() => { setPage(1); }, [search]);
 
   function addCustomer() {
     if (!name.trim()) return;
@@ -329,16 +383,22 @@ export function CustomersView({ ctx }: { ctx: Ctx }) {
             <table>
               <thead><tr><th>Name</th><th>Mobile</th><th className="num">Jobs</th><th className="num">Total Due</th><th></th></tr></thead>
               <tbody>
-                {customers.map((c) => {
+                {pageCustomers.map((c) => {
                   const cj = state.jobs.filter((j) => j.profileId === pid && (j.mobile === c.mobile || j.customerName === c.name));
                   const due = cj.reduce((s, j) => s + jobDuePaise(j), 0);
                   return (
                     <tr key={c.id}>
-                      <td>{c.name}</td><td>{c.mobile}</td>
+                      <td>
+                        <div className="cell-with-ico">
+                          <span className="avatar sm">{initials(c.name)}</span>
+                          <span className="cell-main">{c.name}</span>
+                        </div>
+                      </td>
+                      <td>{c.mobile}</td>
                       <td className="num">{cj.length}</td>
                       <td className="num">{formatINR(due)}</td>
                       <td style={{ whiteSpace: 'nowrap' }}>
-                        <Btn kind="ghost" onClick={() => setSelected(c.id)}>Open</Btn>
+                        <Btn kind="ghost" onClick={() => ctx.openCustomer?.(c.id)}>Open Profile</Btn>
                         <Btn kind="ghost" onClick={() => {
                           if (!window.confirm('Move this customer to the Recycle Bin?')) return;
                           ctx.softDelete('Customer', `${c.name} (${c.mobile})`, c, (s) => {
@@ -351,47 +411,10 @@ export function CustomersView({ ctx }: { ctx: Ctx }) {
                 })}
               </tbody>
             </table>
+            <Pager total={customers.length} page={page} pageSize={8} onPage={setPage} />
           </div>
         )}
       </Card>
-
-      {sel && (
-        <Modal title={`${sel.name} — ${sel.mobile}`} onClose={() => setSelected(null)}>
-          <h3>Jobs</h3>
-          {selJobs.length === 0 ? <Empty text="No jobs for this customer yet." /> : (
-            <div className="table-wrap">
-              <table>
-                <thead><tr><th>Service</th><th>Status</th><th className="num">Total</th><th className="num">Received</th><th className="num">Due</th></tr></thead>
-                <tbody>
-                  {selJobs.map((j) => (
-                    <tr key={j.id}>
-                      <td>{j.service}</td><td>{j.status}</td>
-                      <td className="num">{formatINR(j.totalPaise)}</td>
-                      <td className="num">{formatINR(j.receivedPaise)}</td>
-                      <td className="num">{formatINR(jobDuePaise(j))}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          <h3 style={{ marginTop: 16 }}>Documents</h3>
-          <DocUploader ctx={ctx} ownerType="customer" ownerId={sel.id} />
-          <div className="btn-row" style={{ marginTop: 16 }}>
-            {sel.mobile && (
-              <a
-                className="btn btn-secondary"
-                href={whatsAppLink(sel.mobile, `Namaste ${sel.name}, Al Falah Communication se — aapka baki payment ${formatINR(selJobs.reduce((s, j) => s + jobDuePaise(j), 0))} hai. Kripya jald se jald bhugtan karein. Dhanyavaad!`)}
-                target="_blank"
-                rel="noreferrer"
-              >
-                WhatsApp Reminder
-              </a>
-            )}
-            <Btn kind="secondary" onClick={() => setSelected(null)}>Close</Btn>
-          </div>
-        </Modal>
-      )}
     </div>
   );
 }
@@ -410,32 +433,62 @@ export function KhataView({ ctx }: { ctx: Ctx }) {
     byCustomer.set(key, cur);
   }
   const rows = [...byCustomer.values()].sort((a, b) => (b.total - b.received) - (a.total - a.received));
+  const [search, setSearch] = React.useState('');
+  const [page, setPage] = React.useState(1);
+  const filteredRows = rows.filter((r) => !search || r.name.toLowerCase().includes(search.toLowerCase()) || r.mobile.includes(search));
+  const pageRows = pageSlice(filteredRows, page, 8);
+  React.useEffect(() => { setPage(1); }, [search]);
+  const totalBilled = rows.reduce((s, r) => s + r.total, 0);
+  const totalReceived = rows.reduce((s, r) => s + r.received, 0);
+  const totalDue = totalBilled - totalReceived;
 
   return (
-    <Card title="Customer Khata — per-customer ledger">
-      <p style={{ color: 'var(--muted)', marginTop: 0 }}>
-        Outstanding is NEVER money already received. Only actual received payments increase
-        cash/UPI. Advance, partial and full payments are all recorded per job.
-      </p>
-      {rows.length === 0 ? (
-        <Empty text="No customer ledgers yet — add a job first." />
-      ) : (
-        <div className="table-wrap">
-          <table>
-            <thead><tr><th>Customer</th><th>Mobile</th><th className="num">Jobs</th><th className="num">Total Billed</th><th className="num">Received</th><th className="num">Due</th></tr></thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.mobile + r.name}>
-                  <td>{r.name}</td><td>{r.mobile}</td><td className="num">{r.jobs.length}</td>
-                  <td className="num">{formatINR(r.total)}</td>
-                  <td className="num">{formatINR(r.received)}</td>
-                  <td className="num"><span className={r.total - r.received > 0 ? 'pill due' : 'pill paid'}>{formatINR(r.total - r.received)}</span></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </Card>
+    <div>
+      <div className="grid grid-3" style={{ marginBottom: 16 }}>
+        <Stat label="Total Billed" value={formatINR(totalBilled)} tone="blue" />
+        <Stat label="Total Received" value={formatINR(totalReceived)} tone="green" />
+        <Stat label="Total Due" value={formatINR(totalDue)} tone={totalDue > 0 ? 'red' : 'green'} sub={`${rows.filter((r) => r.total - r.received > 0).length} customers owe you`} />
+      </div>
+      <Card title="Customer Khata — per-customer ledger">
+        <p style={{ color: 'var(--muted)', marginTop: 0 }}>
+          Outstanding is NEVER money already received. Only actual received payments increase
+          cash/UPI. Advance, partial and full payments are all recorded per job. Click a customer
+          to open their full profile — ledger, jobs, payments and documents.
+        </p>
+        <Field label="Search customer">
+          <input className="input" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Name or mobile" />
+        </Field>
+        {filteredRows.length === 0 ? (
+          <Empty text="No customer ledgers yet — add a job first." />
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Customer</th><th>Mobile</th><th className="num">Jobs</th><th className="num">Total Billed</th><th className="num">Received</th><th className="num">Due</th><th></th></tr></thead>
+              <tbody>
+                {pageRows.map((r) => {
+                  const cust = state.customers.find((c) => c.profileId === pid && (c.mobile === r.mobile || c.name === r.name));
+                  return (
+                    <tr key={r.mobile + r.name}>
+                      <td>
+                        <div className="cell-with-ico">
+                          <span className="avatar sm">{initials(r.name)}</span>
+                          <span className="cell-main">{r.name}</span>
+                        </div>
+                      </td>
+                      <td>{r.mobile}</td><td className="num">{r.jobs.length}</td>
+                      <td className="num">{formatINR(r.total)}</td>
+                      <td className="num">{formatINR(r.received)}</td>
+                      <td className="num"><span className={r.total - r.received > 0 ? 'pill due' : 'pill paid'}>{formatINR(r.total - r.received)}</span></td>
+                      <td>{cust && <Btn kind="ghost" onClick={() => ctx.openCustomer?.(cust.id)}>Open Profile →</Btn>}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <Pager total={filteredRows.length} page={page} pageSize={8} onPage={setPage} />
+          </div>
+        )}
+      </Card>
+    </div>
   );
 }

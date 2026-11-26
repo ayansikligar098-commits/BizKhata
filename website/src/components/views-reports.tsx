@@ -7,12 +7,15 @@ import { auditEntry, exportBackup, exportCSV } from '@/lib/store';
 import { t, LANG_OPTIONS } from '@/lib/i18n';
 import type { Lang, Theme } from '@/lib/types';
 import { todayISO } from '@/lib/types';
-import { Btn, Card, Empty, Field, Stat, formatDate, type Ctx } from './ui';
+import { BarChart, Btn, Card, Empty, Field, Pager, Stat, formatDate, pageSlice, type Ctx } from './ui';
+
+/* ================= Reports (page 23) ================= */
 
 export function ReportsView({ ctx }: { ctx: Ctx }) {
   const { state, profile } = ctx;
   const pid = profile.id;
   const [period, setPeriod] = React.useState<'today' | 'month' | 'year' | 'all'>('month');
+  const [tab, setTab] = React.useState<'business' | 'service' | 'customer' | 'agent' | 'mt' | 'expenses'>('business');
   const jobs = state.jobs.filter((j) => j.profileId === pid);
   const expenses = state.expenses.filter((e) => e.profileId === pid);
   const txns = state.cashTxns.filter((x) => x.profileId === pid);
@@ -45,101 +48,188 @@ export function ReportsView({ ctx }: { ctx: Ctx }) {
     const p = serviceProfitPaise(j.service, pj, pe);
     byService.set(j.service, { received: (byService.get(j.service)?.received || 0) + j.receivedPaise, profit: p.profit });
   }
+  const byCategory = new Map<string, number>();
+  for (const e of pe) byCategory.set(e.category, (byCategory.get(e.category) || 0) + e.amountPaise);
+
+  // Income vs Expenses bar chart: last 7 days, real cash-book data.
+  const barData: { label: string; value: number; valueLabel: string }[] = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(`${today}T00:00:00`);
+    d.setDate(d.getDate() - i);
+    const iso = d.toISOString().slice(0, 10);
+    const v = txns.filter((x) => x.date === iso && x.kind === 'in').reduce((s, x) => s + x.amountPaise, 0);
+    barData.push({ label: d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }), value: v, valueLabel: formatINR(v) });
+  }
+
+  const exportServiceCSV = () => exportCSV(`bizkhata-report-${period}.csv`,
+    ['Service', 'Received (Rs)', 'Profit (Rs)'],
+    [...byService.entries()].map(([s, v]) => [s, (v.received / 100).toFixed(2), (v.profit / 100).toFixed(2)]));
+
+  const reportRows: { title: string; sub: string; action: () => void; actionLabel: string }[] = [
+    { title: 'Income Report', sub: 'All money received in this period', action: () => exportCSV(`bizkhata-income-${period}.csv`, ['Date', 'Category', 'Method', 'Amount (Rs)'], txns.filter((x) => inRange(x.date) && x.kind === 'in').map((x) => [x.date, x.category, x.method, (x.amountPaise / 100).toFixed(2)])), actionLabel: 'Export CSV' },
+    { title: 'Expense Report', sub: 'All shop expenses in this period', action: () => exportCSV(`bizkhata-expense-${period}.csv`, ['Date', 'Category', 'Service', 'Amount (Rs)'], pe.map((e) => [e.date, e.category, e.service, (e.amountPaise / 100).toFixed(2)])), actionLabel: 'Export CSV' },
+    { title: 'Profit Report', sub: 'Service-wise received vs profit', action: exportServiceCSV, actionLabel: 'Export CSV' },
+    { title: 'Cash & UPI Report', sub: 'Balances and all transactions', action: () => exportCSV(`bizkhata-transactions-${period}.csv`, ['Date', 'Type', 'Category', 'Method', 'Amount (Rs)', 'Note'], txns.filter((x) => inRange(x.date)).map((x) => [x.date, x.kind, x.category, x.method, (x.amountPaise / 100).toFixed(2), x.note])), actionLabel: 'Export CSV' },
+    { title: 'Money Transfer Report', sub: 'Transfers, commission and MT balance', action: () => exportCSV(`bizkhata-mt-${period}.csv`, ['Date', 'Receiver', 'Amount (Rs)', 'Commission (Rs)', 'Method', 'Status'], pmt.map((m) => [m.date, m.receiverName, (m.amountPaise / 100).toFixed(2), (m.commissionPaise / 100).toFixed(2), m.method, m.status])), actionLabel: 'Export CSV' },
+    { title: 'Customer Due Report', sub: 'Who owes what, per customer', action: () => exportCSV(`bizkhata-due-${period}.csv`, ['Customer', 'Service', 'Due (Rs)'], jobs.filter((j) => j.totalPaise - j.receivedPaise > 0).map((j) => [j.customerName, j.service, ((j.totalPaise - j.receivedPaise) / 100).toFixed(2)])), actionLabel: 'Export CSV' },
+  ];
 
   return (
     <div>
-      <div className="btn-row" style={{ marginBottom: 12 }}>
-        {(['today', 'month', 'year', 'all'] as const).map((p) => (
-          <Btn key={p} kind={period === p ? 'primary' : 'secondary'} onClick={() => setPeriod(p)}>
-            {p === 'today' ? 'Today' : p === 'month' ? 'This Month' : p === 'year' ? 'This Year' : 'All Time'}
-          </Btn>
+      <div className="page-head">
+        <div className="pills">
+          {(['today', 'month', 'year', 'all'] as const).map((p) => (
+            <button key={p} className={period === p ? 'active' : ''} onClick={() => setPeriod(p)}>
+              {p === 'today' ? 'Today' : p === 'month' ? 'This Month' : p === 'year' ? 'This Year' : 'All Time'}
+            </button>
+          ))}
+        </div>
+        <div className="btn-row" style={{ marginTop: 0 }}>
+          <Btn kind="secondary" onClick={() => window.print()}>Export PDF / Print</Btn>
+          <Btn kind="secondary" onClick={exportServiceCSV}>Export CSV</Btn>
+        </div>
+      </div>
+
+      <div className="tabs" style={{ marginBottom: 14 }}>
+        {([['business', 'Business'], ['service', 'Service-wise'], ['customer', 'Customer'], ['agent', 'Agent'], ['mt', 'Money Transfer'], ['expenses', 'Expenses']] as const).map(([k, label]) => (
+          <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{label}</button>
         ))}
-        <Btn kind="secondary" onClick={() => window.print()}>PDF / Print</Btn>
-        <Btn
-          kind="secondary"
-          onClick={() => exportCSV(`bizkhata-report-${period}.csv`,
-            ['Service', 'Received (Rs)', 'Profit (Rs)'],
-            [...byService.entries()].map(([s, v]) => [s, (v.received / 100).toFixed(2), (v.profit / 100).toFixed(2)]))}
-        >
-          Export CSV
-        </Btn>
-        <Btn
-          kind="secondary"
-          onClick={() => exportCSV(`bizkhata-transactions-${period}.csv`,
-            ['Date', 'Type', 'Category', 'Method', 'Amount (Rs)', 'Note'],
-            txns.filter((x) => inRange(x.date)).map((x) => [x.date, x.kind, x.category, x.method, (x.amountPaise / 100).toFixed(2), x.note]))}
-        >
-          Export Transactions CSV
-        </Btn>
       </div>
-      <div className="grid grid-4" style={{ marginBottom: 16 }}>
-        <Stat label="Income Received" value={formatINR(received)} />
-        <Stat label="Expenses" value={formatINR(expTotal)} />
-        <Stat label="Net Profit" value={formatINR(profit)} />
-        <Stat label="Cash Balance" value={formatINR(bal.cash)} />
-        <Stat label="UPI Balance" value={formatINR(bal.upi)} />
-        <Stat label="Customer Due" value={formatINR(due)} />
-        <Stat label="Agent Payable" value={formatINR(payable)} />
-        <Stat label="MT Profit" value={formatINR(mtProfitPaise(pmt, pmte))} sub={`MT balance ${formatINR(mtClose.total)}`} />
-      </div>
-      <div className="grid grid-2">
-        <Card title="Service-wise Profit">
-          {byService.size === 0 ? <Empty text="No jobs in this period." /> : (
+
+      {tab === 'business' && (
+        <div>
+          <Card title="Business Summary">
+            <div className="grid grid-4">
+              <Stat label="Income Received" value={formatINR(received)} tone="green" />
+              <Stat label="Expenses" value={formatINR(expTotal)} tone="red" />
+              <Stat label="Net Profit" value={formatINR(profit)} tone="purple" />
+              <Stat label="Cash Balance" value={formatINR(bal.cash)} tone="blue" />
+              <Stat label="UPI Balance" value={formatINR(bal.upi)} tone="indigo" />
+              <Stat label="Customer Due" value={formatINR(due)} tone="orange" />
+              <Stat label="Agent Payable" value={formatINR(payable)} tone="pink" />
+              <Stat label="MT Profit" value={formatINR(mtProfitPaise(pmt, pmte))} tone="purple" sub={`MT balance ${formatINR(mtClose.total)}`} />
+            </div>
+          </Card>
+          <Card title="Income vs Expenses — last 7 days">
+            {txns.length === 0 ? <Empty text="No transactions yet — the chart fills in as you record income and expenses." /> : <BarChart data={barData} />}
+          </Card>
+          <Card title="Available Reports">
+            {reportRows.map((r) => (
+              <button key={r.title} className="report-row" onClick={r.action}>
+                <span className="row-ico">▦</span>
+                <span><span className="report-title">{r.title}</span><br /><span className="report-sub">{r.sub}</span></span>
+                <span className="report-chev">{r.actionLabel} ›</span>
+              </button>
+            ))}
+          </Card>
+        </div>
+      )}
+
+      {tab === 'service' && (
+        <div>
+          <Card title="Service-wise Profit">
+            {byService.size === 0 ? <Empty text="No jobs in this period." /> : (
+              <div>
+                <BarChart data={[...byService.entries()].map(([s, v]) => ({ label: s, value: v.received, valueLabel: formatINR(v.received) }))} />
+                <div className="table-wrap" style={{ marginTop: 12 }}>
+                  <table>
+                    <thead><tr><th>Service</th><th className="num">Received</th><th className="num">Profit</th></tr></thead>
+                    <tbody>
+                      {[...byService.entries()].map(([s, v]) => (
+                        <tr key={s}><td>{s}</td><td className="num">{formatINR(v.received)}</td><td className="num">{formatINR(v.profit)}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </Card>
+          <Card title="Cash vs UPI">
+            <p>Cash: <strong>{formatINR(bal.cash)}</strong></p>
+            <p>UPI: <strong>{formatINR(bal.upi)}</strong></p>
+            <p>Total in hand: <strong>{formatINR(bal.cash + bal.upi)}</strong></p>
+            <p style={{ color: 'var(--muted)' }}>Money Transfer balance is separate: {formatINR(mtClose.total)} (cash {formatINR(mtClose.cash)}, UPI {formatINR(mtClose.upi)}).</p>
+          </Card>
+        </div>
+      )}
+
+      {tab === 'customer' && (
+        <Card title="Pending Customer Payments">
+          {jobs.filter((j) => j.totalPaise - j.receivedPaise > 0).length === 0 ? <Empty text="No pending payments." /> : (
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Service</th><th className="num">Received</th><th className="num">Profit</th></tr></thead>
+                <thead><tr><th>Customer</th><th>Service</th><th className="num">Due</th></tr></thead>
                 <tbody>
-                  {[...byService.entries()].map(([s, v]) => (
-                    <tr key={s}><td>{s}</td><td className="num">{formatINR(v.received)}</td><td className="num">{formatINR(v.profit)}</td></tr>
+                  {jobs.filter((j) => j.totalPaise - j.receivedPaise > 0).map((j) => (
+                    <tr key={j.id}><td>{j.customerName}</td><td>{j.service}</td><td className="num">{formatINR(j.totalPaise - j.receivedPaise)}</td></tr>
                   ))}
                 </tbody>
               </table>
             </div>
           )}
         </Card>
-        <Card title="Cash vs UPI">
-          <p>Cash: <strong>{formatINR(bal.cash)}</strong></p>
-          <p>UPI: <strong>{formatINR(bal.upi)}</strong></p>
-          <p>Total in hand: <strong>{formatINR(bal.cash + bal.upi)}</strong></p>
-          <p style={{ color: 'var(--muted)' }}>Money Transfer balance is separate: {formatINR(mtClose.total)} (cash {formatINR(mtClose.cash)}, UPI {formatINR(mtClose.upi)}).</p>
+      )}
+
+      {tab === 'agent' && (
+        <Card title="Agent Payables">
+          {agents.length === 0 ? <Empty text="No agents." /> : (
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Agent</th><th className="num">Payable</th></tr></thead>
+                <tbody>
+                  {agents.map((a) => (
+                    <tr key={a.id}><td>{a.name}</td><td className="num">{formatINR(agentPayablePaise(a, jobs))}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Card>
-      </div>
-      <Card title="Pending Customer Payments">
-        {jobs.filter((j) => j.totalPaise - j.receivedPaise > 0).length === 0 ? <Empty text="No pending payments." /> : (
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Customer</th><th>Service</th><th className="num">Due</th></tr></thead>
-              <tbody>
-                {jobs.filter((j) => j.totalPaise - j.receivedPaise > 0).map((j) => (
-                  <tr key={j.id}><td>{j.customerName}</td><td>{j.service}</td><td className="num">{formatINR(j.totalPaise - j.receivedPaise)}</td></tr>
-                ))}
-              </tbody>
-            </table>
+      )}
+
+      {tab === 'mt' && (
+        <Card title="Money Transfer Summary">
+          <div className="grid grid-4">
+            <Stat label="Fund Received" value={formatINR(mtF.reduce((s, f) => s + f.amountPaise, 0))} tone="blue" />
+            <Stat label="Money Sent" value={formatINR(mtT.filter((m) => m.status !== 'Failed').reduce((s, m) => s + m.amountPaise, 0))} tone="indigo" sub="Principal — not profit" />
+            <Stat label="Commission" value={formatINR(mtT.filter((m) => m.status !== 'Failed').reduce((s, m) => s + m.commissionPaise, 0))} tone="green" />
+            <Stat label="MT Profit" value={formatINR(mtProfitPaise(mtT, mtE))} tone="purple" sub={`MT balance ${formatINR(mtClose.total)}`} />
           </div>
-        )}
-      </Card>
-      <Card title="Agent Payables">
-        {agents.length === 0 ? <Empty text="No agents." /> : (
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Agent</th><th className="num">Payable</th></tr></thead>
-              <tbody>
-                {agents.map((a) => (
-                  <tr key={a.id}><td>{a.name}</td><td className="num">{formatINR(agentPayablePaise(a, jobs))}</td></tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
+        </Card>
+      )}
+
+      {tab === 'expenses' && (
+        <Card title="Expenses by Category">
+          {byCategory.size === 0 ? <Empty text="No expenses in this period." /> : (
+            <div>
+              <BarChart data={[...byCategory.entries()].map(([c, v]) => ({ label: c, value: v, valueLabel: formatINR(v) }))} />
+              <div className="table-wrap" style={{ marginTop: 12 }}>
+                <table>
+                  <thead><tr><th>Category</th><th className="num">Amount</th></tr></thead>
+                  <tbody>
+                    {[...byCategory.entries()].map(([c, v]) => (
+                      <tr key={c}><td>{c}</td><td className="num">{formatINR(v)}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </Card>
+      )}
     </div>
   );
 }
 
+/* ================= Difference Finder (page 24) ================= */
+
+const DF_SCOPES = ['Cash', 'UPI', 'Money Transfer', 'Service', 'General'] as const;
+type DfScope = (typeof DF_SCOPES)[number];
+
 export function DifferenceFinderView({ ctx }: { ctx: Ctx }) {
   const { state, profile } = ctx;
   const pid = profile.id;
-  const [scope, setScope] = React.useState<'General' | 'Cash' | 'UPI' | 'Money Transfer' | 'Service'>('Cash');
+  const [scope, setScope] = React.useState<DfScope>('Cash');
   const [service, setService] = React.useState(profile.services[0] || 'Xerox');
   const [expected, setExpected] = React.useState('');
   const [result, setResult] = React.useState<{ recorded: number; diff: number; suggestions: { label: string; why: string; amount: number }[] } | null>(null);
@@ -192,24 +282,22 @@ export function DifferenceFinderView({ ctx }: { ctx: Ctx }) {
     setResult({ recorded, diff, suggestions });
   }
 
+  const recorded = recordedBalance();
+
   return (
     <div>
-      <Card title="Hisab Difference Finder">
-        <p style={{ color: 'var(--muted)', marginTop: 0 }}>
-          Enter the balance you <strong>expect</strong> (counted cash/UPI in hand). The app compares it
-          with the recorded balance and only <strong>suggests</strong> possible causes. It never
-          changes any entry by itself — you correct entries manually, with an audit trail.
-        </p>
-        <div className="form-row">
-          <Field label="Scope">
-            <select className="input" value={scope} onChange={(e) => setScope(e.target.value as 'General' | 'Cash' | 'UPI' | 'Money Transfer' | 'Service')}>
-              <option value="General">General Shop</option>
-              <option value="Cash">Cash</option>
-              <option value="UPI">UPI</option>
-              <option value="Money Transfer">Money Transfer (own ledger only)</option>
-              <option value="Service">Individual Service</option>
-            </select>
-          </Field>
+      <div className="tabs" style={{ marginBottom: 14 }}>
+        {DF_SCOPES.map((s) => (
+          <button key={s} className={scope === s ? 'active' : ''} onClick={() => { setScope(s); setResult(null); }}>{s}</button>
+        ))}
+      </div>
+      <div className="grid grid-2">
+        <Card title={`${scope} Reconciliation`}>
+          <p style={{ color: 'var(--muted)', marginTop: 0 }}>
+            Enter the balance you <strong>expect</strong> (counted cash/UPI in hand). The app compares it
+            with the recorded balance and only <strong>suggests</strong> possible causes. It never
+            changes any entry by itself — you correct entries manually, with an audit trail.
+          </p>
           {scope === 'Service' && (
             <Field label="Service">
               <select className="input" value={service} onChange={(e) => setService(e.target.value)}>
@@ -220,46 +308,54 @@ export function DifferenceFinderView({ ctx }: { ctx: Ctx }) {
           <Field label="Expected Balance (₹) — counted by hand">
             <input className="input" type="number" min="0" step="0.01" inputMode="decimal" value={expected} onChange={(e) => setExpected(e.target.value)} placeholder="e.g. 25000" />
           </Field>
-        </div>
-        <Btn onClick={find}>Find Difference</Btn>
-      </Card>
-      {result && (
-        <Card title="Result">
-          <p>Recorded balance: <strong>{formatINR(result.recorded)}</strong></p>
-          <p>Expected balance: <strong>{formatINR(Math.round(parseFloat(expected || '0') * 100))}</strong></p>
-          <p>Difference: <strong style={{ color: result.diff === 0 ? 'var(--accent-2)' : 'var(--danger)' }}>{formatINR(result.diff)}</strong></p>
-          {result.diff === 0 ? (
-            <p className="success">Hisab matches — no difference. Good!</p>
+          <div className="grid grid-3" style={{ marginTop: 8 }}>
+            <Stat label="Expected (Actual)" value={expected ? formatINR(Math.round(parseFloat(expected) * 100)) : '—'} tone="blue" />
+            <Stat label="App Recorded" value={formatINR(recorded)} tone="indigo" />
+            <Stat label="Difference" value={result ? formatINR(result.diff) : '—'} tone={result && result.diff === 0 ? 'green' : 'red'} />
+          </div>
+          <Btn onClick={find}>Find Possible Causes</Btn>
+          {result && result.diff === 0 && <p className="success" style={{ marginTop: 12 }}>Hisab matches — no difference. Good!</p>}
+        </Card>
+        <Card title="Possible Matches">
+          {!result ? (
+            <Empty text="Run the check to see possible causes here." />
+          ) : result.diff === 0 ? (
+            <p className="success">No difference to investigate.</p>
+          ) : result.suggestions.length === 0 ? (
+            <ul>
+              <li><strong>Unmatched entry</strong> — a payment or expense not recorded</li>
+              <li><strong>Duplicate entry</strong> — same transaction recorded twice</li>
+              <li><strong>Incorrect amount</strong> — wrong amount, wrong mode (Cash vs UPI), or wrong date</li>
+              <li><strong>Wrong opening balance</strong></li>
+              <li><strong>Cash/UPI mismatch</strong> — money recorded in the wrong book</li>
+            </ul>
           ) : (
-            <div>
-              <p>Possible causes — check these, do not assume. The difference amount alone cannot always identify the error:</p>
-              {result.suggestions.length === 0 ? (
-                <ul>
-                  <li>Missing entry (a payment or expense not recorded)</li>
-                  <li>Duplicate entry (same transaction recorded twice)</li>
-                  <li>Wrong amount, wrong payment mode (Cash vs UPI), or wrong date</li>
-                  <li>Wrong opening balance</li>
-                  <li>Cash/UPI mismatch — money recorded in the wrong book</li>
-                </ul>
-              ) : (
-                <ul>
-                  {result.suggestions.map((s, i) => (
-                    <li key={i}><strong>{s.label}</strong> — {formatINR(s.amount)}. {s.why}</li>
-                  ))}
-                </ul>
-              )}
-              <p style={{ color: 'var(--muted)' }}>Fix entries manually from the Cash Book / UPI Book / Money Transfer pages. Every change is written to the Audit Log.</p>
-            </div>
+            <ul>
+              {result.suggestions.map((s, i) => (
+                <li key={i}><strong>{s.label}</strong> — {formatINR(s.amount)}. {s.why}</li>
+              ))}
+            </ul>
+          )}
+          {result && result.diff !== 0 && (
+            <p style={{ color: 'var(--muted)' }}>Fix entries manually from the Cash Book / UPI Book / Money Transfer pages. Every change is written to the Audit Log.</p>
           )}
         </Card>
-      )}
+      </div>
     </div>
   );
 }
 
+/* ================= Recycle Bin (page 25) ================= */
+
 export function RecycleBinView({ ctx }: { ctx: Ctx }) {
   const { state, profile } = ctx;
-  const items = state.recycle.filter((r) => r.profileId === profile.id).sort((a, b) => (a.deletedAt < b.deletedAt ? 1 : -1));
+  const [search, setSearch] = React.useState('');
+  const [page, setPage] = React.useState(1);
+  const items = state.recycle.filter((r) => r.profileId === profile.id)
+    .filter((r) => !search || r.label.toLowerCase().includes(search.toLowerCase()) || r.kind.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => (a.deletedAt < b.deletedAt ? 1 : -1));
+  const pageItems = pageSlice(items, page, 8);
+  React.useEffect(() => { setPage(1); }, [search]);
 
   function restore(item: (typeof items)[number]) {
     let data: Record<string, unknown> = {};
@@ -278,6 +374,9 @@ export function RecycleBinView({ ctx }: { ctx: Ctx }) {
 
   return (
     <Card title="Recycle Bin — restore deleted records">
+      <Field label="Search deleted records">
+        <input className="input" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Record or type" />
+      </Field>
       {items.length === 0 ? (
         <Empty text="Recycle Bin is empty. Deleted records go here first and can be restored." />
       ) : (
@@ -285,9 +384,9 @@ export function RecycleBinView({ ctx }: { ctx: Ctx }) {
           <table>
             <thead><tr><th>Record</th><th>Type</th><th>Deleted</th><th></th></tr></thead>
             <tbody>
-              {items.map((it) => (
+              {pageItems.map((it) => (
                 <tr key={it.id}>
-                  <td>{it.label}</td><td>{it.kind}</td><td>{formatDate(it.deletedAt)}</td>
+                  <td>{it.label}</td><td><span className="pill">{it.kind}</span></td><td>{formatDate(it.deletedAt)}</td>
                   <td style={{ whiteSpace: 'nowrap' }}>
                     <Btn kind="secondary" onClick={() => restore(it)}>Restore</Btn>{' '}
                     <Btn kind="danger" onClick={() => {
@@ -300,17 +399,41 @@ export function RecycleBinView({ ctx }: { ctx: Ctx }) {
               ))}
             </tbody>
           </table>
+          <Pager total={items.length} page={page} pageSize={8} onPage={setPage} />
         </div>
       )}
     </Card>
   );
 }
 
+/* ================= Audit Log (page 26) ================= */
+
 export function AuditLogView({ ctx }: { ctx: Ctx }) {
   const { state, profile } = ctx;
-  const entries = [...state.audit.filter((a) => a.profileId === profile.id)].sort((a, b) => (a.at < b.at ? 1 : -1)).slice(0, 200);
+  const [search, setSearch] = React.useState('');
+  const [action, setAction] = React.useState('All');
+  const [page, setPage] = React.useState(1);
+  const entries = [...state.audit.filter((a) => a.profileId === profile.id)]
+    .filter((a) => !search || a.entity.toLowerCase().includes(search.toLowerCase()) || a.newValue.toLowerCase().includes(search.toLowerCase()))
+    .filter((a) => action === 'All' || a.action === action)
+    .sort((a, b) => (a.at < b.at ? 1 : -1));
+  const actions = [...new Set(state.audit.filter((a) => a.profileId === profile.id).map((a) => a.action))];
+  const pageEntries = pageSlice(entries, page, 10);
+  React.useEffect(() => { setPage(1); }, [search, action]);
+
   return (
     <Card title="Audit Log — who changed what, and when">
+      <div className="form-row">
+        <Field label="Search">
+          <input className="input" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Record or new value" />
+        </Field>
+        <Field label="Action">
+          <select className="input" value={action} onChange={(e) => setAction(e.target.value)}>
+            <option value="All">All actions</option>
+            {actions.map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
+        </Field>
+      </div>
       {entries.length === 0 ? (
         <Empty text="No changes recorded yet. Every create, edit, delete and restore is logged here with old and new values." />
       ) : (
@@ -318,19 +441,22 @@ export function AuditLogView({ ctx }: { ctx: Ctx }) {
           <table>
             <thead><tr><th>When</th><th>Action</th><th>Record</th><th>Old Value</th><th>New Value</th></tr></thead>
             <tbody>
-              {entries.map((a) => (
+              {pageEntries.map((a) => (
                 <tr key={a.id}>
-                  <td>{formatDate(a.at)}</td><td>{a.action}</td><td>{a.entity}</td>
+                  <td>{formatDate(a.at)}</td><td><span className="pill">{a.action}</span></td><td>{a.entity}</td>
                   <td>{a.oldValue || '—'}</td><td>{a.newValue || '—'}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+          <Pager total={entries.length} page={page} pageSize={10} onPage={setPage} />
         </div>
       )}
     </Card>
   );
 }
+
+/* ================= Customization Studio (page 27) ================= */
 
 export function CustomizationView({ ctx }: { ctx: Ctx }) {
   const { state, profile } = ctx;
@@ -444,6 +570,8 @@ export function CustomizationView({ ctx }: { ctx: Ctx }) {
   );
 }
 
+/* ================= Settings (page 28) ================= */
+
 export function SettingsView({ ctx }: { ctx: Ctx }) {
   const { state, profile } = ctx;
   const lang = profile.language;
@@ -495,88 +623,135 @@ export function SettingsView({ ctx }: { ctx: Ctx }) {
 
   return (
     <div>
-      <Card title="Business Information">
-        <div className="form-row">
-          <Field label="Business Name"><input className="input" value={name} onChange={(e) => setName(e.target.value)} /></Field>
-          <Field label="Mobile"><input className="input" value={mobile} onChange={(e) => setMobile(e.target.value)} inputMode="tel" /></Field>
-        </div>
-        <Field label="Address"><input className="input" value={address} onChange={(e) => setAddress(e.target.value)} /></Field>
-        <div className="form-row">
-          <Field label="Opening Cash Balance (₹)"><input className="input" type="number" step="0.01" value={openingCash} onChange={(e) => setOpeningCash(e.target.value)} /></Field>
-          <Field label="Opening UPI Balance (₹)"><input className="input" type="number" step="0.01" value={openingUpi} onChange={(e) => setOpeningUpi(e.target.value)} /></Field>
-        </div>
-        <Btn onClick={saveBusiness}>Save Business Info</Btn>
-        {msg && <p className="success">{msg}</p>}
-      </Card>
-
-      <Card title={t(lang, 'language')}>
-        <div className="lang-pick">
-          {LANG_OPTIONS.map((o) => (
-            <button key={o.code} onClick={() => update({ language: o.code as Lang }, `Language changed to ${o.label}`)}>
-              {o.label} {profile.language === o.code ? '✓' : ''}
-            </button>
-          ))}
+      <Card>
+        <div className="khata-head">
+          <span className="avatar" style={{ width: 52, height: 52, fontSize: 19 }}>A</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h2 style={{ margin: 0 }}>Ayan Sikligar</h2>
+            <p className="page-sub" style={{ margin: 0 }}>Owner • {profile.name} • {profile.category}</p>
+          </div>
+          <Btn kind="secondary" onClick={() => ctx.go?.('customize')}>Customization Studio →</Btn>
         </div>
       </Card>
 
-      <Card title={t(lang, 'theme')}>
-        <div className="btn-row">
-          {(['light', 'dark', 'system'] as Theme[]).map((th) => (
-            <Btn key={th} kind={profile.theme === th ? 'primary' : 'secondary'} onClick={() => update({ theme: th }, `Theme ${th}`)}>
-              {th === 'light' ? 'Light' : th === 'dark' ? 'Dark' : 'System'}
+      <div className="grid grid-2">
+        <Card title="Business Profiles">
+          <p style={{ color: 'var(--muted)', marginTop: 0 }}>Manage your businesses — up to 3 separate profiles.</p>
+          <p><strong>{profile.name}</strong> — {profile.category}</p>
+          <p className="field-hint">{state.profiles.map((p) => p.name).join(' • ')}</p>
+          <Btn kind="secondary" onClick={() => ctx.go?.('customize')}>Manage Profiles</Btn>
+        </Card>
+
+        <Card title="Business Information">
+          <div className="form-row">
+            <Field label="Business Name"><input className="input" value={name} onChange={(e) => setName(e.target.value)} /></Field>
+            <Field label="Mobile"><input className="input" value={mobile} onChange={(e) => setMobile(e.target.value)} inputMode="tel" /></Field>
+          </div>
+          <Field label="Address"><input className="input" value={address} onChange={(e) => setAddress(e.target.value)} /></Field>
+          <div className="form-row">
+            <Field label="Opening Cash Balance (₹)"><input className="input" type="number" step="0.01" value={openingCash} onChange={(e) => setOpeningCash(e.target.value)} /></Field>
+            <Field label="Opening UPI Balance (₹)"><input className="input" type="number" step="0.01" value={openingUpi} onChange={(e) => setOpeningUpi(e.target.value)} /></Field>
+          </div>
+          <Btn onClick={saveBusiness}>Save Business Info</Btn>
+          {msg && <p className="success">{msg}</p>}
+        </Card>
+
+        <Card title={t(lang, 'language')}>
+          <div className="lang-pick">
+            {LANG_OPTIONS.map((o) => (
+              <button key={o.code} onClick={() => update({ language: o.code as Lang }, `Language changed to ${o.label}`)}>
+                {o.label} {profile.language === o.code ? '✓' : ''}
+              </button>
+            ))}
+          </div>
+        </Card>
+
+        <Card title={t(lang, 'theme')}>
+          <div className="btn-row">
+            {(['light', 'dark', 'system'] as Theme[]).map((th) => (
+              <Btn key={th} kind={profile.theme === th ? 'primary' : 'secondary'} onClick={() => update({ theme: th }, `Theme ${th}`)}>
+                {th === 'light' ? 'Light' : th === 'dark' ? 'Dark' : 'System'}
+              </Btn>
+            ))}
+          </div>
+        </Card>
+
+        <Card title="Receipt Settings">
+          <Field label="Receipt Number Prefix">
+            <input className="input" value={profile.receiptPrefix} onChange={(e) => update({ receiptPrefix: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '') || 'BK' }, 'Receipt prefix changed')} />
+          </Field>
+          <p className="field-hint">Next receipt number: {profile.receiptPrefix}-{String(profile.receiptCounter + 1).padStart(4, '0')}</p>
+          <div className="btn-row">
+            <Btn kind="secondary" onClick={() => ctx.go?.('receipt-generator')}>Open Receipt Generator</Btn>
+          </div>
+        </Card>
+
+        <Card title="Service Settings">
+          <p style={{ color: 'var(--muted)', marginTop: 0 }}>Manage services &amp; rates for this profile.</p>
+          <Btn kind="secondary" onClick={() => ctx.go?.('customize')}>Open Customization Studio</Btn>
+        </Card>
+
+        <Card title="Categories">
+          <p style={{ color: 'var(--muted)', marginTop: 0 }}>Income &amp; expense categories for this profile.</p>
+          <p className="field-hint">{profile.expenseCategories.join(', ')}</p>
+          <Btn kind="secondary" onClick={() => ctx.go?.('customize')}>Manage Categories</Btn>
+        </Card>
+
+        <Card title="AI (Gemini — free tier, optional)">
+          <p style={{ color: 'var(--muted)', marginTop: 0 }}>
+            AI is OFF until you add your own free Gemini API key. Get one free from Google AI
+            Studio (aistudio.google.com). The key stays on this device only.
+          </p>
+          <Field label="Gemini API Key (free tier)">
+            <input className="input" type="password" value={geminiKey} onChange={(e) => setGeminiKey(e.target.value)} placeholder="Paste your free Gemini key here" autoComplete="off" />
+          </Field>
+          <div className="btn-row">
+            <Btn onClick={() => update({ geminiKey }, 'Gemini key saved')}>Save Key</Btn>
+            {profile.geminiKey && (
+              <Btn kind="danger" onClick={() => { setGeminiKey(''); update({ geminiKey: '' }, 'Gemini key removed'); }}>Remove Key</Btn>
+            )}
+          </div>
+        </Card>
+
+        <Card title="Data & Backup">
+          <div className="btn-row">
+            <Btn onClick={() => exportBackup(state)}>Download Backup (JSON)</Btn>
+            <label className="btn btn-secondary" style={{ display: 'inline-block', cursor: 'pointer' }}>
+              Import Backup
+              <input type="file" hidden accept=".json" onChange={importBackup} />
+            </label>
+            <Btn
+              kind="danger"
+              onClick={() => {
+                if (!window.confirm('Erase ALL BizKhata data on this device? This cannot be undone. Download a backup first!')) return;
+                if (!window.confirm('Really erase everything?')) return;
+                window.localStorage.removeItem('bizkhata.v1');
+                window.location.reload();
+              }}
+            >
+              Erase All Data
             </Btn>
-          ))}
-        </div>
-      </Card>
+          </div>
+          {importError && <p className="error">{importError}</p>}
+        </Card>
 
-      <Card title="Receipt Settings">
-        <Field label="Receipt Number Prefix">
-          <input className="input" value={profile.receiptPrefix} onChange={(e) => update({ receiptPrefix: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '') || 'BK' }, 'Receipt prefix changed')} />
-        </Field>
-        <p className="field-hint">Next receipt number: {profile.receiptPrefix}-{String(profile.receiptCounter + 1).padStart(4, '0')}</p>
-      </Card>
+        <Card title="Security & Privacy">
+          <p style={{ color: 'var(--muted)', marginTop: 0 }}>
+            App lock (mobile + PIN) protects this device. Data is local-first — nothing is
+            uploaded anywhere. Gemini key, if added, stays on this device only.
+          </p>
+          <div className="btn-row">
+            <Btn kind="secondary" onClick={() => ctx.go?.('audit')}>Audit Log →</Btn>
+            <Btn kind="secondary" onClick={() => ctx.go?.('recycle')}>Recycle Bin →</Btn>
+          </div>
+        </Card>
 
-      <Card title="AI (Gemini — free tier, optional)">
-        <p style={{ color: 'var(--muted)', marginTop: 0 }}>
-          AI is OFF until you add your own free Gemini API key. Get one free from Google AI
-          Studio (aistudio.google.com). The key stays on this device only.
-        </p>
-        <Field label="Gemini API Key (free tier)">
-          <input className="input" type="password" value={geminiKey} onChange={(e) => setGeminiKey(e.target.value)} placeholder="Paste your free Gemini key here" autoComplete="off" />
-        </Field>
-        <Btn onClick={() => update({ geminiKey }, 'Gemini key saved')}>Save Key</Btn>
-        {profile.geminiKey && (
-          <Btn kind="danger" onClick={() => { setGeminiKey(''); update({ geminiKey: '' }, 'Gemini key removed'); }}>Remove Key</Btn>
-        )}
-      </Card>
-
-      <Card title="Backup & Data Management">
-        <div className="btn-row">
-          <Btn onClick={() => exportBackup(state)}>Download Backup (JSON)</Btn>
-          <label className="btn btn-secondary" style={{ display: 'inline-block', cursor: 'pointer' }}>
-            Import Backup
-            <input type="file" hidden accept=".json" onChange={importBackup} />
-          </label>
-          <Btn
-            kind="danger"
-            onClick={() => {
-              if (!window.confirm('Erase ALL BizKhata data on this device? This cannot be undone. Download a backup first!')) return;
-              if (!window.confirm('Really erase everything?')) return;
-              window.localStorage.removeItem('bizkhata.v1');
-              window.location.reload();
-            }}
-          >
-            Erase All Data
-          </Btn>
-        </div>
-        {importError && <p className="error">{importError}</p>}
-      </Card>
-
-      <Card title="About BizKhata">
-        <p>BizKhata v1.0 — free business accounting for CSC Centers and small businesses.</p>
-        <p>Local-first: your data stays on this device. Free hosting on Cloudflare Pages.</p>
-        <p>Support: ask in the app — no subscription, no payment gateway in v1.</p>
-      </Card>
+        <Card title="About BizKhata">
+          <p>BizKhata v1.0 — free business accounting for CSC Centers and small businesses.</p>
+          <p>Local-first: your data stays on this device. Free hosting on Cloudflare Pages.</p>
+          <p>Support: ask in the app — no subscription, no payment gateway in v1.</p>
+        </Card>
+      </div>
     </div>
   );
 }

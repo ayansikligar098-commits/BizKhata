@@ -20,11 +20,20 @@ import {
   CustomizationView,
   SettingsView,
 } from '@/components/views-reports';
+import {
+  CustomerProfileView,
+  AgentProfileView,
+  AgentPaymentsView,
+  ReceiptGeneratorView,
+} from '@/components/views-profiles';
+import { formatINR } from '@/lib/money';
+import { agentPayablePaise, totalCustomerDuePaise } from '@/lib/accounting';
 
 type ViewKey =
   | 'dashboard' | 'cash' | 'upi' | 'mt' | 'services' | 'customers' | 'khata'
   | 'agents' | 'expenses' | 'maintenance' | 'receipts' | 'daily' | 'reports'
-  | 'difference' | 'recycle' | 'audit' | 'customize' | 'settings';
+  | 'difference' | 'recycle' | 'audit' | 'customize' | 'settings'
+  | 'customer-profile' | 'agent-profile' | 'agent-payments' | 'receipt-generator';
 
 const VIEW_TITLES: Record<ViewKey, string> = {
   dashboard: 'Dashboard', cash: 'Cash Book', upi: 'UPI Book', mt: 'Money Transfer',
@@ -33,12 +42,66 @@ const VIEW_TITLES: Record<ViewKey, string> = {
   receipts: 'Receipts', daily: 'Daily Dhandha', reports: 'Reports',
   difference: 'Difference Finder', recycle: 'Recycle Bin', audit: 'Audit Log',
   customize: 'Customization Studio', settings: 'Settings',
+  'customer-profile': 'Customer Profile', 'agent-profile': 'Agent Profile',
+  'agent-payments': 'Agent Payments', 'receipt-generator': 'Receipt Generator',
+};
+
+const VIEW_SUBS: Record<ViewKey, string> = {
+  dashboard: 'Your business at a glance',
+  cash: 'Cash received, spent and internal transfers',
+  upi: 'UPI received, spent and internal transfers',
+  mt: 'Separate ledger — commission is the only profit',
+  services: 'Jobs across all services',
+  customers: 'Everyone you serve',
+  khata: 'Per-customer ledger — who owes what',
+  agents: 'Backend agents and what you owe them',
+  expenses: 'Shop spending, linked to services',
+  maintenance: 'Machines, service history and lifetime cost',
+  receipts: 'Professional receipts, A4 + thermal',
+  daily: 'Billing vs actually received vs profit',
+  reports: 'Business, service, customer and agent reports',
+  difference: 'Expected vs recorded — suggestions only, never edits',
+  recycle: 'Deleted records — restore them here',
+  audit: 'Every change, old value → new value',
+  customize: 'Services, modules and dashboard cards for this profile',
+  settings: 'Business, language, theme, receipts, backup and AI',
+  'customer-profile': 'Ledger, jobs, payments and documents for one customer',
+  'agent-profile': 'Assigned jobs, charges, payments and payable for one agent',
+  'agent-payments': 'Payment history and record a payment to an agent',
+  'receipt-generator': 'Create a professional receipt from a job',
 };
 
 const MODULE_FOR_VIEW: Partial<Record<ViewKey, string>> = {
   mt: 'moneyTransfer', agents: 'agents', maintenance: 'maintenance',
   receipts: 'receipts', reports: 'reports', difference: 'differenceFinder',
 };
+
+const NAV_ICONS: Record<string, string> = {
+  dashboard: '⌂', daily: '◷', cash: '▤', upi: '⌁', mt: '⇄', services: '▦',
+  customers: '◉', khata: '▤', agents: '◉', expenses: '▤', maintenance: '⚙',
+  receipts: '▦', reports: '↗', difference: '≠', recycle: '↺', audit: '☰',
+  customize: '✦', settings: '⚙',
+  'customer-profile': '◉', 'agent-profile': '◉', 'agent-payments': '▤', 'receipt-generator': '▦',
+};
+
+/** Sidebar labels use the profile language where a translation exists. */
+function navLabel(lang: Lang, k: ViewKey): string {
+  const keyMap: Record<ViewKey, string> = {
+    dashboard: 'dashboard', cash: 'cashBook', upi: 'upiBook', mt: 'moneyTransfer',
+    services: 'services', customers: 'customers', khata: 'customerKhata',
+    agents: 'agents', expenses: 'expenses', maintenance: 'maintenance',
+    receipts: 'receipts', daily: 'dailyBusiness', reports: 'reports',
+    difference: 'differenceFinder', recycle: 'recycleBin', audit: 'auditLog',
+    customize: 'customization', settings: 'settings',
+    'customer-profile': 'customers', 'agent-profile': 'agents',
+    'agent-payments': 'agents', 'receipt-generator': 'receipts',
+  };
+  if (k === 'customer-profile') return 'Customer Profile';
+  if (k === 'agent-profile') return 'Agent Profile';
+  if (k === 'agent-payments') return 'Agent Payments';
+  if (k === 'receipt-generator') return 'Receipt Generator';
+  return t(lang, keyMap[k]);
+}
 
 export default function Home() {
   const [state, setState] = React.useState<AppState>(EMPTY_STATE);
@@ -48,6 +111,16 @@ export default function Home() {
   const [showLang, setShowLang] = React.useState(false);
   const [showAddBusiness, setShowAddBusiness] = React.useState(false);
   const [storageError, setStorageError] = React.useState(false);
+  const [drawerOpen, setDrawerOpen] = React.useState(false);
+  const [servicesOpen, setServicesOpen] = React.useState(true);
+  const [reportsOpen, setReportsOpen] = React.useState(false);
+  const [serviceJump, setServiceJump] = React.useState<{ service: string; nonce: number; openForm: boolean } | undefined>(undefined);
+  const [search, setSearch] = React.useState('');
+  const [searchFocus, setSearchFocus] = React.useState(false);
+  const [bellOpen, setBellOpen] = React.useState(false);
+  const [ownerMenuOpen, setOwnerMenuOpen] = React.useState(false);
+  const [customerId, setCustomerId] = React.useState<string | null>(null);
+  const [agentId, setAgentId] = React.useState<string | null>(null);
 
   // Auth form state
   const [authMode, setAuthMode] = React.useState<'login' | 'register' | 'forgot'>('login');
@@ -108,6 +181,45 @@ export default function Home() {
     }, [auditEntry(pid, 'delete', kind, '', label, 'Moved to Recycle Bin')]);
   }
 
+  function go(v: string) {
+    // A plain navigation to Services shows All Services — a stale service
+    // jump (e.g. PAN Card from the sidebar) must not re-apply on remount.
+    if (v === 'services') setServiceJump(undefined);
+    setView(v as ViewKey);
+    setDrawerOpen(false);
+    setSearch('');
+    window.scrollTo({ top: 0 });
+  }
+
+  function goService(service: string) {
+    setServiceJump({ service, nonce: Date.now(), openForm: true });
+    setView('services');
+    setDrawerOpen(false);
+    window.scrollTo({ top: 0 });
+  }
+
+  function goServiceFilter(service: string) {
+    setServiceJump({ service, nonce: Date.now(), openForm: false });
+    setView('services');
+    setDrawerOpen(false);
+    setServicesOpen(true);
+    window.scrollTo({ top: 0 });
+  }
+
+  function openCustomer(id: string) {
+    setCustomerId(id);
+    setView('customer-profile');
+    setDrawerOpen(false);
+    window.scrollTo({ top: 0 });
+  }
+
+  function openAgent(id: string) {
+    setAgentId(id);
+    setView('agent-profile');
+    setDrawerOpen(false);
+    window.scrollTo({ top: 0 });
+  }
+
   // ---------- auth ----------
   function doRegister() {
     if (!/^\d{10}$/.test(mobile)) { setAuthError('Enter a 10-digit mobile number.'); return; }
@@ -153,6 +265,7 @@ export default function Home() {
     setLoggedIn(false);
     window.sessionStorage.removeItem('bizkhata.session');
     setView('dashboard');
+    setOwnerMenuOpen(false);
   }
 
   // ---------- business profiles ----------
@@ -189,14 +302,14 @@ export default function Home() {
     setShowLang(true);
   }
 
-  if (!hydrated) return <div className="auth-wrap"><p>Loading BizKhata…</p></div>;
+  if (!hydrated) return <div className="auth-wrap"><p style={{ color: '#fff' }}>Loading BizKhata…</p></div>;
 
   // ---------- auth screens ----------
   if (!loggedIn) {
     return (
       <div className="auth-wrap">
         <div className="auth-card">
-          <h1>BizKhata</h1>
+          <h1><span className="brand-mark">B</span> BizKhata</h1>
           <p style={{ color: 'var(--muted)' }}>Business Accounting &amp; Management — free, local-first. Your data stays on this device.</p>
           {authMode === 'register' && (
             <>
@@ -246,7 +359,7 @@ export default function Home() {
     return (
       <div className="auth-wrap">
         <div className="auth-card">
-          <h1>Set up your business</h1>
+          <h1><span className="brand-mark">B</span> Set up your business</h1>
           <p style={{ color: 'var(--muted)' }}>Choose your business category — BizKhata sets up ready-made services for it. You can add up to 3 separate businesses.</p>
           <Field label="Business Name"><input className="input" value={bizName} onChange={(e) => setBizName(e.target.value)} /></Field>
           <Field label="Business Category">
@@ -267,7 +380,7 @@ export default function Home() {
     return (
       <div className="auth-wrap">
         <div className="auth-card">
-          <h1>Choose your language</h1>
+          <h1><span className="brand-mark">B</span> Choose your language</h1>
           <p style={{ color: 'var(--muted)' }}>Apni bhasha chuno. You can change it later in Settings.</p>
           <div className="lang-pick">
             {LANG_OPTIONS.map((o) => (
@@ -287,94 +400,239 @@ export default function Home() {
   }
 
   const lang = profile.language;
-  const ctx: Ctx = { state, profile, mutate, softDelete };
-  const navSections: { section: string; items: ViewKey[] }[] = [
-    { section: 'Main', items: ['dashboard', 'daily'] },
-    { section: 'Money', items: ['cash', 'upi', 'mt', 'expenses'] },
-    { section: 'Work', items: ['services', 'customers', 'khata', 'agents'] },
-    { section: 'Shop', items: ['maintenance', 'receipts'] },
-    { section: 'Reports', items: ['reports', 'difference'] },
-    { section: 'System', items: ['recycle', 'audit', 'customize', 'settings'] },
-  ];
+  const ctx: Ctx = { state, profile, mutate, softDelete, go, goService, goServiceFilter, serviceJump, openCustomer, customerId, openAgent, agentId };
+  const pid = profile.id;
+  const jobs = state.jobs.filter((j) => j.profileId === pid);
+  const dueJobs = jobs.filter((j) => j.totalPaise - j.receivedPaise > 0);
+  const dueTotal = totalCustomerDuePaise(jobs);
+  const payableTotal = state.agents.filter((a) => a.profileId === pid).reduce((s, a) => s + agentPayablePaise(a, jobs), 0);
+  const pendingMt = state.mtTransfers.filter((m) => m.profileId === pid && m.status === 'Pending').length;
+  const notifCount = dueJobs.length + pendingMt;
+
+  // Global search results (customers, jobs, receipts — real saved data only)
+  const q = search.trim().toLowerCase();
+  type SearchHit = { kind: string; label: string; view: ViewKey };
+  const hits: SearchHit[] = q
+    ? [
+        ...state.customers.filter((c) => c.profileId === pid && (c.name.toLowerCase().includes(q) || c.mobile.includes(q)))
+          .slice(0, 3).map((c): SearchHit => ({ kind: 'Customer', label: `${c.name} • ${c.mobile}`, view: 'customers' })),
+        ...jobs.filter((j) => j.customerName.toLowerCase().includes(q) || j.service.toLowerCase().includes(q) || j.refNo.toLowerCase().includes(q) || j.mobile.includes(q))
+          .slice(0, 3).map((j): SearchHit => ({ kind: 'Job', label: `${j.service} — ${j.customerName}${j.refNo ? ` • ${j.refNo}` : ''}`, view: 'services' })),
+        ...state.receipts.filter((r) => r.profileId === pid && (r.number.toLowerCase().includes(q) || r.customerName.toLowerCase().includes(q)))
+          .slice(0, 3).map((r): SearchHit => ({ kind: 'Receipt', label: `${r.number} — ${r.customerName} • ${r.service}`, view: 'receipts' })),
+      ].slice(0, 8)
+    : [];
+
+  const navItem = (k: ViewKey) => {
+    const mod = MODULE_FOR_VIEW[k];
+    if (mod && profile.disabledModules.includes(mod)) return null;
+    return (
+      <button key={k} className={view === k ? 'active' : ''} onClick={() => go(k)}>
+        <span className="nav-ico">{NAV_ICONS[k]}</span>
+        {navLabel(lang, k)}
+      </button>
+    );
+  };
 
   return (
     <div className="shell">
-      <aside className="sidebar">
-        <div className="brand">BizKhata<small>{t(lang, 'tagline')}</small></div>
+      {drawerOpen && <button className="drawer-scrim" aria-label="Close menu" onClick={() => setDrawerOpen(false)} />}
+      <aside className={`sidebar${drawerOpen ? ' open' : ''}`}>
+        <div className="brand">
+          <span className="brand-mark">B</span>
+          <span><span className="brand-name">BizKhata</span><small>{t(lang, 'tagline')} • v1.0.0</small></span>
+        </div>
         <div className="profile-box">
           <div className="pname">{profile.name}</div>
           <div className="pcat">{profile.category}</div>
-          <div className="btn-row" style={{ marginTop: 8 }}>
-            <select
-              className="input"
-              value={profile.id}
-              onChange={(e) => {
-                setState((prev) => ({ ...prev, activeProfileId: e.target.value }));
-                setView('dashboard');
-              }}
-              aria-label={t(lang, 'switchProfile')}
-            >
-              {state.profiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-          </div>
+          <select
+            className="input"
+            value={profile.id}
+            onChange={(e) => {
+              setState((prev) => ({ ...prev, activeProfileId: e.target.value }));
+              setView('dashboard');
+            }}
+            aria-label={t(lang, 'switchProfile')}
+          >
+            {state.profiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
           {state.profiles.length < 3 && (
             <Btn kind="ghost" onClick={() => setShowAddBusiness(true)}>+ Add Business</Btn>
           )}
         </div>
         <nav className="nav">
-          {navSections.map(({ section, items }) => (
-            <React.Fragment key={section}>
-              <div className="nav-section">{section}</div>
-              {items.map((k) => {
-                const mod = MODULE_FOR_VIEW[k];
-                if (mod && profile.disabledModules.includes(mod)) return null;
-                return (
-                  <button key={k} className={view === k ? 'active' : ''} onClick={() => setView(k)}>
-                    {t(lang, ({
-                      dashboard: 'dashboard', cash: 'cashBook', upi: 'upiBook', mt: 'moneyTransfer',
-                      services: 'services', customers: 'customers', khata: 'customerKhata',
-                      agents: 'agents', expenses: 'expenses', maintenance: 'maintenance',
-                      receipts: 'receipts', daily: 'dailyBusiness', reports: 'reports',
-                      difference: 'differenceFinder', recycle: 'recycleBin', audit: 'auditLog',
-                      customize: 'customization', settings: 'settings',
-                    } as Record<ViewKey, string>)[k])}
-                  </button>
-                );
-              })}
-            </React.Fragment>
+          {navItem('dashboard')}
+          {navItem('daily')}
+          {navItem('cash')}
+          {navItem('upi')}
+          {navItem('mt')}
+          <button onClick={() => { setServicesOpen(true); go('services'); }} aria-expanded={servicesOpen}>
+            <span className="nav-ico">{NAV_ICONS.services}</span>
+            {t(lang, 'services')}
+            <span className="nav-caret" role="button" aria-label="Collapse services menu" title="Collapse" onClick={(e) => { e.stopPropagation(); setServicesOpen(!servicesOpen); }}>{servicesOpen ? '▾' : '▸'}</span>
+          </button>
+          {servicesOpen && profile.services.map((s) => (
+            <button
+              key={s}
+              className={`nav-sub${view === 'services' && serviceJump?.service === s ? ' active' : ''}`}
+              onClick={() => goServiceFilter(s)}
+            >
+              {s}
+            </button>
           ))}
-          <div className="nav-section">Account</div>
-          <button onClick={logout}>{t(lang, 'logout')}</button>
+          {navItem('customers')}
+          {navItem('khata')}
+          {navItem('agents')}
+          {navItem('agent-payments')}
+          {navItem('expenses')}
+          {navItem('maintenance')}
+          {navItem('receipts')}
+          {navItem('receipt-generator')}
+          <button onClick={() => { setReportsOpen(true); go('reports'); }} aria-expanded={reportsOpen}>
+            <span className="nav-ico">{NAV_ICONS.reports}</span>
+            {t(lang, 'reports')}
+            <span className="nav-caret" role="button" aria-label="Collapse reports menu" title="Collapse" onClick={(e) => { e.stopPropagation(); setReportsOpen(!reportsOpen); }}>{reportsOpen ? '▾' : '▸'}</span>
+          </button>
+          {reportsOpen && (
+            <>
+              {navItem('reports')}
+              {navItem('difference')}
+            </>
+          )}
+          {!reportsOpen && navItem('difference')}
+          <div className="nav-section">System</div>
+          {navItem('recycle')}
+          {navItem('audit')}
+          {navItem('customize')}
+          {navItem('settings')}
+          <button onClick={logout}><span className="nav-ico">↩</span>{t(lang, 'logout')}</button>
         </nav>
+        <div className="sidebar-foot">BizKhata v1.0.0 • Free • Local-first</div>
       </aside>
 
-      <main className="main">
-        <div className="topbar">
-          <h1>{VIEW_TITLES[view]}</h1>
-          <span style={{ color: 'var(--muted)' }}>{profile.name} • {profile.category}</span>
-        </div>
-        {storageError && (
-          <p className="error">Storage is full — documents may not save. Delete some uploaded documents or download a backup and erase old data.</p>
-        )}
-        {view === 'dashboard' && <DashboardView ctx={ctx} />}
-        {view === 'daily' && <DailyDhandhaView ctx={ctx} />}
-        {view === 'cash' && <CashBookView ctx={ctx} />}
-        {view === 'upi' && <UpiBookView ctx={ctx} />}
-        {view === 'mt' && <MoneyTransferView ctx={ctx} />}
-        {view === 'services' && <ServicesView ctx={ctx} />}
-        {view === 'customers' && <CustomersView ctx={ctx} />}
-        {view === 'khata' && <KhataView ctx={ctx} />}
-        {view === 'agents' && <AgentsView ctx={ctx} />}
-        {view === 'expenses' && <ExpensesView ctx={ctx} />}
-        {view === 'maintenance' && <MaintenanceView ctx={ctx} />}
-        {view === 'receipts' && <ReceiptsView ctx={ctx} />}
-        {view === 'reports' && <ReportsView ctx={ctx} />}
-        {view === 'difference' && <DifferenceFinderView ctx={ctx} />}
-        {view === 'recycle' && <RecycleBinView ctx={ctx} />}
-        {view === 'audit' && <AuditLogView ctx={ctx} />}
-        {view === 'customize' && <CustomizationView ctx={ctx} />}
-        {view === 'settings' && <SettingsView ctx={ctx} />}
-      </main>
+      <div className="main-col">
+        <header className="topnav">
+          <button className="icon-btn hamburger" aria-label="Open menu" onClick={() => setDrawerOpen(true)}>☰</button>
+          <div className="biz-switch">
+            <span className="biz-ico">▦</span>
+            <div style={{ minWidth: 0 }}>
+              <select
+                value={profile.id}
+                onChange={(e) => {
+                  setState((prev) => ({ ...prev, activeProfileId: e.target.value }));
+                  setView('dashboard');
+                }}
+                aria-label={t(lang, 'switchProfile')}
+              >
+                {state.profiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+              <div className="biz-cat">{profile.category}{profile.address ? ` • ${profile.address}` : ''}</div>
+            </div>
+          </div>
+
+          <div className="top-search">
+            <span className="search-ico">⌕</span>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onFocus={() => setSearchFocus(true)}
+              onBlur={() => setTimeout(() => setSearchFocus(false), 150)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && hits.length) go(hits[0].view); }}
+              placeholder="Search customer, job, receipt…"
+              aria-label="Global search"
+            />
+            {searchFocus && q && (
+              <div className="search-results">
+                {hits.length === 0 ? (
+                  <div className="search-empty">No matches for “{search}” in customers, jobs or receipts.</div>
+                ) : hits.map((h, i) => (
+                  <button key={i} onClick={() => go(h.view)}>
+                    <span>{h.label}</span><span className="sr-kind">{h.kind}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="menu-anchor">
+            <button className="icon-btn" aria-label="Notifications" onClick={() => { setBellOpen(!bellOpen); setOwnerMenuOpen(false); }}>
+              🔔{notifCount > 0 && <span className="dot" />}
+            </button>
+            {bellOpen && (
+              <div className="bell-pop">
+                <strong>Notifications</strong>
+                {notifCount === 0 ? (
+                  <p style={{ color: 'var(--muted)', margin: '8px 0 0' }}>All clear — no pending payments or transfers.</p>
+                ) : (
+                  <div style={{ marginTop: 8 }}>
+                    {dueJobs.length > 0 && <p style={{ margin: '6px 0' }}>• {dueJobs.length} job{dueJobs.length === 1 ? '' : 's'} with customer due — {formatINR(dueTotal)} to collect.</p>}
+                    {payableTotal > 0 && <p style={{ margin: '6px 0' }}>• Agent payable {formatINR(payableTotal)} is pending.</p>}
+                    {pendingMt > 0 && <p style={{ margin: '6px 0' }}>• {pendingMt} Money Transfer{pendingMt === 1 ? '' : 's'} pending settlement.</p>}
+                    <div className="btn-row"><Btn kind="secondary" onClick={() => { setBellOpen(false); go('khata'); }}>View Pending</Btn></div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="menu-anchor">
+            <button className="owner-chip" onClick={() => { setOwnerMenuOpen(!ownerMenuOpen); setBellOpen(false); }} aria-label="Owner menu">
+              <span className="avatar">A</span>
+              <span className="owner-meta"><span className="oname">Ayan Sikligar</span><br /><span className="orole">Owner</span></span>
+              <span style={{ color: 'var(--muted)' }}>▾</span>
+            </button>
+            {ownerMenuOpen && (
+              <div className="owner-menu">
+                <button onClick={() => { setOwnerMenuOpen(false); go('settings'); }}>Settings</button>
+                <button onClick={() => { setOwnerMenuOpen(false); go('customize'); }}>Customization Studio</button>
+                <button onClick={logout}>{t(lang, 'logout')}</button>
+              </div>
+            )}
+          </div>
+        </header>
+
+        <main className="main">
+          <div className="page-head">
+            <div>
+              <h1>{VIEW_TITLES[view]}</h1>
+              <p className="page-sub">{VIEW_SUBS[view]} — {profile.name} • {profile.category}</p>
+            </div>
+          </div>
+          {storageError && (
+            <p className="error">Storage is full — documents may not save. Delete some uploaded documents or download a backup and erase old data.</p>
+          )}
+          {view === 'dashboard' && <DashboardView ctx={ctx} />}
+          {view === 'daily' && <DailyDhandhaView ctx={ctx} />}
+          {view === 'cash' && <CashBookView ctx={ctx} />}
+          {view === 'upi' && <UpiBookView ctx={ctx} />}
+          {view === 'mt' && <MoneyTransferView ctx={ctx} />}
+          {view === 'services' && <ServicesView ctx={ctx} />}
+          {view === 'customers' && <CustomersView ctx={ctx} />}
+          {view === 'khata' && <KhataView ctx={ctx} />}
+          {view === 'agents' && <AgentsView ctx={ctx} />}
+          {view === 'agent-profile' && <AgentProfileView ctx={ctx} />}
+          {view === 'agent-payments' && <AgentPaymentsView ctx={ctx} />}
+          {view === 'expenses' && <ExpensesView ctx={ctx} />}
+          {view === 'maintenance' && <MaintenanceView ctx={ctx} />}
+          {view === 'receipts' && <ReceiptsView ctx={ctx} />}
+          {view === 'receipt-generator' && <ReceiptGeneratorView ctx={ctx} />}
+          {view === 'customer-profile' && <CustomerProfileView ctx={ctx} />}
+          {view === 'reports' && <ReportsView ctx={ctx} />}
+          {view === 'difference' && <DifferenceFinderView ctx={ctx} />}
+          {view === 'recycle' && <RecycleBinView ctx={ctx} />}
+          {view === 'audit' && <AuditLogView ctx={ctx} />}
+          {view === 'customize' && <CustomizationView ctx={ctx} />}
+          {view === 'settings' && <SettingsView ctx={ctx} />}
+        </main>
+      </div>
+
+      <nav className="bottom-nav" aria-label="Quick navigation">
+        <button className={view === 'dashboard' ? 'active' : ''} onClick={() => go('dashboard')}><span className="bn-ico">⌂</span>Dashboard</button>
+        <button className={view === 'services' ? 'active' : ''} onClick={() => go('services')}><span className="bn-ico">▦</span>Services</button>
+        <button className="bn-fab" aria-label="Add job" onClick={() => goService('PAN Card')}>+</button>
+        <button className={view === 'reports' ? 'active' : ''} onClick={() => go('reports')}><span className="bn-ico">↗</span>Reports</button>
+        <button onClick={() => setDrawerOpen(true)}><span className="bn-ico">☰</span>More</button>
+      </nav>
 
       {showAddBusiness && (
         <Modal title="Add Another Business" onClose={() => setShowAddBusiness(false)}>

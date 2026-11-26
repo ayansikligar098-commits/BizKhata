@@ -5,7 +5,7 @@ import { agentPayablePaise, equipmentLifetimeCostPaise, jobMarginPaise } from '@
 import { auditEntry, exportCSV } from '@/lib/store';
 import type { Agent, Equipment, Expense, MaintenanceRecord, Method } from '@/lib/types';
 import { todayISO, uid } from '@/lib/types';
-import { AmountInput, Btn, Card, Empty, Field, Modal, Stat, formatDate, type Ctx } from './ui';
+import { AmountInput, Btn, Card, Empty, Field, Modal, Pager, Stat, formatDate, initials, pageSlice, type Ctx } from './ui';
 
 export function AgentsView({ ctx }: { ctx: Ctx }) {
   const { state, profile } = ctx;
@@ -21,6 +21,16 @@ export function AgentsView({ ctx }: { ctx: Ctx }) {
   const [payAmount, setPayAmount] = React.useState(0);
   const [payMethod, setPayMethod] = React.useState<Method>('cash');
   const [error, setError] = React.useState('');
+  const [search, setSearch] = React.useState('');
+  const [page, setPage] = React.useState(1);
+
+  const filteredAgents = agents.filter((a) => !search || a.name.toLowerCase().includes(search.toLowerCase()) || a.mobile.includes(search) || a.type.toLowerCase().includes(search.toLowerCase()));
+  const pageAgents = pageSlice(filteredAgents, page, 8);
+  React.useEffect(() => { setPage(1); }, [search]);
+  const agentJobsAll = jobs.filter((j) => j.agentId);
+  const totalCharges = agentJobsAll.reduce((s, j) => s + j.agentChargePaise, 0);
+  const totalPaid = agentJobsAll.reduce((s, j) => s + j.agentPaidPaise, 0);
+  const totalPayable = agents.reduce((s, a) => s + agentPayablePaise(a, jobs), 0);
 
   function addAgent() {
     if (!name.trim()) { setError('Enter the agent name.'); return; }
@@ -50,37 +60,58 @@ export function AgentsView({ ctx }: { ctx: Ctx }) {
 
   return (
     <div>
+      <div className="grid grid-4" style={{ marginBottom: 16 }}>
+        <Stat label="Total Agents" value={String(agents.length)} tone="blue" />
+        <Stat label="Total Jobs" value={String(agentJobsAll.length)} tone="indigo" />
+        <Stat label="Total Charges" value={formatINR(totalCharges)} tone="purple" />
+        <Stat label="Total Paid" value={formatINR(totalPaid)} tone="green" />
+        <Stat label="Payable" value={formatINR(totalPayable)} tone={totalPayable > 0 ? 'orange' : 'green'} sub="Separate from customer due" />
+      </div>
       <Card title="Agent Management" right={<Btn onClick={() => setShowForm(true)}>+ Add Agent</Btn>}>
         <p style={{ color: 'var(--muted)', marginTop: 0 }}>
           You bring the customer, the agent does the backend work, you print + deliver, then you
           pay the agent. Agent payable is a separate ledger from customer receivable. PAN work is
           never given to an agent.
         </p>
-        {agents.length === 0 ? (
+        <Field label="Search agent">
+          <input className="input" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Name, mobile or type" />
+        </Field>
+        {filteredAgents.length === 0 ? (
           <Empty text="No agents yet." />
         ) : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Agent</th><th>Type</th><th className="num">Jobs</th><th className="num">Charges</th><th className="num">Paid</th><th className="num">Payable</th><th>Status</th></tr></thead>
+              <thead><tr><th>#</th><th>Agent</th><th>Type</th><th className="num">Jobs</th><th className="num">Charges</th><th className="num">Paid</th><th className="num">Payable</th><th>Status</th><th></th></tr></thead>
               <tbody>
-                {agents.map((a) => {
+                {pageAgents.map((a, i) => {
                   const aj = jobs.filter((j) => j.agentId === a.id);
                   const charges = aj.reduce((s, j) => s + j.agentChargePaise, 0);
                   const paid = aj.reduce((s, j) => s + j.agentPaidPaise, 0);
                   return (
                     <tr key={a.id}>
-                      <td>{a.name}<br /><span className="field-hint">{a.mobile}</span></td>
+                      <td>{(page - 1) * 8 + i + 1}</td>
+                      <td>
+                        <div className="cell-with-ico">
+                          <span className="avatar sm">{initials(a.name)}</span>
+                          <span>
+                            <button className="link-btn" style={{ border: 'none', background: 'transparent', color: 'var(--purple-ink)', fontWeight: 700, cursor: 'pointer', padding: 0 }} onClick={() => ctx.openAgent?.(a.id)}>{a.name}</button>
+                            <br /><span className="cell-sub">{a.mobile}</span>
+                          </span>
+                        </div>
+                      </td>
                       <td>{a.type}</td>
                       <td className="num">{aj.length}</td>
                       <td className="num">{formatINR(charges)}</td>
                       <td className="num">{formatINR(paid)}</td>
                       <td className="num">{formatINR(agentPayablePaise(a, jobs))}</td>
                       <td>{a.status}</td>
+                      <td><Btn kind="ghost" onClick={() => ctx.openAgent?.(a.id)}>Profile →</Btn></td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
+            <Pager total={filteredAgents.length} page={page} pageSize={8} onPage={setPage} />
           </div>
         )}
       </Card>
@@ -175,6 +206,21 @@ export function ExpensesView({ ctx }: { ctx: Ctx }) {
   const [equipmentId, setEquipmentId] = React.useState('');
   const [date, setDate] = React.useState(todayISO());
   const [error, setError] = React.useState('');
+  const [catFilter, setCatFilter] = React.useState('All');
+  const [search, setSearch] = React.useState('');
+  const [page, setPage] = React.useState(1);
+
+  const thisMonth = todayISO().slice(0, 7);
+  const monthTotal = expenses.filter((e) => e.date.slice(0, 7) === thisMonth).reduce((s, e) => s + e.amountPaise, 0);
+  const equipmentTotal = expenses.filter((e) => e.equipmentId).reduce((s, e) => s + e.amountPaise, 0);
+  const maintenanceTotal = expenses.filter((e) => e.category.toLowerCase().includes('maintenance') || e.category.toLowerCase().includes('service')).reduce((s, e) => s + e.amountPaise, 0);
+  const generalTotal = expenses.filter((e) => e.service === 'General').reduce((s, e) => s + e.amountPaise, 0);
+  const categories = [...new Set(expenses.map((e) => e.category))];
+  const filteredExpenses = expenses
+    .filter((e) => catFilter === 'All' || e.category === catFilter)
+    .filter((e) => !search || e.description.toLowerCase().includes(search.toLowerCase()) || e.vendor.toLowerCase().includes(search.toLowerCase()) || e.category.toLowerCase().includes(search.toLowerCase()));
+  const pageExpenses = pageSlice(filteredExpenses, page, 8);
+  React.useEffect(() => { setPage(1); }, [catFilter, search]);
 
   function submit() {
     if (amount <= 0) { setError('Enter an amount more than 0.'); return; }
@@ -197,21 +243,46 @@ export function ExpensesView({ ctx }: { ctx: Ctx }) {
 
   return (
     <div>
+      <div className="grid grid-4" style={{ marginBottom: 16 }}>
+        <Stat label="This Month" value={formatINR(monthTotal)} tone="red" />
+        <Stat label="Equipment" value={formatINR(equipmentTotal)} tone="blue" sub="Linked to a machine" />
+        <Stat label="Maintenance" value={formatINR(maintenanceTotal)} tone="orange" />
+        <Stat label="General" value={formatINR(generalTotal)} tone="purple" sub="Shared shop expenses" />
+      </div>
       <Card title="Expenses" right={<Btn onClick={() => setShowForm(true)}>+ Add Expense</Btn>}>
         <p style={{ color: 'var(--muted)', marginTop: 0 }}>
           Link an expense to the right service (e.g. ink to Printing) so service profit stays
           accurate. Shared expenses use service “General”.
         </p>
-        {expenses.length === 0 ? (
+        <div className="form-row">
+          <Field label="Search">
+            <input className="input" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Description, vendor or category" />
+          </Field>
+          <Field label="Month">
+            <input className="input" type="month" value={thisMonth} readOnly />
+          </Field>
+        </div>
+        <div className="pills" style={{ marginBottom: 12 }} aria-label="Category filter">
+          <button className={catFilter === 'All' ? 'active' : ''} onClick={() => setCatFilter('All')}>All ({expenses.length})</button>
+          {categories.map((c) => (
+            <button key={c} className={catFilter === c ? 'active' : ''} onClick={() => setCatFilter(c)}>
+              {c} ({expenses.filter((e) => e.category === c).length})
+            </button>
+          ))}
+        </div>
+        {filteredExpenses.length === 0 ? (
           <Empty text="No expenses yet." />
         ) : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Service</th><th>Vendor</th><th className="num">Amount</th><th>Method</th><th></th></tr></thead>
+              <thead><tr><th>#</th><th>Date</th><th>Expense</th><th>Category</th><th>Service</th><th>Vendor</th><th className="num">Amount</th><th>Method</th><th></th></tr></thead>
               <tbody>
-                {expenses.map((e) => (
+                {pageExpenses.map((e, i) => (
                   <tr key={e.id}>
-                    <td>{formatDate(e.date)}</td><td>{e.category}</td><td>{e.description}</td>
+                    <td>{(page - 1) * 8 + i + 1}</td>
+                    <td>{formatDate(e.date)}</td>
+                    <td><span className="cell-main">{e.description}</span></td>
+                    <td><span className="pill">{e.category}</span></td>
                     <td>{e.service}</td><td>{e.vendor}</td>
                     <td className="num">{formatINR(e.amountPaise)}</td><td>{e.method.toUpperCase()}</td>
                     <td>
@@ -226,6 +297,7 @@ export function ExpensesView({ ctx }: { ctx: Ctx }) {
                 ))}
               </tbody>
             </table>
+            <Pager total={filteredExpenses.length} page={page} pageSize={8} onPage={setPage} />
           </div>
         )}
       </Card>
@@ -294,6 +366,8 @@ export function MaintenanceView({ ctx }: { ctx: Ctx }) {
   const [mCost, setMCost] = React.useState(0);
   const [mDate, setMDate] = React.useState(todayISO());
   const [error, setError] = React.useState('');
+  const [tab, setTab] = React.useState<'machines' | 'history'>('machines');
+  const allRecords = equipment.flatMap((eq) => eq.records.map((r) => ({ eq, r }))).sort((a, b) => (a.r.date < b.r.date ? 1 : -1));
 
   function addEquipment() {
     if (!name.trim()) { setError('Enter the machine name.'); return; }
@@ -320,51 +394,72 @@ export function MaintenanceView({ ctx }: { ctx: Ctx }) {
 
   return (
     <div>
-      <Card title="Machine Maintenance" right={<Btn onClick={() => setShowForm(true)}>+ Add Machine</Btn>}>
-        <p style={{ color: 'var(--muted)', marginTop: 0 }}>
-          Track purchase details, parts replaced and lifetime cost per machine — e.g. Epson L805:
-          ink + printhead + servicing = total lifetime cost.
-        </p>
-        {equipment.length === 0 ? (
-          <Empty text="No machines added yet. Add your Xerox machine, printers, computer, scanner." />
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Machine</th><th>Purchase</th><th className="num">Purchase Cost</th><th className="num">Maintenance Cost</th><th className="num">Lifetime Cost</th><th>Next Service</th><th></th></tr></thead>
-              <tbody>
-                {equipment.map((eq) => {
-                  const mCost = eq.records.reduce((s, r) => s + r.costPaise, 0);
-                  return (
-                    <tr key={eq.id}>
-                      <td>{eq.name}</td>
-                      <td>{formatDate(eq.purchaseDate)}</td>
-                      <td className="num">{formatINR(eq.purchaseCostPaise)}</td>
-                      <td className="num">{formatINR(mCost)}</td>
-                      <td className="num"><strong>{formatINR(equipmentLifetimeCostPaise(eq.purchaseCostPaise, eq.records))}</strong></td>
-                      <td>{eq.nextMaintenance ? formatDate(eq.nextMaintenance) : '—'}</td>
-                      <td><Btn kind="ghost" onClick={() => setSelEq(eq)}>Add Service Record</Btn></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+      <div className="tabs" style={{ marginBottom: 14 }}>
+        <button className={tab === 'machines' ? 'active' : ''} onClick={() => setTab('machines')}>Machines ({equipment.length})</button>
+        <button className={tab === 'history' ? 'active' : ''} onClick={() => setTab('history')}>Service History ({allRecords.length})</button>
+      </div>
+      {tab === 'machines' && (
+        <div>
+          <div className="btn-row" style={{ marginBottom: 14 }}>
+            <Btn onClick={() => setShowForm(true)}>+ Add Machine</Btn>
           </div>
-        )}
-      </Card>
-      {equipment.map((eq) => eq.records.length > 0 && (
-        <Card key={eq.id} title={`${eq.name} — Service History`}>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Date</th><th>Work</th><th>Parts Replaced</th><th className="num">Cost</th></tr></thead>
-              <tbody>
-                {eq.records.map((r) => (
-                  <tr key={r.id}><td>{formatDate(r.date)}</td><td>{r.description}</td><td>{r.partsReplaced || '—'}</td><td className="num">{formatINR(r.costPaise)}</td></tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <p style={{ color: 'var(--muted)', marginTop: 0 }}>
+            Track purchase details, parts replaced and lifetime cost per machine — e.g. Epson L805:
+            ink + printhead + servicing = total lifetime cost.
+          </p>
+          {equipment.length === 0 ? (
+            <Card><Empty text="No machines added yet. Add your Xerox machine, printers, computer, scanner." /></Card>
+          ) : (
+            <div className="machine-grid">
+              {equipment.map((eq) => {
+                const mCost = eq.records.reduce((s, r) => s + r.costPaise, 0);
+                const last = eq.records.length ? eq.records[eq.records.length - 1] : null;
+                return (
+                  <div className="machine-card" key={eq.id}>
+                    <div className="mc-head">
+                      <span className="row-ico" style={{ width: 44, height: 44, fontSize: 18 }}>▦</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div className="mc-name">{eq.name}</div>
+                        <div className="mc-type">Purchased: {formatDate(eq.purchaseDate)}</div>
+                      </div>
+                      <span className="pill paid">Active</span>
+                    </div>
+                    <div className="mc-stats">
+                      <div><div className="mc-label">Total Cost</div><div className="mc-value">{formatINR(equipmentLifetimeCostPaise(eq.purchaseCostPaise, eq.records))}</div></div>
+                      <div><div className="mc-label">Maintenance Cost</div><div className="mc-value">{formatINR(mCost)}</div></div>
+                      <div><div className="mc-label">Last Service</div><div className="mc-value">{last ? formatDate(last.date) : eq.lastMaintenance ? formatDate(eq.lastMaintenance) : '—'}</div></div>
+                    </div>
+                    <p className="field-hint" style={{ margin: '10px 0' }}>
+                      Purchase {formatINR(eq.purchaseCostPaise)}
+                      {eq.nextMaintenance ? ` • Next service ${formatDate(eq.nextMaintenance)}` : ''}
+                      {` • ${eq.records.length} service record${eq.records.length === 1 ? '' : 's'}`}
+                    </p>
+                    <div className="btn-row">
+                      <Btn kind="secondary" onClick={() => setSelEq(eq)}>Add Service Record</Btn>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+      {tab === 'history' && (
+        <Card title="Maintenance History">
+          {allRecords.length === 0 ? <Empty text="No service records yet. Open a machine and add a service record." /> : (
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Date</th><th>Machine</th><th>Work</th><th>Parts Replaced</th><th className="num">Cost</th></tr></thead>
+                <tbody>
+                  {allRecords.map(({ eq, r }) => (
+                    <tr key={r.id}><td>{formatDate(r.date)}</td><td>{eq.name}</td><td>{r.description}</td><td>{r.partsReplaced || '—'}</td><td className="num">{formatINR(r.costPaise)}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Card>
-      ))}
+      )}
 
       {showForm && (
         <Modal title="Add Machine / Equipment" onClose={() => setShowForm(false)}>

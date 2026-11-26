@@ -12,9 +12,52 @@ import {
 import { t } from '@/lib/i18n';
 import type { Job } from '@/lib/types';
 import { todayISO } from '@/lib/types';
-import { Btn, Card, Empty, Stat, type Ctx } from './ui';
+import { Btn, Card, Empty, Stat, BarChart, CHART_COLORS, DonutChart, LineChart, formatDate, initials, statusPill, type Ctx } from './ui';
 import { exportCSV } from '@/lib/store';
 import { getGeminiInsight, geminiEnabled } from '@/lib/gemini';
+
+type Period = 'today' | 'week' | 'month' | 'year';
+
+function periodRange(period: Period, today: string): { start: string; end: string } {
+  if (period === 'today') return { start: today, end: today };
+  if (period === 'week') {
+    const d = new Date(`${today}T00:00:00`);
+    d.setDate(d.getDate() - 6);
+    return { start: d.toISOString().slice(0, 10), end: today };
+  }
+  if (period === 'month') return { start: today.slice(0, 7) + '-01', end: today };
+  return { start: today.slice(0, 4) + '-01-01', end: today };
+}
+
+function prevRange(period: Period, range: { start: string; end: string }): { start: string; end: string } {
+  const days = Math.max(1, Math.round((new Date(`${range.end}T00:00:00`).getTime() - new Date(`${range.start}T00:00:00`).getTime()) / 864e5) + 1);
+  const end = new Date(`${range.start}T00:00:00`);
+  end.setDate(end.getDate() - 1);
+  const start = new Date(end);
+  start.setDate(start.getDate() - (days - 1));
+  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+}
+
+function trendPct(cur: number, prev: number): number | null {
+  if (prev <= 0) return null;
+  return ((cur - prev) / prev) * 100;
+}
+
+function greeting(): string {
+  const h = new Date().getHours();
+  if (h < 12) return 'Good Morning';
+  if (h < 17) return 'Good Afternoon';
+  return 'Good Evening';
+}
+
+const QUICK_SERVICES: { service: string; label: string; bg: string; fg: string }[] = [
+  { service: 'PAN Card', label: 'New PAN', bg: '#e9eafe', fg: '#3d4fd7' },
+  { service: 'Aadhaar Services', label: 'Aadhaar', bg: '#fff3e6', fg: '#b7791f' },
+  { service: 'Voter ID', label: 'Voter ID', bg: '#e8f1fe', fg: '#0b5fa5' },
+  { service: 'Ayushman Card', label: 'Ayushman', bg: '#e3f8f1', fg: '#007a5e' },
+  { service: 'Xerox', label: 'Xerox', bg: '#fdeef6', fg: '#b02a6b' },
+  { service: 'Printing', label: 'Printing', bg: '#f1eafe', fg: '#6c3fd4' },
+];
 
 export function DashboardView({ ctx }: { ctx: Ctx }) {
   const { state, profile } = ctx;
@@ -25,23 +68,76 @@ export function DashboardView({ ctx }: { ctx: Ctx }) {
   const mtT = state.mtTransfers.filter((m) => m.profileId === pid);
   const mtE = state.mtExpenses.filter((m) => m.profileId === pid);
   const agents = state.agents.filter((a) => a.profileId === pid);
+  const customers = state.customers.filter((c) => c.profileId === pid);
+
+  const [period, setPeriod] = React.useState<Period>('today');
+  const [chartRange, setChartRange] = React.useState<'7' | '30'>('7');
+  const [donutRange, setDonutRange] = React.useState<'month' | 'all'>('month');
 
   const bal = balancesPaise(profile.openingCashPaise, profile.openingUpiPaise, txns);
   const today = todayISO();
-  const todayTxns = txns.filter((x) => x.date === today);
-  const todayIn = todayTxns.filter((x) => x.kind === 'in').reduce((s, x) => s + x.amountPaise, 0);
-  const todayOut = todayTxns.filter((x) => x.kind === 'out').reduce((s, x) => s + x.amountPaise, 0);
-  const profit = netProfitPaise(jobs, expenses, mtT, mtE);
+  const range = periodRange(period, today);
+  const prev = prevRange(period, range);
+  const inRange = (d: string, r: { start: string; end: string }) => d >= r.start && d <= r.end;
+
+  const pTxns = txns.filter((x) => inRange(x.date, range));
+  const pTxnsPrev = txns.filter((x) => inRange(x.date, prev));
+  const pIn = pTxns.filter((x) => x.kind === 'in').reduce((s, x) => s + x.amountPaise, 0);
+  const pOut = pTxns.filter((x) => x.kind === 'out').reduce((s, x) => s + x.amountPaise, 0);
+  const pInPrev = pTxnsPrev.filter((x) => x.kind === 'in').reduce((s, x) => s + x.amountPaise, 0);
+  const pOutPrev = pTxnsPrev.filter((x) => x.kind === 'out').reduce((s, x) => s + x.amountPaise, 0);
+  const pJobs = jobs.filter((j) => inRange(j.date, range));
+  const pExp = expenses.filter((e) => inRange(e.date, range));
+  const pMt = mtT.filter((m) => inRange(m.date, range));
+  const pMtE = mtE.filter((m) => inRange(m.date, range));
+  const profit = netProfitPaise(pJobs, pExp, pMt, pMtE);
+  const profitPrev = netProfitPaise(
+    jobs.filter((j) => inRange(j.date, prev)),
+    expenses.filter((e) => inRange(e.date, prev)),
+    mtT.filter((m) => inRange(m.date, prev)),
+    mtE.filter((m) => inRange(m.date, prev)),
+  );
   const due = totalCustomerDuePaise(jobs);
   const payable = agents.reduce((s, a) => s + agentPayablePaise(a, jobs), 0);
   const mtProfit = mtProfitPaise(mtT, mtE);
   const lang = profile.language;
 
+  // --- Business Overview line chart: daily income vs expenses ---
+  const chartDays = chartRange === '7' ? 7 : 30;
+  const chartLabels: string[] = [];
+  const chartIncome: number[] = [];
+  const chartExpenses: number[] = [];
+  for (let i = chartDays - 1; i >= 0; i--) {
+    const d = new Date(`${today}T00:00:00`);
+    d.setDate(d.getDate() - i);
+    const iso = d.toISOString().slice(0, 10);
+    chartLabels.push(d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }));
+    chartIncome.push(txns.filter((x) => x.date === iso && x.kind === 'in').reduce((s, x) => s + x.amountPaise, 0) / 100);
+    chartExpenses.push(txns.filter((x) => x.date === iso && x.kind === 'out').reduce((s, x) => s + x.amountPaise, 0) / 100);
+  }
+
+  // --- Service-wise income donut ---
+  const donutJobs = donutRange === 'month' ? jobs.filter((j) => j.date.slice(0, 7) === today.slice(0, 7)) : jobs;
   const byService = new Map<string, number>();
-  for (const j of jobs) byService.set(j.service, (byService.get(j.service) || 0) + j.receivedPaise);
-  const topServices = [...byService.entries()]
-    .map(([service, receivedPaise]) => ({ service, receivedPaise }))
-    .sort((a, b) => b.receivedPaise - a.receivedPaise);
+  for (const j of donutJobs) byService.set(j.service, (byService.get(j.service) || 0) + j.receivedPaise);
+  const sorted = [...byService.entries()].sort((a, b) => b[1] - a[1]);
+  const top5 = sorted.slice(0, 5);
+  const othersTotal = sorted.slice(5).reduce((s, [, v]) => s + v, 0);
+  const donutData = [
+    ...top5.map(([service, v], i) => ({ label: service, value: v, color: CHART_COLORS[i % CHART_COLORS.length], valueLabel: formatINR(v) })),
+    ...(othersTotal > 0 ? [{ label: 'Others', value: othersTotal, color: CHART_COLORS[5], valueLabel: formatINR(othersTotal) }] : []),
+  ];
+  const donutTotal = donutData.reduce((s, d) => s + d.value, 0);
+
+  const recentJobs = [...jobs].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)).slice(0, 5);
+  const dueCustomers = new Map<string, number>();
+  for (const j of jobs) {
+    const d = Math.max(0, j.totalPaise - j.receivedPaise);
+    if (d > 0) dueCustomers.set(j.mobile || j.customerName, (dueCustomers.get(j.mobile || j.customerName) || 0) + d);
+  }
+  const payableAgents = agents.filter((a) => agentPayablePaise(a, jobs) > 0);
+  const mtPending = mtT.filter((m) => m.status === 'Pending');
+  const mtSentTotal = mtT.filter((m) => m.status !== 'Failed').reduce((s, m) => s + m.amountPaise, 0);
 
   const [insight, setInsight] = React.useState('');
   const [insightBusy, setInsightBusy] = React.useState(false);
@@ -51,83 +147,173 @@ export function DashboardView({ ctx }: { ctx: Ctx }) {
     if (!aiOn) return;
     setInsightBusy(true);
     const res = await getGeminiInsight(profile.geminiKey, {
-      incomePaise: todayIn,
-      expensePaise: todayOut,
+      incomePaise: pIn,
+      expensePaise: pOut,
       profitPaise: profit,
       customerDuePaise: due,
       agentPayablePaise: payable,
       mtCommissionPaise: mtT.reduce((s, m) => s + (m.status === 'Failed' ? 0 : m.commissionPaise), 0),
-      topServices,
+      topServices: sorted.map(([service, receivedPaise]) => ({ service, receivedPaise })),
     });
     setInsight(res.text);
     setInsightBusy(false);
   }
 
   const visible = (card: string) => !profile.hiddenCards.includes(card);
+  const periodLabel = period === 'today' ? "Today's" : period === 'week' ? "This Week's" : period === 'month' ? "This Month's" : "This Year's";
 
   return (
     <div>
-      <div className="grid grid-4" style={{ marginBottom: 16 }}>
-        {visible('todayIncome') && <Stat label={t(lang, 'todayIncome')} value={formatINR(todayIn)} />}
-        {visible('todayExpenses') && <Stat label={t(lang, 'todayExpenses')} value={formatINR(todayOut)} />}
-        {visible('netProfit') && <Stat label={t(lang, 'netProfit')} value={formatINR(profit)} sub={`MT commission profit ${formatINR(mtProfit)}`} />}
-        {visible('cashBalance') && <Stat label={t(lang, 'cashBalance')} value={formatINR(bal.cash)} />}
-        {visible('upiBalance') && <Stat label={t(lang, 'upiBalance')} value={formatINR(bal.upi)} />}
-        {visible('customerDue') && <Stat label={t(lang, 'customerDue')} value={formatINR(due)} sub="Money to collect — not cash yet" />}
-        {visible('agentPayable') && <Stat label={t(lang, 'agentPayable')} value={formatINR(payable)} sub="Separate from customer due" />}
-        {visible('cashVsUpi') && <Stat label={t(lang, 'cashVsUpi')} value={`${formatINR(bal.cash)} / ${formatINR(bal.upi)}`} sub="Cash / UPI" />}
+      {/* period + actions */}
+      <div className="page-head">
+        <div className="pills" role="tablist" aria-label="Period">
+          {(['today', 'week', 'month', 'year'] as Period[]).map((p) => (
+            <button key={p} className={period === p ? 'active' : ''} onClick={() => setPeriod(p)}>
+              {p === 'today' ? 'Today' : p === 'week' ? 'Week' : p === 'month' ? 'Month' : 'Year'}
+            </button>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span className="date-chip">📅 {formatDate(today)}</span>
+          <Btn onClick={() => ctx.goService?.('PAN Card')}>+ Add Job</Btn>
+          <Btn kind="secondary" onClick={() => ctx.go?.('services')}>+ Add Payment</Btn>
+        </div>
       </div>
 
-      <div className="grid grid-2">
-        <Card title={t(lang, 'serviceIncome')}>
-          {topServices.length === 0 ? (
+      {/* greeting + quick services */}
+      <div className="greet-row">
+        <div>
+          <h1>{greeting()}, Ayan</h1>
+          <p className="page-sub">Here&apos;s your business summary for {period === 'today' ? 'today' : period === 'week' ? 'this week' : period === 'month' ? 'this month' : 'this year'} — {formatDate(today)}</p>
+        </div>
+        <div className="quick-services">
+          {QUICK_SERVICES.filter((q) => profile.services.includes(q.service)).map((q) => (
+            <button key={q.service} className="qs-btn" onClick={() => ctx.goService?.(q.service)}>
+              <span className="qs-ico" style={{ background: q.bg, color: q.fg }}>{initials(q.service).slice(0, 1)}</span>
+              {q.label}
+            </button>
+          ))}
+          <button className="qs-btn" onClick={() => ctx.go?.('services')}>
+            <span className="qs-ico" style={{ background: 'var(--surface-2)', color: 'var(--text)' }}>⋮⋮</span>
+            More
+          </button>
+        </div>
+      </div>
+
+      {/* 7 summary cards */}
+      <div className="grid grid-7" style={{ marginBottom: 16 }}>
+        {visible('todayIncome') && <Stat tone="green" icon="₹" label={`${periodLabel} Income`} value={formatINR(pIn)} trend={{ pct: trendPct(pIn, pInPrev) }} />}
+        {visible('todayExpenses') && <Stat tone="red" icon="▤" label={`${periodLabel} Expenses`} value={formatINR(pOut)} trend={{ pct: trendPct(pOut, pOutPrev) }} />}
+        {visible('netProfit') && <Stat tone="purple" icon="↗" label="Net Profit" value={formatINR(profit)} trend={{ pct: trendPct(profit, profitPrev) }} sub={`MT commission profit ${formatINR(mtProfit)}`} />}
+        {visible('cashBalance') && <Stat tone="blue" icon="₹" label={t(lang, 'cashBalance')} value={formatINR(bal.cash)} />}
+        {visible('upiBalance') && <Stat tone="indigo" icon="⌁" label={t(lang, 'upiBalance')} value={formatINR(bal.upi)} />}
+        {visible('customerDue') && <Stat tone="orange" icon="◉" label={t(lang, 'customerDue')} value={formatINR(due)} sub={`${dueCustomers.size} customer${dueCustomers.size === 1 ? '' : 's'} owe you`} />}
+        {visible('agentPayable') && <Stat tone="pink" icon="◉" label={t(lang, 'agentPayable')} value={formatINR(payable)} sub={`${payableAgents.length} agent${payableAgents.length === 1 ? '' : 's'} to pay — separate from due`} />}
+      </div>
+
+      {/* charts */}
+      <div className="grid grid-charts">
+        <Card
+          title="Business Overview"
+          right={
+            <select className="chart-select" value={chartRange} onChange={(e) => setChartRange(e.target.value as '7' | '30')} aria-label="Chart range">
+              <option value="7">7 Days</option>
+              <option value="30">30 Days</option>
+            </select>
+          }
+        >
+          {txns.length === 0 ? (
             <Empty text={t(lang, 'noRecords')} />
           ) : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr><th>Service</th><th className="num">Received</th><th className="num">Profit</th></tr>
-                </thead>
-                <tbody>
-                  {topServices.map((s) => {
-                    const p = serviceProfitPaise(s.service, jobs, expenses);
-                    return (
-                      <tr key={s.service}>
-                        <td>{s.service}</td>
-                        <td className="num">{formatINR(s.receivedPaise)}</td>
-                        <td className="num">{formatINR(p.profit)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            <LineChart labels={chartLabels} income={chartIncome} expenses={chartExpenses} />
           )}
         </Card>
 
-        <Card title="Recent Jobs">
-          {jobs.length === 0 ? (
+        <Card
+          title={t(lang, 'serviceIncome')}
+          right={
+            <select className="chart-select" value={donutRange} onChange={(e) => setDonutRange(e.target.value as 'month' | 'all')} aria-label="Donut range">
+              <option value="month">This Month</option>
+              <option value="all">All Time</option>
+            </select>
+          }
+        >
+          {donutData.length === 0 ? (
+            <Empty text={t(lang, 'noRecords')} />
+          ) : (
+            <DonutChart data={donutData} totalLabel="Total" totalValue={formatINR(donutTotal)} />
+          )}
+        </Card>
+      </div>
+
+      {/* bottom row */}
+      <div className="grid grid-bottom">
+        <Card
+          title="Recent Jobs"
+          right={jobs.length > 0 ? <button className="link-btn" onClick={() => ctx.go?.('services')}>View All →</button> : undefined}
+        >
+          {recentJobs.length === 0 ? (
             <Empty text={t(lang, 'noRecords')} />
           ) : (
             <div className="table-wrap">
               <table>
-                <thead>
-                  <tr><th>Customer</th><th>Service</th><th className="num">Total</th><th className="num">Due</th><th>Status</th></tr>
-                </thead>
+                <thead><tr><th>Service</th><th>Status</th><th className="num">Amount</th><th>Date</th></tr></thead>
                 <tbody>
-                  {[...jobs].slice(-6).reverse().map((j: Job) => (
+                  {recentJobs.map((j: Job) => (
                     <tr key={j.id}>
-                      <td>{j.customerName}</td>
-                      <td>{j.service}</td>
-                      <td className="num">{formatINR(j.totalPaise)}</td>
-                      <td className="num">{formatINR(Math.max(0, j.totalPaise - j.receivedPaise))}</td>
-                      <td>{j.status}</td>
+                      <td>
+                        <div className="cell-with-ico">
+                          <span className="row-ico">{initials(j.service).slice(0, 1)}</span>
+                          <span>
+                            <span className="cell-main">{j.service}</span><br />
+                            <span className="cell-sub">{j.customerName}{j.refNo ? ` • ${j.refNo}` : ''}</span>
+                          </span>
+                        </div>
+                      </td>
+                      <td><span className={`pill ${statusPill(j.status)}`}>{j.status}</span></td>
+                      <td className="num"><strong>{formatINR(j.totalPaise)}</strong></td>
+                      <td>{formatDate(j.date)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
           )}
+        </Card>
+
+        <Card title="Pending Payments" right={due > 0 || payable > 0 ? <button className="link-btn" onClick={() => ctx.go?.('khata')}>View All →</button> : undefined}>
+          <button className="pending-row" onClick={() => ctx.go?.('khata')}>
+            <span className="row-ico" style={{ background: 'var(--purple-soft)' }}>◉</span>
+            <span><span className="pending-title">Customer Due</span><br /><span className="pending-sub">{dueCustomers.size} customer{dueCustomers.size === 1 ? '' : 's'} • {formatINR(due)}</span></span>
+            <span className="pending-chev">›</span>
+          </button>
+          <button className="pending-row" onClick={() => ctx.go?.('agents')}>
+            <span className="row-ico" style={{ background: 'var(--orange-soft)' }}>◉</span>
+            <span><span className="pending-title">Agent Payable</span><br /><span className="pending-sub">{payableAgents.length} agent{payableAgents.length === 1 ? '' : 's'} • {formatINR(payable)}</span></span>
+            <span className="pending-chev">›</span>
+          </button>
+          <button className="pending-row" onClick={() => ctx.go?.('mt')}>
+            <span className="row-ico" style={{ background: 'var(--blue-soft)' }}>⇄</span>
+            <span><span className="pending-title">MT Settlement</span><br /><span className="pending-sub">{mtPending.length} pending • {formatINR(mtSentTotal)} sent</span></span>
+            <span className="pending-chev">›</span>
+          </button>
+          {due === 0 && payable === 0 && mtT.length === 0 && (
+            <p className="empty">No pending payments — everything is settled.</p>
+          )}
+        </Card>
+
+        <Card title="Quick Actions">
+          <div className="qa-grid">
+            <button className="qa-btn" onClick={() => ctx.go?.('customers')}><span className="qa-ico" style={{ background: 'var(--blue-soft)', color: '#0b5fa5' }}>+</span>Add Customer</button>
+            <button className="qa-btn" onClick={() => ctx.go?.('agents')}><span className="qa-ico" style={{ background: 'var(--purple-soft)', color: 'var(--purple-ink)' }}>◉</span>Add Agent</button>
+            <button className="qa-btn" onClick={() => ctx.go?.('expenses')}><span className="qa-ico" style={{ background: 'var(--green-soft)', color: '#007a5e' }}>▤</span>Add Expense</button>
+            <button className="qa-btn" onClick={() => ctx.go?.('receipts')}><span className="qa-ico" style={{ background: 'var(--pink-card)', color: '#b02a6b' }}>▦</span>Generate Receipt</button>
+            <button className="qa-btn" onClick={() => ctx.go?.('reports')}><span className="qa-ico" style={{ background: 'var(--indigo-soft)', color: '#3d4fd7' }}>↗</span>View Reports</button>
+            <button className="qa-btn" onClick={() => ctx.go?.('difference')}><span className="qa-ico" style={{ background: 'var(--orange-soft)', color: '#9a5b00' }}>≠</span>Difference Finder</button>
+          </div>
+          <p className="field-hint" style={{ marginTop: 12 }}>
+            {customers.length} customer{customers.length === 1 ? '' : 's'} • {agents.length} agent{agents.length === 1 ? '' : 's'} • {jobs.length} job{jobs.length === 1 ? '' : 's'} on this profile.
+          </p>
         </Card>
       </div>
 
@@ -141,26 +327,6 @@ export function DashboardView({ ctx }: { ctx: Ctx }) {
           <div>
             <Btn onClick={askAi} disabled={insightBusy}>{insightBusy ? 'Thinking…' : 'Get AI Insight'}</Btn>
             {insight && <p style={{ marginTop: 12, whiteSpace: 'pre-wrap' }}>{insight}</p>}
-          </div>
-        )}
-      </Card>
-
-      <Card title="Pending Payments (customers who still owe)">
-        {jobs.filter((j) => j.totalPaise - j.receivedPaise > 0).length === 0 ? (
-          <Empty text="No pending customer payments." />
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Customer</th><th>Mobile</th><th>Service</th><th className="num">Due</th></tr></thead>
-              <tbody>
-                {jobs.filter((j) => j.totalPaise - j.receivedPaise > 0).map((j) => (
-                  <tr key={j.id}>
-                    <td>{j.customerName}</td><td>{j.mobile}</td><td>{j.service}</td>
-                    <td className="num">{formatINR(j.totalPaise - j.receivedPaise)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
           </div>
         )}
       </Card>
@@ -204,12 +370,14 @@ export function DailyDhandhaView({ ctx }: { ctx: Ctx }) {
 
   return (
     <div>
-      <div className="btn-row" style={{ marginBottom: 12 }}>
-        {(['today', 'week', 'month', 'year'] as const).map((p) => (
-          <Btn key={p} kind={period === p ? 'primary' : 'secondary'} onClick={() => setPeriod(p)}>
-            {p === 'today' ? 'Today' : p === 'week' ? 'This Week' : p === 'month' ? 'This Month' : 'This Year'}
-          </Btn>
-        ))}
+      <div className="page-head">
+        <div className="pills">
+          {(['today', 'week', 'month', 'year'] as const).map((p) => (
+            <button key={p} className={period === p ? 'active' : ''} onClick={() => setPeriod(p)}>
+              {p === 'today' ? 'Today' : p === 'week' ? 'This Week' : p === 'month' ? 'This Month' : 'This Year'}
+            </button>
+          ))}
+        </div>
         <Btn
           kind="secondary"
           onClick={() =>
@@ -227,13 +395,18 @@ export function DailyDhandhaView({ ctx }: { ctx: Ctx }) {
         received is what actually came in; profit is received minus agent charges and expenses.
       </p>
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
-        <Stat label="Total Billing" value={formatINR(billing)} />
-        <Stat label="Actually Received" value={formatINR(received)} />
-        <Stat label="Agent Charges" value={formatINR(agentCharges)} />
-        <Stat label="Direct Expenses" value={formatINR(expTotal)} />
-        <Stat label="MT Commission Profit" value={formatINR(mtProfit)} />
-        <Stat label="Net Profit" value={formatINR(profit)} />
+        <Stat label="Total Billing" value={formatINR(billing)} tone="blue" />
+        <Stat label="Actually Received" value={formatINR(received)} tone="green" />
+        <Stat label="Agent Charges" value={formatINR(agentCharges)} tone="orange" />
+        <Stat label="Direct Expenses" value={formatINR(expTotal)} tone="red" />
+        <Stat label="MT Commission Profit" value={formatINR(mtProfit)} tone="indigo" />
+        <Stat label="Net Profit" value={formatINR(profit)} tone="purple" />
       </div>
+      {byService.size > 0 && (
+        <Card title="Per-Service Received">
+          <BarChart data={[...byService.entries()].map(([s, v]) => ({ label: s, value: v.received, valueLabel: formatINR(v.received) }))} />
+        </Card>
+      )}
       <Card title="Per-Service Breakdown">
         {byService.size === 0 ? (
           <Empty text="No jobs in this period yet." />

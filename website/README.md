@@ -11,6 +11,21 @@ Cloudflare Pages.
 ## What it does
 
 - **Starts completely empty** — no demo numbers, ever.
+- **28 dedicated pages**, one per feature, in a single-page app with view switching:
+  Dashboard, Daily Dhandha, Cash Book, UPI Book, Money Transfer, PAN Card,
+  Aadhaar Services, Voter ID, Ayushman Card, Xerox, Printing, Smart Card,
+  Document Work, Customers, Customer Profile, Customer Khata, Agent Management,
+  Agent Profile, Agent Payments, Expenses, Machine Maintenance, Receipt
+  Generator, Reports, Difference Finder, Recycle Bin, Audit Log, Customization
+  Studio, Settings. Every page has its own header, summary cards, search and
+  filters, professional tables, Add/Edit/View/Delete actions, working forms
+  and dialogs, and pagination — all wired to real saved data.
+- **Design**: premium dark navy sidebar with expandable Services/Reports
+  groups, modern top nav (business profile switcher, global search across
+  customers/jobs/receipts, notification bell, owner menu), purple primary
+  actions, white cards, pastel summary cards, pure-SVG line/donut/bar charts
+  (no chart dependencies). Responsive: sidebar becomes a slide-in drawer with
+  a bottom nav on tablet/mobile.
 - **Mobile + PIN registration / login** with forgot-PIN recovery (recovery word).
 - **Language screen after login**: English (default), Hindi, Hinglish — changeable in Settings.
 - **15 business categories** at signup, each with ready-made services. CSC Center is
