@@ -25,6 +25,7 @@ class SettingsStore(context: Context) {
     private val MOBILE = stringPreferencesKey("mobile")
     private val DISABLED_MODULES = stringPreferencesKey("disabled_modules")
     private val GEMINI_API_KEY = stringPreferencesKey("gemini_api_key")
+    private val CUSTOM_SERVICES = stringPreferencesKey("custom_services")
 
     /** Theme mode: LIGHT, DARK or SYSTEM (default SYSTEM — follows the phone). */
     enum class ThemeMode { LIGHT, DARK, SYSTEM }
@@ -103,6 +104,57 @@ class SettingsStore(context: Context) {
                 ?: mutableSetOf()
             if (enabled) current.remove(key) else current.add(key)
             prefs[DISABLED_MODULES] = current.joinToString(",")
+        }
+    }
+
+    // --- Custom services (Daily Business / Customization Studio) ---
+    // Services the owner adds himself ("Lamintion", "Photo Print"...).
+    // Stored as a comma-separated list, so a name may not contain a comma.
+    // They appear as categories in the Quick Daily Entry form and in the
+    // Daily Business service summary, and are saved as the transaction
+    // category — so their income is grouped under their own name. Renaming
+    // a service only affects NEW entries: historical transactions keep the
+    // name they were saved with (never rewrite history, §16/§17).
+    // NOTE: like disabled modules, this is stored app-wide in v1; making
+    // it per business profile is remaining work alongside per-profile
+    // Customization Studio settings.
+
+    val customServices: Flow<Set<String>> = store.data.map {
+        it[CUSTOM_SERVICES]?.split(",")?.map { s -> s.trim() }?.filter { s -> s.isNotBlank() }?.toSet()
+            ?: emptySet()
+    }
+
+    suspend fun addCustomService(name: String) {
+        val clean = name.trim()
+        require(clean.isNotBlank()) { "Enter a service name." }
+        require(',' !in clean) { "A service name cannot contain a comma." }
+        store.edit { prefs ->
+            val current = prefs[CUSTOM_SERVICES]?.split(",")?.map { s -> s.trim() }
+                ?.filter { s -> s.isNotBlank() }?.toMutableSet() ?: mutableSetOf()
+            current.add(clean)
+            prefs[CUSTOM_SERVICES] = current.joinToString(",")
+        }
+    }
+
+    suspend fun renameCustomService(oldName: String, newName: String) {
+        val clean = newName.trim()
+        require(clean.isNotBlank()) { "Enter a service name." }
+        require(',' !in clean) { "A service name cannot contain a comma." }
+        store.edit { prefs ->
+            val current = prefs[CUSTOM_SERVICES]?.split(",")?.map { s -> s.trim() }
+                ?.filter { s -> s.isNotBlank() }?.toMutableSet() ?: mutableSetOf()
+            current.remove(oldName)
+            current.add(clean)
+            prefs[CUSTOM_SERVICES] = current.joinToString(",")
+        }
+    }
+
+    suspend fun removeCustomService(name: String) {
+        store.edit { prefs ->
+            val current = prefs[CUSTOM_SERVICES]?.split(",")?.map { s -> s.trim() }
+                ?.filter { s -> s.isNotBlank() }?.toMutableSet() ?: mutableSetOf()
+            current.remove(name)
+            prefs[CUSTOM_SERVICES] = current.joinToString(",")
         }
     }
 

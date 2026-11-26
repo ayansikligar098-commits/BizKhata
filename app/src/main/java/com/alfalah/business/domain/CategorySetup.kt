@@ -34,18 +34,20 @@ object CategorySetups {
         modules = listOf(
             "dashboard", "cash_book", "upi_book", "money_transfer",
             "pan", "aadhaar", "voter_id", "ayushman", "xerox", "printing",
-            "smart_card", "document_work", "customers", "khata",
+            "smart_card", "passport_photo", "scanning", "document_work", "customers", "khata",
             "agents", "agent_payments", "expenses", "maintenance",
             "receipts", "daily_business", "reports", "difference_finder", "settings"
         ),
         services = listOf(
             ServiceType.PAN, ServiceType.AADHAAR, ServiceType.VOTER_ID,
             ServiceType.AYUSHMAN, ServiceType.XEROX, ServiceType.PRINTING,
-            ServiceType.SMART_CARD, ServiceType.DOCUMENT_WORK, ServiceType.MONEY_TRANSFER
+            ServiceType.SMART_CARD, ServiceType.PASSPORT_PHOTO, ServiceType.SCANNING,
+            ServiceType.DOCUMENT_WORK, ServiceType.MONEY_TRANSFER
         ),
         incomeCategories = listOf(
             "PAN Card", "Aadhaar Services", "Voter ID", "Ayushman Card",
-            "Xerox", "Printing", "Smart Card", "Document Work",
+            "Xerox", "Printing", "Smart Card", "Passport Size Photo", "Scanning",
+            "Document Work",
             "Money Transfer Commission", "Other Services"
         ),
         expenseCategories = listOf(
@@ -103,8 +105,8 @@ object CategorySetups {
             "customers", "khata", "expenses", "maintenance", "receipts",
             "daily_business", "reports", "settings"
         ),
-        services = listOf(ServiceType.XEROX, ServiceType.PRINTING, ServiceType.SMART_CARD),
-        incomeCategories = listOf("Xerox", "Printing", "Smart Card", "Other Services"),
+        services = listOf(ServiceType.XEROX, ServiceType.PRINTING, ServiceType.SMART_CARD, ServiceType.PASSPORT_PHOTO, ServiceType.SCANNING),
+        incomeCategories = listOf("Xerox", "Printing", "Smart Card", "Passport Size Photo", "Scanning", "Other Services"),
         expenseCategories = listOf(
             "Machine Repair", "Printer Repair", "Servicing", "Ink", "Toner",
             "Cartridge", "Paper", "Printhead", "Spare Parts"

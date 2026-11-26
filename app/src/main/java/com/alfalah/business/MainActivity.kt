@@ -95,6 +95,8 @@ import com.alfalah.business.ui.cashbook.DifferenceFinderScreen
 import com.alfalah.business.ui.chatbot.ChatbotScreen
 import com.alfalah.business.ui.dashboard.DashboardScreen
 import com.alfalah.business.ui.dashboard.DashboardViewModel
+import com.alfalah.business.ui.dailybusiness.DailyBusinessScreen
+import com.alfalah.business.ui.dailybusiness.DailyBusinessViewModel
 import com.alfalah.business.ui.expenses.ExpensesScreen
 import com.alfalah.business.ui.expenses.MaintenanceScreen
 import com.alfalah.business.ui.khata.CustomerDetailScreen
@@ -470,7 +472,17 @@ class MainActivity : ComponentActivity() {
                                 }
                                 composable(Routes.DAILY_BUSINESS) {
                                     val profile = activeProfile ?: return@composable
-                                    ReportsScreen(profileId = profile.id, repository = app.repository, language = language)
+                                    val vm: DailyBusinessViewModel = viewModel(
+                                        factory = vmFactory { DailyBusinessViewModel(profile.id, app.repository, settings) }
+                                    )
+                                    DailyBusinessScreen(
+                                        profileId = profile.id,
+                                        repository = app.repository,
+                                        settings = settings,
+                                        language = language,
+                                        viewModel = vm,
+                                        onOpen = { route -> nav.navigate(route) }
+                                    )
                                 }
                                 composable(Routes.REPORTS) {
                                     val profile = activeProfile ?: return@composable
@@ -535,6 +547,9 @@ class MainActivity : ComponentActivity() {
                         confirmButton = {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 TextButton(
+                                    onClick = { showQuickAdd = false; nav.navigate(Routes.DAILY_BUSINESS) }
+                                ) { Text("New Daily Entry") }
+                                TextButton(
                                     onClick = { showQuickAdd = false; nav.navigate(Routes.SERVICES) }
                                 ) { Text("New Service Job") }
                                 TextButton(
@@ -573,7 +588,8 @@ private data class DrawerEntry(
 /**
  * Navigation drawer — reference screen 2. Purple gradient header with the
  * owner and the business card (+ profile switcher), then every module.
- * Services expand to the eight service pages.
+ * Services expand to the service pages (all ServiceType values except
+ * Money Transfer, which has its own ledger screen, and Other).
  */
 @Composable
 private fun DrawerContent(

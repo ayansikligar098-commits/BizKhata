@@ -80,12 +80,21 @@ class DashboardViewModel(
                     val upiToCash = txs.filter { it.kind == "INTERNAL_TRANSFER" && it.mode.name == "UPI" }.sumOf { it.amountPaise }
 
                     val mtPeriod = transfers.filter { it.dateEpochDay in fromDay..today }
+                    val mtCommission = mtPeriod.sumOf { it.commissionPaise }
                     val mtProfit = AccountingEngine.moneyTransferProfit(
-                        commissionPaise = mtPeriod.sumOf { it.commissionPaise },
+                        commissionPaise = mtCommission,
                         transferChargesPaise = mtPeriod.sumOf { it.chargesPaise },
                         moneyTransferExpensesPaise = 0
                     )
                     val mtPrincipal = mtPeriod.sumOf { it.amountPaise }
+
+                    // NOTE (Daily Business fix): `income` above ALREADY includes
+                    // the MT commission rows (addMoneyTransfer writes one INCOME
+                    // row per transfer, commission only). So the commission must
+                    // NOT be added to income a second time, and net profit must
+                    // subtract it once before adding the commission-based MT
+                    // profit — otherwise a ₹50 commission would count as ₹100.
+                    // The ₹10,000 principal is never in `income` at all.
 
                     // Service-wise received income for the donut. MT commission
                     // is its own slice (labelled as commission, never principal).
@@ -98,9 +107,9 @@ class DashboardViewModel(
                     val due = repository.customerDue(profileId)
                     val payable = repository.agentPayable(profileId)
                     _state.value = DashboardState(
-                        todayIncomePaise = income + mtPeriod.sumOf { it.commissionPaise },
+                        todayIncomePaise = income,
                         todayExpensesPaise = expenses,
-                        netProfitPaise = AccountingEngine.netProfit(income, mtProfit, expenses),
+                        netProfitPaise = AccountingEngine.netProfit(income - mtCommission, mtProfit, expenses),
                         cashBalancePaise = cashIn - cashOut - cashToUpi + upiToCash,
                         upiBalancePaise = upiIn - upiOut + cashToUpi - upiToCash,
                         customerDuePaise = due,

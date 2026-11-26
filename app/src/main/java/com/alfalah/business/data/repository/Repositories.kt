@@ -15,6 +15,7 @@ import com.alfalah.business.data.entity.ReceiptEntity
 import com.alfalah.business.data.entity.ServiceJobEntity
 import com.alfalah.business.data.entity.TransactionEntity
 import com.alfalah.business.domain.AccountingEngine
+import com.alfalah.business.domain.DailyBusiness
 import com.alfalah.business.domain.PaymentMode
 import com.alfalah.business.domain.ServiceType
 import kotlinx.coroutines.flow.Flow
@@ -119,6 +120,95 @@ class BusinessRepository(private val db: AppDatabase) {
         return jobId
     }
 
+    /**
+     * Quick Daily Entry (Daily Business hub). ONE database transaction
+     * writes exactly ONE income row for the entry — the same
+     * `transactions` table the service modules write to, with the service
+     * category as its category and no linked job (relatedJobId = null:
+     * this is a walk-in daily sale, not a customer job). Because Daily
+     * Business DERIVES its totals from `transactions`, the entry shows up
+     * there automatically — no second copy is ever written, so it can
+     * never be counted twice.
+     *
+     * A direct expense on the same entry (e.g. paper bought for that
+     * printing job) is written in the SAME transaction as an Expense row
+     * + its one EXPENSE book row — exactly as [addExpense] does — so the
+     * expense appears once in Daily Business expenses and once in the
+     * Expenses module, and the income and the expense can never disagree.
+     * The expense is paid from the same Cash/UPI account as the entry.
+     */
+    suspend fun addDailyEntry(
+        profileId: Long,
+        service: ServiceType?,
+        serviceLabel: String,
+        description: String,
+        quantity: Long,
+        ratePaise: Long,
+        totalPaise: Long,
+        mode: PaymentMode,
+        dayEpoch: Long,
+        createdAtEpochMs: Long,
+        directExpensePaise: Long,
+        notes: String
+    ) {
+        require(serviceLabel.isNotBlank()) { "Choose a service category." }
+        require(quantity >= 1) { "Quantity must be at least 1." }
+        require(ratePaise >= 0) { "Rate cannot be negative." }
+        require(totalPaise > 0) { "Total amount must be more than zero." }
+        require(directExpensePaise >= 0) { "Direct expense cannot be negative." }
+        // No cap on the expense vs the total: a job can legitimately cost
+        // more than it earned (a loss shows up as negative net earnings).
+        val detail = buildString {
+            append(description.trim())
+            append(" — Qty $quantity @ ${rupeesText(ratePaise)}")
+            if (notes.isNotBlank()) append(" — ${notes.trim()}")
+        }
+        db.runInTransaction {
+            val txId = txs.insert(
+                TransactionEntity(
+                    profileId = profileId, kind = "INCOME",
+                    category = serviceLabel.trim(), amountPaise = totalPaise,
+                    mode = mode, dateEpochDay = dayEpoch,
+                    description = detail, relatedJobId = null,
+                    createdAtEpochMs = createdAtEpochMs
+                )
+            )
+            if (directExpensePaise > 0) {
+                expenses.insert(
+                    ExpenseEntity(
+                        profileId = profileId, category = "Direct Expense",
+                        service = service, description = "Direct expense for $serviceLabel: ${description.trim()}",
+                        amountPaise = directExpensePaise, mode = mode,
+                        dateEpochDay = dayEpoch, note = notes.trim()
+                    )
+                )
+                txs.insert(
+                    TransactionEntity(
+                        profileId = profileId, kind = "EXPENSE",
+                        category = "Direct Expense", amountPaise = directExpensePaise,
+                        mode = mode, dateEpochDay = dayEpoch,
+                        description = "Direct expense for $serviceLabel: ${description.trim()}",
+                        createdAtEpochMs = createdAtEpochMs
+                    )
+                )
+            }
+            audit.insert(
+                AuditLogEntity(
+                    profileId = profileId, entityType = "Transaction", entityId = txId,
+                    action = "CREATED",
+                    newValue = "Daily entry $serviceLabel ${rupeesText(totalPaise)} ${mode.name}"
+                )
+            )
+        }
+    }
+
+    /** Paise → "₹12.50" / "₹12" text for stored descriptions (integer maths only). */
+    private fun rupeesText(amountPaise: Long): String {
+        val rupees = amountPaise / 100
+        val paise = amountPaise % 100
+        return if (paise == 0L) "₹$rupees" else "₹$rupees.${paise.toString().padStart(2, '0')}"
+    }
+
     /** Add an expense. Direct costs linked to a service stay linked (§13). */
     suspend fun addExpense(expense: ExpenseEntity) {
         db.runInTransaction {
@@ -176,7 +266,7 @@ class BusinessRepository(private val db: AppDatabase) {
             txs.insert(
                 TransactionEntity(
                     profileId = transfer.profileId, kind = "INCOME",
-                    category = "Money Transfer Commission",
+                    category = DailyBusiness.MONEY_TRANSFER_COMMISSION_LABEL,
                     amountPaise = transfer.commissionPaise,
                     mode = transfer.mode, dateEpochDay = transfer.dateEpochDay,
                     description = "MT commission ${transfer.transactionId}"

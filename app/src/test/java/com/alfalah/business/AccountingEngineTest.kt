@@ -97,4 +97,68 @@ class AccountingEngineTest {
         assertEquals(1, suggestions.size)
         assertEquals(2L, suggestions[0].transaction.id)
     }
+
+    @Test
+    fun dailyBusinessTotalsFromRecordedRows() {
+        // Cash ₹200 + UPI ₹300 received, ₹100 expenses → collection ₹500,
+        // cash ₹200, UPI ₹300, net ₹400, 3 rows. No MT involved.
+        val income = listOf(
+            AccountingEngine.MoneyEntry(20_000L, com.alfalah.business.domain.PaymentMode.CASH),
+            AccountingEngine.MoneyEntry(30_000L, com.alfalah.business.domain.PaymentMode.UPI)
+        )
+        val expenses = listOf(
+            AccountingEngine.MoneyEntry(10_000L, com.alfalah.business.domain.PaymentMode.CASH)
+        )
+        val totals = AccountingEngine.computeDailyBusiness(income, expenses, 0L, 0L)
+        assertEquals(50_000L, totals.totalCollectionPaise)
+        assertEquals(20_000L, totals.cashCollectionPaise)
+        assertEquals(30_000L, totals.upiCollectionPaise)
+        assertEquals(10_000L, totals.expensesPaise)
+        assertEquals(40_000L, totals.netEarningsPaise)
+        assertEquals(3, totals.transactionCount)
+    }
+
+    @Test
+    fun dailyBusinessMoneyTransferPrincipalNeverIncome() {
+        // MT ₹10,000 transfer, ₹50 commission: the ONLY income row is the
+        // ₹50 commission. Principal ₹10,000 never enters the totals, and
+        // the ₹50 commission is counted exactly once in net earnings.
+        val income = listOf(
+            AccountingEngine.MoneyEntry(5_000L, com.alfalah.business.domain.PaymentMode.UPI)
+        )
+        val totals = AccountingEngine.computeDailyBusiness(
+            income, emptyList(),
+            moneyTransferProfitPaise = AccountingEngine.moneyTransferProfit(5_000L, 0L, 0L),
+            moneyTransferCommissionPaise = 5_000L
+        )
+        assertEquals(5_000L, totals.totalCollectionPaise)
+        assertEquals(5_000L, totals.netEarningsPaise)
+    }
+
+    @Test
+    fun dailyBusinessOnlyReceivedMoneyCounts() {
+        // Bill ₹500, received ₹200: only the ₹200 received is an income
+        // row. The ₹300 due is not a row, so it can never be collection.
+        val income = listOf(
+            AccountingEngine.MoneyEntry(20_000L, com.alfalah.business.domain.PaymentMode.CASH)
+        )
+        val totals = AccountingEngine.computeDailyBusiness(income, emptyList(), 0L, 0L)
+        assertEquals(20_000L, totals.totalCollectionPaise)
+        assertEquals(30_000L, AccountingEngine.customerDue(50_000L, 20_000L))
+    }
+
+    @Test
+    fun dailyBusinessEmptyDayIsZero() {
+        val totals = AccountingEngine.computeDailyBusiness(emptyList(), emptyList(), 0L, 0L)
+        assertEquals(0L, totals.totalCollectionPaise)
+        assertEquals(0L, totals.netEarningsPaise)
+        assertEquals(0, totals.transactionCount)
+    }
+
+    @Test
+    fun quickEntryTotalIsQuantityTimesRate() {
+        // 10 xerox copies at ₹2 each = ₹20.
+        assertEquals(2_000L, AccountingEngine.quickEntryTotal(10L, 200L))
+        assertEquals(5_000L, AccountingEngine.quickEntryTotal(1L, 5_000L))
+    }
 }

@@ -92,6 +92,72 @@ object AccountingEngine {
         expensesPaise: Long
     ): Long = serviceIncomeReceivedPaise + moneyTransferProfitPaise - expensesPaise
 
+    // -----------------------------------------------------------------------
+    // Daily Business (Daily Dhandha) — derived totals, single source of truth.
+    // -----------------------------------------------------------------------
+
+    /** Totals for one Daily Business period, derived ONLY from recorded
+     *  income/expense rows. Starts at zero on a fresh install — no demo. */
+    data class DailyBusinessTotals(
+        /** All money actually received (Cash + UPI + Other modes). MT
+         *  principal is never in here — only the commission income row. */
+        val totalCollectionPaise: Long = 0,
+        val cashCollectionPaise: Long = 0,
+        val upiCollectionPaise: Long = 0,
+        val otherCollectionPaise: Long = 0,
+        val expensesPaise: Long = 0,
+        /** Net earnings = collection − expenses, with MT profit counted
+         *  once (commission only, never principal). */
+        val netEarningsPaise: Long = 0,
+        /** Number of income + expense rows in the period. */
+        val transactionCount: Int = 0
+    )
+
+    /**
+     * Daily Business totals from the books.
+     *
+     * [income] — the period's INCOME rows (job payments, MT commission
+     * rows, cash-book income, quick daily entries). [expenses] — the
+     * period's EXPENSE rows. [moneyTransferProfitPaise] — commission-based
+     * MT profit for the period (from the MT ledger). [moneyTransferCommissionPaise]
+     * — the MT commission already inside [income] as income rows: it is
+     * subtracted once before the commission-based profit is added, so the
+     * ₹50 commission on a ₹10,000 transfer is counted exactly once and the
+     * ₹10,000 principal never is.
+     */
+    fun computeDailyBusiness(
+        income: List<MoneyEntry>,
+        expenses: List<MoneyEntry>,
+        moneyTransferProfitPaise: Long,
+        moneyTransferCommissionPaise: Long
+    ): DailyBusinessTotals {
+        val total = income.sumOf { it.amountPaise }
+        val cash = income.filter { it.mode == PaymentMode.CASH }.sumOf { it.amountPaise }
+        val upi = income.filter { it.mode == PaymentMode.UPI }.sumOf { it.amountPaise }
+        val other = total - cash - upi
+        val expenseTotal = expenses.sumOf { it.amountPaise }
+        val serviceIncome = total - moneyTransferCommissionPaise
+        return DailyBusinessTotals(
+            totalCollectionPaise = total,
+            cashCollectionPaise = cash,
+            upiCollectionPaise = upi,
+            otherCollectionPaise = other,
+            expensesPaise = expenseTotal,
+            netEarningsPaise = netProfit(serviceIncome, moneyTransferProfitPaise, expenseTotal),
+            transactionCount = income.size + expenses.size
+        )
+    }
+
+    /**
+     * Quick Daily Entry line total: quantity × rate, integer paise (Long).
+     * Quantity is capped so a typo can never overflow the multiplication.
+     */
+    fun quickEntryTotal(quantity: Long, ratePaise: Long): Long {
+        require(quantity in 1..100_000) { "Quantity must be between 1 and 100,000" }
+        require(ratePaise in 0..1_000_000_000L) { "Rate is out of range" }
+        return quantity * ratePaise
+    }
+
     /** Result of the Difference Finder. */
     data class DifferenceResult(
         val expectedPaise: Long,

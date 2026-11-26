@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import com.alfalah.business.data.repository.BusinessRepository
 import com.alfalah.business.domain.AccountingEngine
 import com.alfalah.business.domain.AppLanguage
+import com.alfalah.business.domain.DailyBusiness
 import com.alfalah.business.ui.components.BarChart
 import com.alfalah.business.ui.components.BizCard
 import com.alfalah.business.ui.components.EmptyState
@@ -47,8 +48,8 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
- * Reports — reference screen 11. Tabs: Business / Service-wise / Customer.
- * Date-range pills, Business Summary (Income / Expense / Profit), a purple
+ * Reports — reference screen 11. Tabs: Business / Service-wise / Customer /
+ * Daily Business. Date-range pills, Business Summary (Income / Expense /
  * bar chart of the last 7 days, and report rows that share a CSV export.
  * All figures come from recorded entries. Money Transfer contributes only
  * its commission-based profit — the principal is shown separately and is
@@ -78,12 +79,17 @@ fun ReportsScreen(
     val income = periodTxs.filter { it.kind == "INCOME" }.sumOf { it.amountPaise }
     val expenses = periodTxs.filter { it.kind == "EXPENSE" }.sumOf { it.amountPaise }
     val periodMt = transfers.filter { it.dateEpochDay in fromDay..today }
+    val mtCommission = periodMt.sumOf { it.commissionPaise }
     val mtProfit = AccountingEngine.moneyTransferProfit(
-        periodMt.sumOf { it.commissionPaise },
+        mtCommission,
         periodMt.sumOf { it.chargesPaise },
         0
     )
-    val profit = AccountingEngine.netProfit(income, mtProfit, expenses)
+    // NOTE (Daily Business fix): `income` already includes the MT
+    // commission rows, so subtract the commission once before adding the
+    // commission-based MT profit — otherwise it counts twice. The MT
+    // principal is never in `income`.
+    val profit = AccountingEngine.netProfit(income - mtCommission, mtProfit, expenses)
     val byService = periodTxs.filter { it.kind == "INCOME" }
         .groupBy { it.category }
         .mapValues { (_, list) -> list.sumOf { it.amountPaise } }
@@ -103,6 +109,11 @@ fun ReportsScreen(
         appendLine("Money Transfer Profit (paise),$mtProfit")
         appendLine("Net Profit (paise),$profit")
         appendLine("Customer Due (paise),$totalDue")
+        appendLine("Daily Business — Total Collection (paise),$income")
+        appendLine("Daily Business — Cash Collection (paise),${periodTxs.filter { it.kind == "INCOME" && it.mode.name == "CASH" }.sumOf { it.amountPaise }}")
+        appendLine("Daily Business — UPI Collection (paise),${periodTxs.filter { it.kind == "INCOME" && it.mode.name == "UPI" }.sumOf { it.amountPaise }}")
+        appendLine("Daily Business — Transactions,${periodTxs.size}")
+        appendLine("Daily Business — MT Principal (paise, not income),${periodMt.sumOf { it.amountPaise }}")
         appendLine("Service,Income (paise)")
         byService.forEach { (s, a) -> appendLine("$s,$a") }
     }
@@ -117,7 +128,7 @@ fun ReportsScreen(
 
     Column(Modifier.fillMaxSize()) {
         TabRow(selectedTabIndex = tab) {
-            listOf("Business", "Service-wise", "Customer").forEachIndexed { i, label ->
+            listOf("Business", "Service-wise", "Customer", "Daily Business").forEachIndexed { i, label ->
                 Tab(selected = tab == i, onClick = { tab = i }, text = { Text(label) })
             }
         }
@@ -228,6 +239,56 @@ fun ReportsScreen(
                     }
                     item {
                         ReportRow("Customer Due Report", "Total due ${formatRupees(totalDue)}") { shareCsv("Customer Due Report") }
+                        Spacer(Modifier.height(16.dp))
+                    }
+                }
+                3 -> {
+                    // Daily Business report (brief F): the combined daily /
+                    // weekly / monthly / yearly view of the central hub, plus
+                    // the individual service rows — same period pills as the
+                    // other tabs. Figures are the same derived totals as the
+                    // Daily Business screen, so the two can never disagree.
+                    val cashCollection = periodTxs.filter { it.kind == "INCOME" && it.mode.name == "CASH" }.sumOf { it.amountPaise }
+                    val upiCollection = periodTxs.filter { it.kind == "INCOME" && it.mode.name == "UPI" }.sumOf { it.amountPaise }
+                    val byServiceMap = byService.toMap()
+                    val dailyLabels = (DailyBusiness.summaryServiceLabels +
+                        byServiceMap.keys.filter { it !in DailyBusiness.summaryServiceLabels }.sorted()).distinct()
+                    item {
+                        BizCard(Modifier.fillMaxWidth()) {
+                            SectionTitle("Daily Business Summary")
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                StatCard("Collection", formatRupees(income), valueColor = BizColors.Purple, modifier = Modifier.weight(1f))
+                                StatCard("Net Earnings", formatRupees(profit), valueColor = BizColors.IncomeGreen, modifier = Modifier.weight(1f))
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                StatCard("Cash", formatRupees(cashCollection), modifier = Modifier.weight(1f))
+                                StatCard("UPI", formatRupees(upiCollection), modifier = Modifier.weight(1f))
+                                StatCard("Transactions", "${periodTxs.size}", modifier = Modifier.weight(1f))
+                            }
+                            Text(
+                                "Money Transfer principal ${formatRupees(periodMt.sumOf { it.amountPaise })} is tracked separately — only the commission ${formatRupees(mtCommission)} counts as collection.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 8.dp)
+                            )
+                        }
+                    }
+                    item { SectionTitle("Service-wise Collection") }
+                    if (dailyLabels.isEmpty()) {
+                        item { EmptyState("No income recorded in this period yet.") }
+                    } else {
+                        items(dailyLabels) { label ->
+                            BizCard(Modifier.fillMaxWidth()) {
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text(label, fontWeight = FontWeight.SemiBold)
+                                    Text(formatRupees(byServiceMap[label] ?: 0), fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                    item {
+                        ReportRow("Daily Business Report", "Combined $period summary + service-wise collection") { shareCsv("Daily Business Report") }
                         Spacer(Modifier.height(16.dp))
                     }
                 }

@@ -16,8 +16,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBox
 import androidx.compose.material.icons.filled.Assignment
 import androidx.compose.material.icons.filled.Badge
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CardMembership
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.FileCopy
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.HealthAndSafety
 import androidx.compose.material.icons.filled.Print
@@ -51,6 +53,8 @@ fun ServicesScreen(onOpenService: (String) -> Unit) {
         ServiceType.XEROX to Icons.Filled.Description,
         ServiceType.PRINTING to Icons.Filled.Print,
         ServiceType.SMART_CARD to Icons.Filled.CardMembership,
+        ServiceType.PASSPORT_PHOTO to Icons.Filled.CameraAlt,
+        ServiceType.SCANNING to Icons.Filled.FileCopy,
         ServiceType.DOCUMENT_WORK to Icons.Filled.Assignment
     )
     LazyVerticalGrid(

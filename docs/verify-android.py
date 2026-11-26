@@ -130,6 +130,77 @@ for f in kt_files:
     if "AIza" in f.read_text():
         fails.append(f"{f.name}: hardcoded Gemini key prefix found (never ship a key)")
 
+# 11. Daily Business hub checks
+db_screen = MAIN / "ui/dailybusiness/DailyBusinessScreen.kt"
+db_vm = MAIN / "ui/dailybusiness/DailyBusinessViewModel.kt"
+if not db_screen.exists():
+    fails.append("DailyBusinessScreen.kt missing (ui/dailybusiness/)")
+if not db_vm.exists():
+    fails.append("DailyBusinessViewModel.kt missing (ui/dailybusiness/)")
+if "ReportsScreen" in main_act.split("Routes.DAILY_BUSINESS")[1].split("composable(")[0]:
+    fails.append("MainActivity still routes DAILY_BUSINESS to ReportsScreen (must be DailyBusinessScreen)")
+if "DailyBusinessScreen" not in main_act:
+    fails.append("MainActivity does not wire DailyBusinessScreen")
+if "DailyBusinessViewModel" not in main_act:
+    fails.append("MainActivity does not wire DailyBusinessViewModel")
+models_src = (MAIN / "domain/Models.kt").read_text()
+for svc in ["PASSPORT_PHOTO", "SCANNING"]:
+    if svc not in models_src:
+        fails.append(f"ServiceType.{svc} missing from Models.kt")
+daily_src = (MAIN / "domain/DailyBusiness.kt").read_text() if (MAIN / "domain/DailyBusiness.kt").exists() else ""
+if not daily_src:
+    fails.append("domain/DailyBusiness.kt missing")
+for label in ["Xerox", "Money Transfer Commission", "Smart Card", "Passport Size Photo", "Printing", "Scanning", "Document Work"]:
+    if label not in daily_src:
+        fails.append(f"DailyBusiness summary missing service: {label}")
+qe = re.search(r'val quickEntryServices[^=]*=\s*listOf\((.*?)\)', daily_src, re.S)
+if not qe:
+    fails.append("DailyBusiness.quickEntryServices list not found")
+elif "MONEY_TRANSFER" in qe.group(1):
+    fails.append("Money Transfer must NOT be a Quick Entry category (principal risk)")
+if db_vm.exists():
+    vm_src = db_vm.read_text()
+    if "observeTransactions" not in vm_src:
+        fails.append("DailyBusinessViewModel does not derive from observeTransactions (single source of truth)")
+    if "INTERNAL_TRANSFER" not in vm_src:
+        fails.append("DailyBusinessViewModel does not exclude INTERNAL_TRANSFER rows")
+    if "computeDailyBusiness" not in vm_src:
+        fails.append("DailyBusinessViewModel does not use AccountingEngine.computeDailyBusiness")
+repo_src = (MAIN / "data/repository/Repositories.kt").read_text()
+if "fun addDailyEntry" not in repo_src:
+    fails.append("BusinessRepository.addDailyEntry missing")
+else:
+    daily_fn = repo_src.split("fun addDailyEntry")[1].split("\n    /** Add an expense")[0]
+    if daily_fn.count('kind = "INCOME"') != 1:
+        fails.append(f"addDailyEntry must write exactly one INCOME row, found {daily_fn.count(chr(34)+'INCOME'+chr(34))} income markers")
+    if "runInTransaction" not in daily_fn:
+        fails.append("addDailyEntry is not wrapped in runInTransaction")
+cust_src = (MAIN / "ui/settings/CustomizationScreen.kt").read_text()
+for term in ["customServices", "Add Your Own Service", "renameCustomService", "passport_photo", "scanning"]:
+    if term not in cust_src:
+        fails.append(f"CustomizationScreen missing: {term}")
+settings_src = (MAIN / "data/SettingsStore.kt").read_text()
+for term in ["customServices", "addCustomService", "renameCustomService", "removeCustomService"]:
+    if term not in settings_src:
+        fails.append(f"SettingsStore missing: {term}")
+reports_src = (MAIN / "ui/reports/ReportsScreen.kt").read_text()
+if '"Daily Business"' not in reports_src:
+    fails.append("ReportsScreen missing Daily Business tab")
+if "income - mtCommission" not in reports_src:
+    fails.append("ReportsScreen still double-counts MT commission in profit")
+dash_vm_src = (MAIN / "ui/dashboard/DashboardViewModel.kt").read_text()
+if "income + mtPeriod" in dash_vm_src or "income + mtCommission" in dash_vm_src:
+    fails.append("DashboardViewModel still double-counts MT commission in income")
+services_src = (MAIN / "ui/services/ServicesScreen.kt").read_text()
+for svc in ["PASSPORT_PHOTO", "SCANNING"]:
+    if svc not in services_src:
+        fails.append(f"ServicesScreen missing {svc} card")
+if db_screen.exists():
+    screen_src = db_screen.read_text()
+    for term in ["Total Collection", "Cash Collection", "UPI Collection", "Net Earnings", "Total Transactions", "Recent Entries", "QuickDailyEntryDialog", "Direct Expense"]:
+        if term not in screen_src:
+            fails.append(f"DailyBusinessScreen missing: {term}")
+
 # 9. Python mirror of AccountingEngine — run the unit-test cases
 def customer_due(total, received): return max(total - received, 0)
 def agent_payable(charges, paid): return max(charges - paid, 0)
@@ -140,6 +211,15 @@ def internal_transfer(amount, frm):
 def service_profit(recv, exp, charges): return recv - exp - charges
 def net_profit(inc, mt, exp): return inc + mt - exp
 def find_diff(expected, recorded): return expected - recorded
+def quick_total(qty, rate): return qty * rate
+def daily_totals(income, expenses, mt_profit, mt_comm_in_income):
+    # income/expenses: list of (amount_paise, mode); mirrors computeDailyBusiness
+    total = sum(a for a, _ in income)
+    cash = sum(a for a, m in income if m == "CASH")
+    upi = sum(a for a, m in income if m == "UPI")
+    exp = sum(a for a, _ in expenses)
+    net = (total - mt_comm_in_income) + mt_profit - exp
+    return total, cash, upi, exp, net, len(income) + len(expenses)
 
 cases = [
     ("bill500/recv200 -> due300", customer_due(50_000, 20_000) == 30_000),
@@ -150,6 +230,20 @@ cases = [
     ("agent example 500/250/150", agent_payable(25_000, 15_000) == 10_000 and service_profit(50_000, 0, 25_000) == 25_000),
     ("MT closing 50050", mt_closing(0, 50_000_00 + 10_050_00, 10_000_00, 0) == 50_050_00 and mt_closing(0, 0, 0, 0) == 0),
     ("difference 500", find_diff(100_000, 99_500) == 500 and find_diff(100_000, 100_000) == 0),
+    # --- Daily Business integration (single source of truth) ---
+    # One job payment row (Xerox ₹200 cash, from a module) appears exactly
+    # once in Daily Business: collection ₹200, 1 transaction.
+    ("daily: module job payment appears once", daily_totals([(20_000, "CASH")], [], 0, 0) == (20_000, 20_000, 0, 0, 20_000, 1)),
+    # MT ₹10,000 principal + ₹50 commission: only the ₹50 commission row
+    # exists in the books, so Daily Business income is ₹50, never ₹10,000.
+    ("daily: MT 10000/50 -> income 50 only", daily_totals([(5_000, "UPI")], [], mt_profit(5_000, 0, 0), 5_000) == (5_000, 0, 5_000, 0, 5_000, 1)),
+    # Bill ₹500 / received ₹200: collection ₹200, due ₹300 (due is not a row).
+    ("daily: bill500/recv200 -> collection 200 due 300", daily_totals([(20_000, "CASH")], [], 0, 0)[0] == 20_000 and customer_due(50_000, 20_000) == 30_000),
+    # Quick entry: 10 xerox copies @ ₹2 = ₹20; cash ₹200 + UPI ₹300 - ₹100 exp = net ₹400.
+    ("daily: quick total 10x200=2000", quick_total(10, 200) == 2_000),
+    ("daily: cash200+upi300-exp100 net400", daily_totals([(20_000, "CASH"), (30_000, "UPI")], [(10_000, "CASH")], 0, 0) == (50_000, 20_000, 30_000, 10_000, 40_000, 3)),
+    # Empty day is all zero (app starts empty, no demo numbers).
+    ("daily: empty day is zero", daily_totals([], [], 0, 0) == (0, 0, 0, 0, 0, 0)),
 ]
 for name, ok in cases:
     print(("PASS " if ok else "FAIL ") + name)

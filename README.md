@@ -47,12 +47,37 @@ the same accounting rules.
   koi record nahi hai". The Reports AI Insight stays in Reports.
   **Still NOT compiled: this VM has no JDK.** First compile + unit tests
   must happen in Android Studio (`./gradlew testDebugUnitTest`).
+- **DAILY BUSINESS HUB (2026-11-26): the Daily Dhandha screen is now the
+  real central hub** (`ui/dailybusiness/DailyBusinessScreen` +
+  `DailyBusinessViewModel`, route `Routes.DAILY_BUSINESS` — same route/nav
+  entry as before, it used to just reuse Reports). Total / Cash / UPI
+  Collection, Expenses, Net Earnings, Service-wise Collection (Xerox,
+  Money Transfer Commission, Smart Card, Passport Size Photo, Printing,
+  Scanning, Document Work, Other Services — always shown, ₹0 when empty),
+  Total Transactions, Recent Entries, date ‹ › + Today/Week/Month/Year
+  filters, service filter chips, tap a service row to open its module.
+  Quick Daily Entry form (date + time, service category, description,
+  quantity, rate, total, Cash/UPI/Other, direct expense, notes) saves ONE
+  row in the shared `transactions` table — Daily Business DERIVES its
+  totals from that table, so module entries appear here automatically and
+  nothing is ever written twice. MT principal is never income (only the
+  commission row), dues are never collection. New first-class services:
+  Passport Size Photo + Scanning (modules, Services grid, drawer,
+  Customization Studio, CSC + Printing Shop setups). Custom services:
+  add/rename/delete in Customization Studio (SettingsStore); they appear
+  as Quick Entry categories and in the summary. Reports gained a Daily
+  Business tab (combined + service-wise, same period pills, CSV share).
+  Also fixed a real double-count found while building this: Dashboard and
+  Reports added the MT commission twice (once as the commission income
+  row, once as MT profit) — now counted exactly once.
 - **JVM-free verification done (2026-11-26):** `docs/verify-android.py`
-  passes — brace/paren balance on all 40 Kotlin files, every project
+  passes — brace/paren balance on all 47 Kotlin files, every project
   import resolves to a defined symbol, every `Routes.*` reference exists,
   every screen the NavHost uses is defined, no demo numbers/names in
-  code, no WebView, no Double money maths; the 8 AccountingEngine test
-  cases pass in a Python mirror. The test file was fixed where it called
+  code, no WebView, no Double money maths; the 14 AccountingEngine test
+  cases pass in a Python mirror, including 6 Daily Business integration
+  cases (module job appears once; MT ₹10,000/₹50 → income ₹50;
+  bill ₹500/received ₹200 → collection ₹200, due ₹300). The test file was fixed where it called
   APIs the engine never had (`isInternalTransfer`, 2-arg `serviceProfit`)
   — the engine is authoritative, the test now uses `internalTransfer`
   (delta pair) and the 3-arg `serviceProfit`.
@@ -93,21 +118,26 @@ the same accounting rules.
   without a key), `Chatbot` (business snapshot + built-in responder —
   every figure from the real ledgers, paise as `Long`),
   `GeminiChatbotClient` (free-tier Gemini summary of those same facts),
-  `Branding` (single place for the app name: `BizKhata`).
+  `Branding` (single place for the app name: `BizKhata`),
+  `DailyBusiness` (Daily Business service lists + the MT commission label
+  constant — one spelling used by the repository, the ViewModel, Reports
+  and the Dashboard).
 - `data/` — Room (`bizkhata.db`, v2): entities, DAOs, `AppDatabase`,
   `SettingsStore` (DataStore: language, theme, active profile, PIN hash,
-  disabled modules), `Repositories` (transactional: receive payment, add
+  disabled modules, custom services), `Repositories` (transactional: receive payment, add
   expense, internal transfer, money transfer, pay agent, soft-delete/
   restore job, agent assignment with the PAN guard, job status changes,
-  direct Cash/UPI book entries).
+  direct Cash/UPI book entries, quick daily entries — one income row +
+  optional direct-expense rows in a single transaction).
 - `ui/` — one screen per module, navy + purple design (see Status):
   Dashboard (period pills + donut), drawer + bottom nav shell, Cash Book,
-  UPI Book, Money Transfer (3 tabs + daily closing), Services grid,
-  Service Jobs (PAN, Aadhaar, Voter ID, Ayushman, Xerox, Printing, Smart
-  Card, Document Work), Customer Khata + Customer Profile, Agents + Agent
+  UPI Book, Money Transfer (3 tabs + daily closing), Daily Business hub
+  (Quick Daily Entry + Combined Service Summary + Recent Entries),
+  Services grid, Service Jobs (PAN, Aadhaar, Voter ID, Ayushman, Xerox, Printing, Smart
+  Card, Passport Size Photo, Scanning, Document Work), Customer Khata + Customer Profile, Agents + Agent
   Profile, Expenses + Machine Maintenance, Receipt Generator, Reports
-  (bar chart), Difference Finder, Audit Log, Recycle Bin, Customization
-  Studio, Settings, Auth (mobile + PIN), Language, Category Pick,
+  (bar chart, Daily Business tab), Difference Finder, Audit Log, Recycle Bin, Customization
+  Studio (module toggles + your own services), Settings, Auth (mobile + PIN), Language, Category Pick,
   Chatbot / AI Assistant (message bubbles, suggestion chips, loading +
   Gemini-failure fallback states, key entry in Settings).
 - `navigation/` — `Routes`, one route per module.
@@ -138,6 +168,10 @@ Implemented (code written, needs a first compile + Phase G run):
   cost; Receipts with unique numbers; Reports with CSV share export;
   Difference Finder (suggests only, never auto-modifies); Settings with
   Recycle Bin + restore; audit logs written on payment/expense/transfer.
+- Daily Business hub: derived totals (collection Cash/UPI, expenses, net
+  earnings, service-wise, recent entries), Quick Daily Entry form, new
+  Passport Size Photo + Scanning services, custom services in
+  Customization Studio, Daily Business tab in Reports.
 
 Still to do (see `DECISIONS.md` for the full list):
 - First compile in Android Studio + fix any errors; run
@@ -149,10 +183,10 @@ Still to do (see `DECISIONS.md` for the full list):
   Staff, Shop, Misc — original chat turn 18). Per-transfer charges are
   recorded; a dedicated MT expense list is remaining work.
 - Custom Module & Category Builder UI (original chat: compulsory) — the
-  category setups exist (`domain/CategorySetup.kt`) and the owner can
-  add/customise services; the in-app builder screen for adding a service
-  / income category / expense category / custom fields and enabling or
-  disabling modules is remaining work.
+  category setups exist (`domain/CategorySetup.kt`); the owner can
+  add/rename/delete his own services in Customization Studio (they appear
+  in Daily Business). Still remaining: the in-app builder for income /
+  expense categories, custom fields and custom pages.
 - Gujarati language (mentioned once in the original chat) — possible
   later addition, not in v1; English/Hindi/Hinglish are implemented.
 - Document upload per customer (file storage) — the web app has it;

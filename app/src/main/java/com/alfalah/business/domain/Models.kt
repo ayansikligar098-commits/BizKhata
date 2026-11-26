@@ -22,6 +22,10 @@ enum class ServiceType(val label: String) {
     XEROX("Xerox"),
     PRINTING("Printing"),
     SMART_CARD("Smart Card"),
+    /** Passport-size photos — a first-class daily service (Daily Business brief). */
+    PASSPORT_PHOTO("Passport Size Photo"),
+    /** Scanning — a first-class daily service (Daily Business brief). */
+    SCANNING("Scanning"),
     DOCUMENT_WORK("Document Work"),
     MONEY_TRANSFER("Money Transfer"),
     OTHER("Other Service")
