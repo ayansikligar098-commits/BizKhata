@@ -34,7 +34,7 @@ import {
 } from './accounting';
 import { formatINR } from './money';
 import type { AppState, BusinessProfile } from './types';
-import { todayISO } from './types';
+import { todayISO, addDaysISO } from './types';
 import { detectLanguage, normalizeMultilingual, replyIn, type AiLangCode, type ReplyKey } from './languages';
 
 /** Common Devanagari words → Latin equivalents, so Hinglish written in
@@ -114,14 +114,16 @@ export interface DateRange {
 }
 
 function shiftISO(iso: string, days: number): string {
-  const d = new Date(`${iso}T00:00:00`);
-  d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  // Pure ISO arithmetic — never `new Date(iso + 'T00:00:00')`, which
+  // parses as LOCAL midnight and shifts a day on toISOString() (UTC).
+  return addDaysISO(iso, days);
 }
 
 function monthRange(ym: string): { start: string; end: string } {
   const [y, m] = ym.split('-').map(Number);
-  const end = new Date(y, m, 0).toISOString().slice(0, 10);
+  // Date.UTC (not local `new Date(y, m, 0)`): local midnight converts
+  // back a day early in UTC+ zones, so November ended on the 29th.
+  const end = new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
   return { start: `${ym}-01`, end };
 }
 

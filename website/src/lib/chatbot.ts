@@ -17,7 +17,7 @@ import {
   totalCustomerDuePaise,
 } from './accounting';
 import { formatINR } from './money';
-import { todayISO } from './types';
+import { todayISO, addDaysISO } from './types';
 import type { AppState, BusinessProfile, Method } from './types';
 import type { AssistantAction, FoundRecord } from './assistant';
 import { findAssistantTargets } from './assistant';
@@ -401,9 +401,10 @@ export function extractDate(raw: string, today: string = todayISO()): string {
     if (/^\d{4}-\d{2}-\d{2}$/.test(iso) && iso <= today) return iso;
   }
   if (/\b(kal|yesterday)\b/.test(s)) {
-    const d = new Date(`${today}T00:00:00`);
-    d.setDate(d.getDate() - 1);
-    return d.toISOString().slice(0, 10);
+    // Pure ISO arithmetic — never `new Date(today + 'T00:00:00')`,
+    // which parses as LOCAL midnight and shifts a day when converted
+    // back with toISOString() (UTC).
+    return addDaysISO(today, -1);
   }
   return today;
 }

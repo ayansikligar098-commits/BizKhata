@@ -48,7 +48,15 @@ const know = require(path.join(outDir, 'knowledge.js'));
 const asst = require(path.join(outDir, 'assistant.js'));
 const lang = require(path.join(outDir, 'languages.js'));
 
-const TODAY = new Date().toISOString().slice(0, 10);
+// Local calendar date — the app dates everything in the device's
+// local timezone, never UTC (UTC dates run a day early 00:00–05:30 IST).
+function localISO(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+const TODAY = localISO(new Date());
 
 function profile(id, name, services) {
   return {

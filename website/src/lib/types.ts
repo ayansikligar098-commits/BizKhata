@@ -346,6 +346,23 @@ export function uid(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** Today's date as YYYY-MM-DD in the DEVICE'S LOCAL timezone.
+ *  (Was: new Date().toISOString() — the UTC date — so between 00:00
+ *  and 05:30 IST the app dated everything "yesterday" and "kal"
+ *  resolved a day early. A shop's "today" is its local calendar day.) */
 export function todayISO(): string {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/** Shift a YYYY-MM-DD date by N days using pure UTC arithmetic on the
+ *  ISO string — never local-time parsing, so the result is identical
+ *  in every timezone (no local-midnight → UTC conversion, which
+ *  shifts the date by the timezone offset). */
+export function addDaysISO(iso: string, days: number): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d) + days * 86400000).toISOString().slice(0, 10);
 }

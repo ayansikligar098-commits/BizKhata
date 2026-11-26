@@ -31,8 +31,17 @@ const know = require(path.join(outDir, 'knowledge.js'));
 const asst = require(path.join(outDir, 'assistant.js'));
 const acct = require(path.join(outDir, 'accounting.js'));
 
-const TODAY = new Date().toISOString().slice(0, 10);
-const YDAY = new Date(Date.now() - 864e5).toISOString().slice(0, 10);
+// Local calendar dates — the app dates everything in the device's
+// local timezone, never UTC (UTC dates run a day early 00:00–05:30 IST).
+function localISO(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+const types = require(path.join(outDir, 'types.js'));
+const TODAY = localISO(new Date());
+const YDAY = types.addDaysISO(TODAY, -1);
 
 function profile(id, name, services) {
   return {
@@ -135,6 +144,7 @@ run('payment mode', 'missing mode asks, never invents', () => P('Aaj 500 rupaye 
 // --- Date interpretation ---
 run('date interpretation', 'aaj = today', () => isAction(P('Aaj Xerox 300 cash')) && P('Aaj Xerox 300 cash').action.date === TODAY);
 run('date interpretation', 'kal = yesterday', () => P('Kal Xerox 300 cash hua').action.date === YDAY);
+run('date interpretation', 'addDaysISO boundaries (month/year, timezone-proof)', () => types.addDaysISO('2026-03-01', -1) === '2026-02-28' && types.addDaysISO('2026-01-01', -1) === '2025-12-31' && types.addDaysISO('2026-11-30', 1) === '2026-12-01' && types.addDaysISO('2026-02-28', 1) === '2026-03-01' && types.addDaysISO('2026-11-27', 0) === '2026-11-27');
 run('date interpretation', 'explicit dd/mm/yyyy', () => P('Xerox 300 cash 25/11/2026').action.date === '2026-11-25');
 run('date interpretation', 'no date defaults to today', () => P('Xerox 300 cash').action.date === TODAY);
 run('date interpretation', 'yesterday summary uses yesterday', () => {

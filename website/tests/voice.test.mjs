@@ -47,7 +47,15 @@ const acct = require(path.join(outDir, 'accounting.js'));
 const cai = require(path.join(outDir, 'conversation-ai.js'));
 const voice = require(path.join(outDir, 'voice.js'));
 
-const TODAY = new Date().toISOString().slice(0, 10);
+// Local calendar date — the app dates everything in the device's
+// local timezone, never UTC (UTC dates run a day early 00:00–05:30 IST).
+function localISO(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+const TODAY = localISO(new Date());
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function profile(id, name, services) {

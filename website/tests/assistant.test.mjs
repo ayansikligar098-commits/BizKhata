@@ -40,8 +40,17 @@ function check(name, actual, expected) {
   }
 }
 
-const TODAY = new Date().toISOString().slice(0, 10);
-const YDAY = new Date(Date.now() - 864e5).toISOString().slice(0, 10);
+// Local calendar dates — the app dates everything in the device's
+// local timezone, never UTC (UTC dates run a day early 00:00–05:30 IST).
+function localISO(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+const types = require(path.join(outDir, 'types.js'));
+const TODAY = localISO(new Date());
+const YDAY = types.addDaysISO(TODAY, -1);
 
 function profile(id, name) {
   return {
