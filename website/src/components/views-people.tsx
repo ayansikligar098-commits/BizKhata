@@ -236,7 +236,8 @@ export function ExpensesView({ ctx }: { ctx: Ctx }) {
       s.expenses.push(ex);
       s.cashTxns.push({
         id: uid('txn'), profileId: pid, kind: 'out', method, amountPaise: amount,
-        category: `Expense — ${cat}`, note: description || cat, date, createdAt: new Date().toISOString(),
+        category: `Expense — ${cat}`, note: description || cat, date,
+        expenseId: ex.id, createdAt: new Date().toISOString(),
       });
     }, [auditEntry(pid, 'create', 'Expense', ex.id, '', `${cat} ${formatINR(amount)} (${method})`)]);
     setShowForm(false); setAmount(0); setDescription(''); setVendor(''); setCustomCat(''); setError('');

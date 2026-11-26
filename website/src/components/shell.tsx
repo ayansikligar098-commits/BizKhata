@@ -98,6 +98,7 @@ const REPORT_SUBS: { type: string; label: string }[] = [
   { type: 'expenses', label: 'Expense Report' },
   { type: 'profit', label: 'Profit Report' },
   { type: 'service-wise', label: 'Service-wise Report' },
+  { type: 'daily-business', label: 'Daily Business Report' },
 ];
 
 const SETTINGS_SUBS: { section: string; label: string }[] = [
@@ -168,7 +169,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const hits: SearchHit[] = q
     ? [
         ...state.customers.filter((c) => c.profileId === pid && (c.name.toLowerCase().includes(q) || c.mobile.includes(q)))
-          .slice(0, 3).map((c): SearchHit => ({ kind: 'Customer', label: `${c.name} • ${c.mobile}`, path: `/customers/${c.id}` })),
+          .slice(0, 3).map((c): SearchHit => ({ kind: 'Customer', label: `${c.name} • ${c.mobile}`, path: `/customers?id=${c.id}` })),
         ...jobs.filter((j) => j.customerName.toLowerCase().includes(q) || j.service.toLowerCase().includes(q) || j.refNo.toLowerCase().includes(q) || j.mobile.includes(q))
           .slice(0, 3).map((j): SearchHit => ({ kind: 'Job', label: `${j.service} — ${j.customerName}${j.refNo ? ` • ${j.refNo}` : ''}`, path: `/services/${serviceSlug(j.service)}` })),
         ...state.receipts.filter((r) => r.profileId === pid && (r.number.toLowerCase().includes(q) || r.customerName.toLowerCase().includes(q)))

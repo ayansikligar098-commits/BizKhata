@@ -2,7 +2,7 @@
  * BizKhata persistent session layer (website, local-first deployment).
  *
  * ARCHITECTURE — read before changing:
- * The website is a Next.js static export on Cloudflare Pages (free tier).
+ * The website is a Next.js static export on Cloudflare Pages (free hosting).
  * There is NO server database and NO server-side user store in this
  * deployment, so there is no server that could validate a session today.
  * A full server-side session layer (Pages Functions + KV/D1 session store +

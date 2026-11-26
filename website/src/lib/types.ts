@@ -37,6 +37,10 @@ export interface BusinessProfile {
   disabledModules: string[];
   /** Dashboard cards hidden by the owner. */
   hiddenCards: string[];
+  /** One-time migration flag: 'Passport Size Photo' + 'Scanning' added to
+   *  an existing CSC profile's service list (new profiles get them from the
+   *  category defaults). */
+  servicesV2Migrated?: boolean;
   address: string;
   mobile: string;
   /** Opening balances (paise). Everything else is derived from transactions. */
@@ -46,7 +50,6 @@ export interface BusinessProfile {
   receiptCounter: number;
   language: Lang;
   theme: Theme;
-  geminiKey: string;
   createdAt: string;
 }
 
@@ -73,6 +76,43 @@ export interface Job {
   updatedAt: string;
 }
 
+/**
+ * Quick Daily Business entry — one small daily sale/service that does not
+ * need a full job + customer record (Xerox, Printing, Scanning, Passport
+ * Size Photo, Smart Card, Document Work, ...).
+ * ONE real transaction = ONE entry in the books: a Cash/UPI entry writes
+ * exactly one CashTxn (kind 'in', linked by dailyEntryId) so Cash/UPI
+ * balances move once and the entry is visible in Daily Business, the
+ * Cash/UPI Book and Reports without ever being counted twice.
+ * Payment mode 'other' means the money was NOT collected yet (credit/due):
+ * no CashTxn is written and the amount counts as due, never as collection.
+ */
+export type DailyEntryMethod = 'cash' | 'upi' | 'other';
+
+export interface DailyEntry {
+  id: string;
+  profileId: string;
+  service: string;
+  description: string;
+  /** Number of units (pages, photos, copies, ...). Integer. */
+  quantity: number;
+  /** Price per unit (paise). */
+  ratePaise: number;
+  /** Total billed = quantity * ratePaise (integer paise, never float). */
+  totalPaise: number;
+  method: DailyEntryMethod;
+  /** Direct expense for this entry, if any (paise) — e.g. paper/ink used.
+   *  Recorded as an Expense + one CashTxn 'out' (linked by dailyEntryId),
+   *  so it is deducted exactly once. */
+  expensePaise: number;
+  /** How the direct expense was paid (only used when expensePaise > 0). */
+  expenseMethod: Method;
+  date: string; // ISO date yyyy-mm-dd
+  time: string; // HH:mm
+  notes: string;
+  createdAt: string;
+}
+
 export interface CashTxn {
   id: string;
   profileId: string;
@@ -86,6 +126,15 @@ export interface CashTxn {
   /** For transfers: the other side ('cash' <-> 'upi'). */
   transferTo?: Method;
   jobId?: string;
+  /** Quick Daily Business entry this transaction belongs to (if any).
+   *  A daily entry writes exactly one 'in' CashTxn with this link, so the
+   *  Daily Business hub can attribute it to its service without ever
+   *  counting the same money twice (never job + txn). */
+  dailyEntryId?: string;
+  /** Expense record this 'out' transaction pays for (if any). An 'out'
+   *  CashTxn with an expenseId is the same money as that Expense record —
+   *  reports must count one of them, never both. */
+  expenseId?: string;
   createdAt: string;
 }
 
@@ -172,6 +221,8 @@ export interface Expense {
   /** Service this cost belongs to (for accurate service profit). */
   service: string;
   notes: string;
+  /** Quick Daily Business entry this expense belongs to (if any). */
+  dailyEntryId?: string;
   createdAt: string;
 }
 
@@ -237,6 +288,8 @@ export interface AppState {
   profiles: BusinessProfile[];
   activeProfileId: string | null;
   jobs: Job[];
+  /** Quick Daily Business entries (small daily sales, no full job). */
+  dailyEntries: DailyEntry[];
   cashTxns: CashTxn[];
   mtFunds: MtFund[];
   mtTransfers: MtTransfer[];
@@ -249,6 +302,10 @@ export interface AppState {
   receipts: Receipt[];
   audit: AuditEntry[];
   recycle: RecycleItem[];
+  /** Idempotency keys of assistant actions already executed. A repeated
+   *  key is rejected, so a retry/double-tap can never duplicate a
+   *  financial transaction. */
+  executedActionKeys: string[];
 }
 
 export const EMPTY_STATE: AppState = {
@@ -256,6 +313,7 @@ export const EMPTY_STATE: AppState = {
   profiles: [],
   activeProfileId: null,
   jobs: [],
+  dailyEntries: [],
   cashTxns: [],
   mtFunds: [],
   mtTransfers: [],
@@ -268,6 +326,7 @@ export const EMPTY_STATE: AppState = {
   receipts: [],
   audit: [],
   recycle: [],
+  executedActionKeys: [],
 };
 
 export function uid(prefix: string): string {

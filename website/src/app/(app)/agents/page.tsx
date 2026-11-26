@@ -1,18 +1,31 @@
 'use client';
-import { usePathname } from 'next/navigation';
+import { Suspense } from 'react';
+import { usePathname, useSearchParams } from 'next/navigation';
 import { useApp } from '@/lib/app-context';
 import { AgentsView } from '@/components/views-people';
 import { AgentProfileView } from '@/components/views-profiles';
 
 /**
- * /agents — the list. A direct deep link /agents/<id> is served by the
- * Pages rewrite (see public/_redirects) through this same page, so the
- * pathname decides: an id segment renders that agent's profile.
+ * /agents — the list. A profile opens as /agents?id=<id> (query param):
+ * the site is a static export, so /agents/<id> has no prerendered page
+ * and client navigation to it 404s. The query form always serves this
+ * page's HTML and renders the profile. Old /agents/<id> deep links
+ * (served through the Pages rewrite in public/_redirects) still work via
+ * the pathname fallback below.
  */
-export default function Page() {
+function PageInner() {
   const app = useApp();
   const pathname = usePathname();
-  const m = pathname?.match(/^\/agents\/([^/]+)\/?$/);
-  if (m) return <AgentProfileView ctx={app} agentId={m[1]} />;
+  const search = useSearchParams();
+  const id = search?.get('id') || pathname?.match(/^\/agents\/([^/]+)\/?$/)?.[1] || null;
+  if (id) return <AgentProfileView ctx={app} agentId={id} />;
   return <AgentsView ctx={app} />;
+}
+
+export default function Page() {
+  return (
+    <Suspense>
+      <PageInner />
+    </Suspense>
+  );
 }

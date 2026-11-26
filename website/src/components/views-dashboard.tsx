@@ -6,15 +6,13 @@ import {
   balancesPaise,
   mtProfitPaise,
   netProfitPaise,
-  serviceProfitPaise,
   totalCustomerDuePaise,
 } from '@/lib/accounting';
 import { t } from '@/lib/i18n';
 import type { Job } from '@/lib/types';
 import { todayISO } from '@/lib/types';
-import { Btn, Card, Empty, Stat, BarChart, CHART_COLORS, DonutChart, LineChart, formatDate, initials, statusPill, type Ctx } from './ui';
-import { exportCSV } from '@/lib/store';
-import { getGeminiInsight, geminiEnabled } from '@/lib/gemini';
+import { Btn, Card, Empty, Stat, CHART_COLORS, DonutChart, LineChart, formatDate, initials, statusPill, type Ctx } from './ui';
+import { getAIInsights } from '@/lib/ai';
 
 type Period = 'today' | 'week' | 'month' | 'year';
 
@@ -57,6 +55,8 @@ const QUICK_SERVICES: { service: string; label: string; bg: string; fg: string }
   { service: 'Ayushman Card', label: 'Ayushman', bg: '#e3f8f1', fg: '#007a5e' },
   { service: 'Xerox', label: 'Xerox', bg: '#fdeef6', fg: '#b02a6b' },
   { service: 'Printing', label: 'Printing', bg: '#f1eafe', fg: '#6c3fd4' },
+  { service: 'Passport Size Photo', label: 'Passport Photo', bg: '#e8f6fd', fg: '#0b6fa5' },
+  { service: 'Scanning', label: 'Scanning', bg: '#eef7e8', fg: '#4a7d0b' },
 ];
 
 export function DashboardView({ ctx }: { ctx: Ctx }) {
@@ -90,14 +90,24 @@ export function DashboardView({ ctx }: { ctx: Ctx }) {
   const pExp = expenses.filter((e) => inRange(e.date, range));
   const pMt = mtT.filter((m) => inRange(m.date, range));
   const pMtE = mtE.filter((m) => inRange(m.date, range));
-  const profit = netProfitPaise(pJobs, pExp, pMt, pMtE);
+  /** Quick daily entries collected in a range (Cash/UPI only — 'other'
+   *  mode is credit, never income). Their direct expenses already sit in
+   *  the Expense records, so they are deducted exactly once. */
+  const entryCollectedIn = (r: { start: string; end: string }) =>
+    state.dailyEntries
+      .filter((e) => e.profileId === pid && e.method !== 'other' && inRange(e.date, r))
+      .reduce((s, e) => s + e.totalPaise, 0);
+  const profit = netProfitPaise(pJobs, pExp, pMt, pMtE) + entryCollectedIn(range);
   const profitPrev = netProfitPaise(
     jobs.filter((j) => inRange(j.date, prev)),
     expenses.filter((e) => inRange(e.date, prev)),
     mtT.filter((m) => inRange(m.date, prev)),
     mtE.filter((m) => inRange(m.date, prev)),
-  );
-  const due = totalCustomerDuePaise(jobs);
+  ) + entryCollectedIn(prev);
+  // Customer due: job dues + quick daily entries taken on credit ('other'
+  // mode) — both are money not yet received, never collection.
+  const quickDue = state.dailyEntries.filter((e) => e.profileId === pid && e.method === 'other').reduce((s, e) => s + e.totalPaise, 0);
+  const due = totalCustomerDuePaise(jobs) + quickDue;
   const payable = agents.reduce((s, a) => s + agentPayablePaise(a, jobs), 0);
   const mtProfit = mtProfitPaise(mtT, mtE);
   const lang = profile.language;
@@ -116,10 +126,22 @@ export function DashboardView({ ctx }: { ctx: Ctx }) {
     chartExpenses.push(txns.filter((x) => x.date === iso && x.kind === 'out').reduce((s, x) => s + x.amountPaise, 0) / 100);
   }
 
-  // --- Service-wise income donut ---
+  // --- Service-wise income donut: jobs + quick daily entries + MT commission
+  // (one transaction counted once — entries are Cash/UPI money, commission
+  // is MT earnings, never the principal).
   const donutJobs = donutRange === 'month' ? jobs.filter((j) => j.date.slice(0, 7) === today.slice(0, 7)) : jobs;
+  const donutEntries = (donutRange === 'month'
+    ? state.dailyEntries.filter((e) => e.profileId === pid && e.date.slice(0, 7) === today.slice(0, 7))
+    : state.dailyEntries.filter((e) => e.profileId === pid)
+  ).filter((e) => e.method !== 'other');
+  const donutMt = (donutRange === 'month'
+    ? mtT.filter((m) => m.date.slice(0, 7) === today.slice(0, 7))
+    : mtT
+  ).filter((m) => m.status !== 'Failed');
   const byService = new Map<string, number>();
   for (const j of donutJobs) byService.set(j.service, (byService.get(j.service) || 0) + j.receivedPaise);
+  for (const e of donutEntries) byService.set(e.service, (byService.get(e.service) || 0) + e.totalPaise);
+  for (const m of donutMt) byService.set('Money Transfer Commission', (byService.get('Money Transfer Commission') || 0) + m.commissionPaise);
   const sorted = [...byService.entries()].sort((a, b) => b[1] - a[1]);
   const top5 = sorted.slice(0, 5);
   const othersTotal = sorted.slice(5).reduce((s, [, v]) => s + v, 0);
@@ -139,14 +161,19 @@ export function DashboardView({ ctx }: { ctx: Ctx }) {
   const mtPending = mtT.filter((m) => m.status === 'Pending');
   const mtSentTotal = mtT.filter((m) => m.status !== 'Failed').reduce((s, m) => s + m.amountPaise, 0);
 
-  const [insight, setInsight] = React.useState('');
-  const [insightBusy, setInsightBusy] = React.useState(false);
-  const aiOn = geminiEnabled(state);
+  const [insights, setInsights] = React.useState<string[]>([]);
 
-  async function askAi() {
-    if (!aiOn) return;
-    setInsightBusy(true);
-    const res = await getGeminiInsight(profile.geminiKey, {
+  function askAi() {
+    const thisYm = today.slice(0, 7);
+    const prevYm = (() => {
+      const [y, m] = thisYm.split('-').map(Number);
+      const d = new Date(y, m - 2, 1);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    })();
+    const monthIn = txns.filter((x) => x.kind === 'in' && x.date.slice(0, 7) === thisYm).reduce((s, x) => s + x.amountPaise, 0);
+    const prevMonthIn = txns.filter((x) => x.kind === 'in' && x.date.slice(0, 7) === prevYm).reduce((s, x) => s + x.amountPaise, 0);
+    const biggestDue = [...jobs].map((j) => ({ name: j.customerName, due: Math.max(0, j.totalPaise - j.receivedPaise) })).filter((d) => d.due > 0).sort((a, b) => b.due - a.due)[0];
+    setInsights(getAIInsights({
       incomePaise: pIn,
       expensePaise: pOut,
       profitPaise: profit,
@@ -154,9 +181,10 @@ export function DashboardView({ ctx }: { ctx: Ctx }) {
       agentPayablePaise: payable,
       mtCommissionPaise: mtT.reduce((s, m) => s + (m.status === 'Failed' ? 0 : m.commissionPaise), 0),
       topServices: sorted.map(([service, receivedPaise]) => ({ service, receivedPaise })),
-    });
-    setInsight(res.text);
-    setInsightBusy(false);
+      biggestDueName: biggestDue?.name,
+      monthIncomePaise: monthIn,
+      prevMonthIncomePaise: prevMonthIn,
+    }));
   }
 
   const visible = (card: string) => !profile.hiddenCards.includes(card);
@@ -207,7 +235,7 @@ export function DashboardView({ ctx }: { ctx: Ctx }) {
         {visible('netProfit') && <Stat tone="purple" icon="↗" label="Net Profit" value={formatINR(profit)} trend={{ pct: trendPct(profit, profitPrev) }} sub={`MT commission profit ${formatINR(mtProfit)}`} />}
         {visible('cashBalance') && <Stat tone="blue" icon="₹" label={t(lang, 'cashBalance')} value={formatINR(bal.cash)} />}
         {visible('upiBalance') && <Stat tone="indigo" icon="⌁" label={t(lang, 'upiBalance')} value={formatINR(bal.upi)} />}
-        {visible('customerDue') && <Stat tone="orange" icon="◉" label={t(lang, 'customerDue')} value={formatINR(due)} sub={`${dueCustomers.size} customer${dueCustomers.size === 1 ? '' : 's'} owe you`} />}
+        {visible('customerDue') && <Stat tone="orange" icon="◉" label={t(lang, 'customerDue')} value={formatINR(due)} sub={`${dueCustomers.size} customer${dueCustomers.size === 1 ? '' : 's'} owe you${quickDue > 0 ? ` • ${formatINR(quickDue)} quick-entry due` : ''}`} />}
         {visible('agentPayable') && <Stat tone="pink" icon="◉" label={t(lang, 'agentPayable')} value={formatINR(payable)} sub={`${payableAgents.length} agent${payableAgents.length === 1 ? '' : 's'} to pay — separate from due`} />}
       </div>
 
@@ -284,7 +312,7 @@ export function DashboardView({ ctx }: { ctx: Ctx }) {
         <Card title="Pending Payments" right={due > 0 || payable > 0 ? <button className="link-btn" onClick={() => ctx.go?.('khata')}>View All →</button> : undefined}>
           <button className="pending-row" onClick={() => ctx.go?.('khata')}>
             <span className="row-ico" style={{ background: 'var(--purple-soft)' }}>◉</span>
-            <span><span className="pending-title">Customer Due</span><br /><span className="pending-sub">{dueCustomers.size} customer{dueCustomers.size === 1 ? '' : 's'} • {formatINR(due)}</span></span>
+            <span><span className="pending-title">Customer Due</span><br /><span className="pending-sub">{dueCustomers.size} customer{dueCustomers.size === 1 ? '' : 's'} • {formatINR(due)}{quickDue > 0 ? ` (incl. ${formatINR(quickDue)} quick-entry due)` : ''}</span></span>
             <span className="pending-chev">›</span>
           </button>
           <button className="pending-row" onClick={() => ctx.go?.('agents')}>
@@ -317,116 +345,15 @@ export function DashboardView({ ctx }: { ctx: Ctx }) {
         </Card>
       </div>
 
-      <Card title="AI Insight (Gemini — free tier)">
-        {!aiOn ? (
-          <p>
-            AI is OFF. Add your own free Gemini API key in Settings to get short business
-            insights here. The app works fully without AI — nothing is sent anywhere.
-          </p>
-        ) : (
-          <div>
-            <Btn onClick={askAi} disabled={insightBusy}>{insightBusy ? 'Thinking…' : 'Get AI Insight'}</Btn>
-            {insight && <p style={{ marginTop: 12, whiteSpace: 'pre-wrap' }}>{insight}</p>}
-          </div>
-        )}
-      </Card>
-    </div>
-  );
-}
-
-export function DailyDhandhaView({ ctx }: { ctx: Ctx }) {
-  const { state, profile } = ctx;
-  const pid = profile.id;
-  const [period, setPeriod] = React.useState<'today' | 'week' | 'month' | 'year'>('today');
-  const jobs = state.jobs.filter((j) => j.profileId === pid);
-  const expenses = state.expenses.filter((e) => e.profileId === pid);
-  const mtT = state.mtTransfers.filter((m) => m.profileId === pid);
-  const mtE = state.mtExpenses.filter((m) => m.profileId === pid);
-
-  const inRange = (d: string) => {
-    const today = todayISO();
-    if (period === 'today') return d === today;
-    if (period === 'week') return d >= new Date(Date.now() - 6 * 864e5).toISOString().slice(0, 10);
-    if (period === 'month') return d.slice(0, 7) === today.slice(0, 7);
-    return d.slice(0, 4) === today.slice(0, 4);
-  };
-  const pj = jobs.filter((j) => inRange(j.date));
-  const pe = expenses.filter((e) => inRange(e.date));
-  const pmt = mtT.filter((m) => inRange(m.date));
-  const pmte = mtE.filter((m) => inRange(m.date));
-  const billing = pj.reduce((s, j) => s + j.totalPaise, 0);
-  const received = pj.reduce((s, j) => s + j.receivedPaise, 0);
-  const agentCharges = pj.reduce((s, j) => s + j.agentChargePaise, 0);
-  const expTotal = pe.reduce((s, e) => s + e.amountPaise, 0);
-  const mtProfit = mtProfitPaise(pmt, pmte);
-  const profit = netProfitPaise(pj, pe, pmt, pmte);
-
-  const byService = new Map<string, { billing: number; received: number; profit: number }>();
-  for (const j of pj) {
-    const cur = byService.get(j.service) || { billing: 0, received: 0, profit: 0 };
-    const p = serviceProfitPaise(j.service, pj, pe);
-    byService.set(j.service, { billing: cur.billing + j.totalPaise, received: cur.received + j.receivedPaise, profit: p.profit });
-  }
-
-  return (
-    <div>
-      <div className="page-head">
-        <div className="pills">
-          {(['today', 'week', 'month', 'year'] as const).map((p) => (
-            <button key={p} className={period === p ? 'active' : ''} onClick={() => setPeriod(p)}>
-              {p === 'today' ? 'Today' : p === 'week' ? 'This Week' : p === 'month' ? 'This Month' : 'This Year'}
-            </button>
-          ))}
-        </div>
-        <Btn
-          kind="secondary"
-          onClick={() =>
-            exportCSV(`bizkhata-daily-${period}.csv`, ['Service', 'Billing (Rs)', 'Received (Rs)', 'Profit (Rs)'], [
-              ...[...byService.entries()].map(([s, v]) => [s, (v.billing / 100).toFixed(2), (v.received / 100).toFixed(2), (v.profit / 100).toFixed(2)]),
-              ['TOTAL', (billing / 100).toFixed(2), (received / 100).toFixed(2), (profit / 100).toFixed(2)],
-            ])
-          }
-        >
-          Export CSV
-        </Btn>
-      </div>
-      <p style={{ color: 'var(--muted)' }}>
-        Billing, actual received, and profit are different figures. Billing is what you charged;
-        received is what actually came in; profit is received minus agent charges and expenses.
-      </p>
-      <div className="grid grid-4" style={{ marginBottom: 16 }}>
-        <Stat label="Total Billing" value={formatINR(billing)} tone="blue" />
-        <Stat label="Actually Received" value={formatINR(received)} tone="green" />
-        <Stat label="Agent Charges" value={formatINR(agentCharges)} tone="orange" />
-        <Stat label="Direct Expenses" value={formatINR(expTotal)} tone="red" />
-        <Stat label="MT Commission Profit" value={formatINR(mtProfit)} tone="indigo" />
-        <Stat label="Net Profit" value={formatINR(profit)} tone="purple" />
-      </div>
-      {byService.size > 0 && (
-        <Card title="Per-Service Received">
-          <BarChart data={[...byService.entries()].map(([s, v]) => ({ label: s, value: v.received, valueLabel: formatINR(v.received) }))} />
-        </Card>
-      )}
-      <Card title="Per-Service Breakdown">
-        {byService.size === 0 ? (
-          <Empty text="No jobs in this period yet." />
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Service</th><th className="num">Billing</th><th className="num">Received</th><th className="num">Agent Charges</th><th className="num">Profit</th></tr></thead>
-              <tbody>
-                {[...byService.entries()].map(([s, v]) => (
-                  <tr key={s}>
-                    <td>{s}</td>
-                    <td className="num">{formatINR(v.billing)}</td>
-                    <td className="num">{formatINR(v.received)}</td>
-                    <td className="num">{formatINR(pj.filter((j) => j.service === s).reduce((a, j) => a + j.agentChargePaise, 0))}</td>
-                    <td className="num">{formatINR(v.profit)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      <Card title="AI Business Insights">
+        <p style={{ color: 'var(--muted)', marginTop: 0 }}>
+          BizKhata AI analyses your real records on this device — nothing is sent anywhere.
+        </p>
+        <Btn onClick={askAi}>Get AI Business Insights</Btn>
+        {insights.length > 0 && (
+          <ul style={{ marginTop: 12, paddingLeft: 18 }}>
+            {insights.map((tip, i) => <li key={i} style={{ marginBottom: 6 }}>{tip}</li>)}
+          </ul>
         )}
       </Card>
     </div>

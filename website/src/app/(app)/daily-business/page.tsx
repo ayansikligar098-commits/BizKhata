@@ -1,8 +1,8 @@
 'use client';
 import { useApp } from '@/lib/app-context';
-import { DailyDhandhaView } from '@/components/views-dashboard';
+import { DailyBusinessView } from '@/components/views-daily';
 
 export default function Page() {
   const app = useApp();
-  return <DailyDhandhaView ctx={app} />;
+  return <DailyBusinessView ctx={app} />;
 }

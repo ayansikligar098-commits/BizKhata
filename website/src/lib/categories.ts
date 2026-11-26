@@ -22,6 +22,8 @@ export const CATEGORIES: CategoryDef[] = [
       'Smart Card',
       'Xerox',
       'Printing',
+      'Passport Size Photo',
+      'Scanning',
       'Document Work',
     ],
     expenseCategories: [
@@ -115,6 +117,17 @@ export const CATEGORIES: CategoryDef[] = [
 ];
 
 export const CSC_SERVICES = CATEGORIES[0].services;
+
+/** Services added to CSC profiles after v1 (Daily Business redesign).
+ *  Existing profiles get them once via the servicesV2Migrated flag. */
+export const CSC_SERVICES_V2 = ['Passport Size Photo', 'Scanning'];
+
+/** Label used in the Daily Business hub for Money Transfer earnings.
+ *  Only commission ever appears here — never the transfer principal. */
+export const MT_COMMISSION_SERVICE = 'Money Transfer Commission';
+
+/** Fallback service for manual Cash/UPI Book income with no job or entry. */
+export const OTHER_SERVICES = 'Other Services';
 
 /** Services that must NEVER be assigned to an agent (done by ayan himself). */
 export const NON_OUTSOURCEABLE_SERVICES = ['PAN Card'];

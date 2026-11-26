@@ -1,7 +1,7 @@
 'use client';
 import React from 'react';
 import { usePathname, useRouter } from 'next/navigation';
-import { CATEGORIES } from '@/lib/categories';
+import { CATEGORIES, CSC_SERVICES_V2 } from '@/lib/categories';
 import { auditEntry, hashPin, loadState, recycleEntry, saveState } from '@/lib/store';
 import {
   accessMsLeft,
@@ -129,6 +129,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, [state, hydrated]);
 
+  React.useEffect(() => {
+    if (!hydrated) return;
+    // One-time migration for existing CSC profiles: add the new
+    // 'Passport Size Photo' + 'Scanning' services (new profiles get them
+    // from the category defaults). Flagged per profile so an owner who
+    // deliberately removes one is never forced to take it back.
+    setState((prev) => {
+      let changed = false;
+      const profiles = prev.profiles.map((p) => {
+        if (p.servicesV2Migrated || p.category !== CATEGORIES[0].name) return p;
+        changed = true;
+        const services = [...p.services];
+        for (const s of CSC_SERVICES_V2) if (!services.includes(s)) services.push(s);
+        return { ...p, services, servicesV2Migrated: true };
+      });
+      return changed ? { ...prev, profiles } : prev;
+    });
+  }, [hydrated]);
+
   // Silent auto-renewal while the app is open.
   React.useEffect(() => {
     if (authStatus !== 'authed') return;
@@ -188,11 +207,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }
 
   function openCustomer(id: string) {
-    router.push(`/customers/${id}`);
+    // Query-param profile link: the site is a static export, so
+    // /customers/<id> has no prerendered page (dynamicParams=false made
+    // client navigation 404). /customers?id=<id> always serves the list
+    // page's HTML, which renders the profile from the query.
+    router.push(`/customers?id=${id}`);
   }
 
   function openAgent(id: string) {
-    router.push(`/agents/${id}`);
+    router.push(`/agents?id=${id}`);
   }
 
   // ---------- auth (mobile + PIN, verified against the local PIN hash) ----------
@@ -259,7 +282,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       receiptCounter: 0,
       language: 'en',
       theme: 'light',
-      geminiKey: '',
+      servicesV2Migrated: true,
       createdAt: new Date().toISOString(),
     };
     setState((prev) => ({

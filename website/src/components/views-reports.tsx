@@ -2,7 +2,7 @@
 import React from 'react';
 import { useRouter } from 'next/navigation';
 import { formatINR } from '@/lib/money';
-import { agentPayablePaise, balancesPaise, mtClosingPaise, mtProfitPaise, netProfitPaise, serviceProfitPaise, totalCustomerDuePaise } from '@/lib/accounting';
+import { agentPayablePaise, balancesPaise, buildDailyRows, dailyBusinessSummary, mtClosingPaise, mtProfitPaise, netProfitPaise, serviceProfitPaise, totalCustomerDuePaise } from '@/lib/accounting';
 import { CATEGORIES, MT_EXPENSE_CATEGORIES } from '@/lib/categories';
 import { auditEntry, exportBackup, exportCSV } from '@/lib/store';
 import { t, LANG_OPTIONS } from '@/lib/i18n';
@@ -13,11 +13,12 @@ import { jobServices } from '@/lib/routes';
 
 /* ================= Reports (page 23) ================= */
 
-export function ReportsView({ ctx, tab: tabProp }: { ctx: Ctx; tab?: 'business' | 'service' | 'customer' | 'agent' | 'mt' | 'expenses' }) {
+export function ReportsView({ ctx, tab: tabProp }: { ctx: Ctx; tab?: 'business' | 'service' | 'customer' | 'agent' | 'mt' | 'expenses' | 'daily' }) {
   const { state, profile } = ctx;
   const pid = profile.id;
-  const [period, setPeriod] = React.useState<'today' | 'month' | 'year' | 'all'>('month');
-  const [tab, setTab] = React.useState<'business' | 'service' | 'customer' | 'agent' | 'mt' | 'expenses'>(tabProp || 'business');
+  const [period, setPeriod] = React.useState<'today' | 'week' | 'month' | 'year' | 'all'>('month');
+  const [tab, setTab] = React.useState<'business' | 'service' | 'customer' | 'agent' | 'mt' | 'expenses' | 'daily'>(tabProp || 'business');
+  const [dailyPage, setDailyPage] = React.useState(1);
   const router = useRouter();
 
   // Route-driven tab: /reports/<type> opens this tab.
@@ -25,9 +26,9 @@ export function ReportsView({ ctx, tab: tabProp }: { ctx: Ctx; tab?: 'business' 
 
   function selectTab(k: typeof tab) {
     setTab(k);
-    // Business / Service-wise / Expenses have their own URLs; Customer,
-    // Agent and Money Transfer tabs live on /reports.
-    const path = k === 'business' ? '/reports' : k === 'service' ? '/reports/service-wise' : k === 'expenses' ? '/reports/expenses' : null;
+    // Business / Service-wise / Expenses / Daily Business have their own
+    // URLs; Customer, Agent and Money Transfer tabs live on /reports.
+    const path = k === 'business' ? '/reports' : k === 'service' ? '/reports/service-wise' : k === 'expenses' ? '/reports/expenses' : k === 'daily' ? '/reports/daily-business' : null;
     if (path) router.push(path);
   }
   const jobs = state.jobs.filter((j) => j.profileId === pid);
@@ -42,9 +43,33 @@ export function ReportsView({ ctx, tab: tabProp }: { ctx: Ctx; tab?: 'business' 
   const inRange = (d: string) => {
     if (period === 'all') return true;
     if (period === 'today') return d === today;
+    if (period === 'week') return d >= new Date(Date.now() - 6 * 864e5).toISOString().slice(0, 10);
     if (period === 'month') return d.slice(0, 7) === today.slice(0, 7);
     return d.slice(0, 4) === today.slice(0, 4);
   };
+  // Daily Business summary for the selected period (same derivation as
+  // the /daily-business hub — one transaction counted exactly once).
+  const dailyRange = period === 'all'
+    ? { start: '0000-01-01', end: today }
+    : period === 'today'
+      ? { start: today, end: today }
+      : period === 'week'
+        ? { start: new Date(Date.now() - 6 * 864e5).toISOString().slice(0, 10), end: today }
+        : period === 'month'
+          ? { start: today.slice(0, 7) + '-01', end: today }
+          : { start: today.slice(0, 4) + '-01-01', end: today };
+  const dailySummary = dailyBusinessSummary({
+    start: dailyRange.start, end: dailyRange.end,
+    jobs, cashTxns: txns, dailyEntries: state.dailyEntries.filter((e) => e.profileId === pid),
+    expenses, mtTransfers: mtT, mtExpenses: mtE,
+  });
+  const dailyRows = buildDailyRows({
+    start: dailyRange.start, end: dailyRange.end,
+    jobs, cashTxns: txns, dailyEntries: state.dailyEntries.filter((e) => e.profileId === pid),
+    expenses, mtTransfers: mtT, mtExpenses: mtE,
+  });
+  const dailyPageRows = pageSlice(dailyRows, dailyPage, 8);
+  React.useEffect(() => { setDailyPage(1); }, [period]);
   const pj = jobs.filter((j) => inRange(j.date));
   const pe = expenses.filter((e) => inRange(e.date));
   const pmt = mtT.filter((m) => inRange(m.date));
@@ -86,15 +111,16 @@ export function ReportsView({ ctx, tab: tabProp }: { ctx: Ctx; tab?: 'business' 
     { title: 'Cash & UPI Report', sub: 'Balances and all transactions', action: () => exportCSV(`bizkhata-transactions-${period}.csv`, ['Date', 'Type', 'Category', 'Method', 'Amount (Rs)', 'Note'], txns.filter((x) => inRange(x.date)).map((x) => [x.date, x.kind, x.category, x.method, (x.amountPaise / 100).toFixed(2), x.note])), actionLabel: 'Export CSV' },
     { title: 'Money Transfer Report', sub: 'Transfers, commission and MT balance', action: () => exportCSV(`bizkhata-mt-${period}.csv`, ['Date', 'Receiver', 'Amount (Rs)', 'Commission (Rs)', 'Method', 'Status'], pmt.map((m) => [m.date, m.receiverName, (m.amountPaise / 100).toFixed(2), (m.commissionPaise / 100).toFixed(2), m.method, m.status])), actionLabel: 'Export CSV' },
     { title: 'Customer Due Report', sub: 'Who owes what, per customer', action: () => exportCSV(`bizkhata-due-${period}.csv`, ['Customer', 'Service', 'Due (Rs)'], jobs.filter((j) => j.totalPaise - j.receivedPaise > 0).map((j) => [j.customerName, j.service, ((j.totalPaise - j.receivedPaise) / 100).toFixed(2)])), actionLabel: 'Export CSV' },
+    { title: 'Daily Business Report', sub: 'Combined daily collection, expenses and earnings — quick entries, jobs and MT commission together', action: () => selectTab('daily'), actionLabel: 'Open →' },
   ];
 
   return (
     <div>
       <div className="page-head">
         <div className="pills">
-          {(['today', 'month', 'year', 'all'] as const).map((p) => (
+          {(['today', 'week', 'month', 'year', 'all'] as const).map((p) => (
             <button key={p} className={period === p ? 'active' : ''} onClick={() => setPeriod(p)}>
-              {p === 'today' ? 'Today' : p === 'month' ? 'This Month' : p === 'year' ? 'This Year' : 'All Time'}
+              {p === 'today' ? 'Today' : p === 'week' ? 'This Week' : p === 'month' ? 'This Month' : p === 'year' ? 'This Year' : 'All Time'}
             </button>
           ))}
         </div>
@@ -105,7 +131,7 @@ export function ReportsView({ ctx, tab: tabProp }: { ctx: Ctx; tab?: 'business' 
       </div>
 
       <div className="tabs" style={{ marginBottom: 14 }}>
-        {([['business', 'Business'], ['service', 'Service-wise'], ['customer', 'Customer'], ['agent', 'Agent'], ['mt', 'Money Transfer'], ['expenses', 'Expenses']] as const).map(([k, label]) => (
+        {([['business', 'Business'], ['daily', 'Daily Business'], ['service', 'Service-wise'], ['customer', 'Customer'], ['agent', 'Agent'], ['mt', 'Money Transfer'], ['expenses', 'Expenses']] as const).map(([k, label]) => (
           <button key={k} className={tab === k ? 'active' : ''} onClick={() => selectTab(k)}>{label}</button>
         ))}
       </div>
@@ -135,6 +161,92 @@ export function ReportsView({ ctx, tab: tabProp }: { ctx: Ctx; tab?: 'business' 
                 <span className="report-chev">{r.actionLabel} ›</span>
               </button>
             ))}
+          </Card>
+        </div>
+      )}
+
+      {tab === 'daily' && (
+        <div>
+          <Card title={`Daily Business Report — ${period === 'today' ? `Today (${formatDate(today)})` : period === 'week' ? 'This Week' : period === 'month' ? 'This Month' : period === 'year' ? 'This Year' : 'All Time'}`}>
+            <p style={{ color: 'var(--muted)', marginTop: 0 }}>
+              Combined daily, weekly, monthly and yearly business — quick entries, job payments,
+              Money Transfer commission and expenses together. One transaction is counted once;
+              MT principal is never income; due is never collection.
+            </p>
+            <div className="grid grid-4">
+              <Stat label="Total Collection" value={formatINR(dailySummary.totalCollection)} tone="green" sub={`Cash ${formatINR(dailySummary.cashCollection)} • UPI ${formatINR(dailySummary.upiCollection)} • MT commission ${formatINR(dailySummary.mtCommission)}`} />
+              <Stat label="Expenses" value={formatINR(dailySummary.expenses)} tone="red" sub={`Shop ${formatINR(dailySummary.shopExpenses)} • MT ${formatINR(dailySummary.mtExpensesTotal)}`} />
+              <Stat label="Net Earnings" value={formatINR(dailySummary.netEarnings)} tone="purple" />
+              <Stat label="Customer Due" value={formatINR(dailySummary.customerDue)} tone="orange" sub="Not collected yet" />
+              <Stat label="Cash Collection" value={formatINR(dailySummary.cashCollection)} tone="blue" />
+              <Stat label="UPI Collection" value={formatINR(dailySummary.upiCollection)} tone="indigo" />
+              <Stat label="MT Commission" value={formatINR(dailySummary.mtCommission)} tone="green" sub="Principal excluded" />
+              <Stat label="Total Transactions" value={String(dailySummary.totalTransactions)} tone="pink" />
+            </div>
+            <div className="btn-row" style={{ marginTop: 12 }}>
+              <Btn kind="secondary" onClick={() => exportCSV(
+                `bizkhata-daily-business-${period}.csv`,
+                ['Date', 'Time', 'Service', 'Details', 'Method', 'Amount (Rs)', 'Collected'],
+                dailyRows.map((r) => [r.date, r.time, r.service, r.label, r.method, (r.amountPaise / 100).toFixed(2), r.collected ? 'Yes' : 'No — due']),
+              )}>Export Daily Report (CSV)</Btn>
+              <Btn kind="secondary" onClick={() => ctx.go?.('daily')}>Open Daily Business →</Btn>
+            </div>
+          </Card>
+          <Card title="Service-wise Collection">
+            {dailySummary.byService.length === 0 ? (
+              <Empty text="No business in this period yet." />
+            ) : (
+              <div>
+                <BarChart data={dailySummary.byService.filter((s) => s.collection > 0).map((s) => ({ label: s.service, value: s.collection, valueLabel: formatINR(s.collection) }))} />
+                <div className="table-wrap" style={{ marginTop: 12 }}>
+                  <table>
+                    <thead><tr><th>Service</th><th className="num">Collection</th><th className="num">Cash</th><th className="num">UPI</th><th className="num">Due</th><th className="num">Direct Exp.</th><th className="num">Txns</th></tr></thead>
+                    <tbody>
+                      {dailySummary.byService.map((s) => (
+                        <tr key={s.service}>
+                          <td>{s.service}</td>
+                          <td className="num"><strong>{formatINR(s.collection)}</strong></td>
+                          <td className="num">{formatINR(s.cash)}</td>
+                          <td className="num">{formatINR(s.upi)}</td>
+                          <td className="num">{formatINR(s.due)}</td>
+                          <td className="num">{formatINR(s.directExpenses)}</td>
+                          <td className="num">{s.transactions}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </Card>
+          <Card title="Entries in this period">
+            {dailyRows.length === 0 ? (
+              <Empty text="No entries in this period yet." />
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th>Date</th><th>Service</th><th>Details</th><th>Method</th><th className="num">Amount</th></tr></thead>
+                  <tbody>
+                    {dailyPageRows.map((r) => (
+                      <tr key={`${r.kind}-${r.id}`}>
+                        <td>{formatDate(r.date)}{r.time ? ` ${r.time}` : ''}</td>
+                        <td>{r.service}</td>
+                        <td>
+                          {r.label}
+                          {r.kind === 'mt' && r.principalPaise !== undefined ? ` — sent ${formatINR(r.principalPaise)} (principal, not income)` : ''}
+                          {!r.collected && r.kind === 'quick' ? ' — Due, not collected' : ''}
+                        </td>
+                        <td>{r.method.toUpperCase()}</td>
+                        <td className="num" style={{ color: r.amountPaise < 0 ? 'var(--danger)' : '#007a5e' }}>
+                          {r.amountPaise < 0 ? '−' : '+'} {formatINR(Math.abs(r.amountPaise))}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <Pager total={dailyRows.length} page={dailyPage} pageSize={8} onPage={setDailyPage} />
+              </div>
+            )}
           </Card>
         </div>
       )}
@@ -382,6 +494,15 @@ export function RecycleBinView({ ctx }: { ctx: Ctx }) {
       else if (item.kind === 'Receipt') s.receipts.push(data as never);
       else if (item.kind === 'MtTransfer') s.mtTransfers.push(data as never);
       else if (item.kind === 'DocFile') s.docs.push(data as never);
+      else if (item.kind === 'DailyEntry') {
+        // A deleted quick entry was recycled together with the CashTxn(s)
+        // and Expense it wrote, so restoring it restores all three —
+        // the books stay consistent (one transaction, counted once).
+        const bundle = data as { entry?: unknown; cashTxns?: unknown[]; expense?: unknown };
+        if (bundle.entry) s.dailyEntries.push(bundle.entry as never);
+        for (const t of bundle.cashTxns || []) s.cashTxns.push(t as never);
+        if (bundle.expense) s.expenses.push(bundle.expense as never);
+      }
       s.recycle = s.recycle.filter((x) => x.id !== item.id);
     }, [auditEntry(profile.id, 'restore', item.kind, String(data.id || ''), '', `Restored ${item.label}`)]);
   }
@@ -476,6 +597,9 @@ export function CustomizationView({ ctx }: { ctx: Ctx }) {
   const { state, profile } = ctx;
   const [service, setService] = React.useState('');
   const [expCat, setExpCat] = React.useState('');
+  const [renameTarget, setRenameTarget] = React.useState<string | null>(null);
+  const [renameValue, setRenameValue] = React.useState('');
+  const [msg, setMsg] = React.useState('');
   const lang = profile.language;
 
   const modules = [
@@ -513,6 +637,46 @@ export function CustomizationView({ ctx }: { ctx: Ctx }) {
     });
   }
 
+  /** Rename a service everywhere it is used (jobs, quick daily entries,
+   *  expenses, receipts) so history stays consistent — a rename never
+   *  orphans or duplicates past transactions. */
+  function renameService(oldName: string, newName: string) {
+    const name = newName.trim();
+    if (!name || name === oldName) { setRenameTarget(null); return; }
+    if (profile.services.includes(name)) { setMsg(`A service named "${name}" already exists.`); return; }
+    ctx.mutate((s) => {
+      const p = s.profiles.find((x) => x.id === profile.id);
+      if (!p) return;
+      p.services = p.services.map((x) => (x === oldName ? name : x));
+      p.customServices = p.customServices.map((x) => (x === oldName ? name : x));
+      for (const j of s.jobs) if (j.profileId === profile.id && j.service === oldName) j.service = name;
+      for (const e of s.dailyEntries) if (e.profileId === profile.id && e.service === oldName) e.service = name;
+      for (const e of s.expenses) if (e.profileId === profile.id && e.service === oldName) e.service = name;
+      for (const r of s.receipts) if (r.profileId === profile.id && r.service === oldName) r.service = name;
+    }, [auditEntry(profile.id, 'update', 'BusinessProfile', profile.id, `Service ${oldName}`, `Service renamed to ${name}`)]);
+    setRenameTarget(null);
+    setMsg(`Service renamed to "${name}" — jobs, entries, expenses and receipts updated.`);
+  }
+
+  /** Remove an owner-added service. Built-in services cannot be removed.
+   *  A service in use by jobs, entries or expenses cannot be removed —
+   *  rename it instead, so no history is lost. */
+  function removeService(name: string) {
+    if (!profile.customServices.includes(name)) { setMsg(`"${name}" is a built-in service and cannot be removed. You can hide its module instead.`); return; }
+    const pid = profile.id;
+    const inUse =
+      state.jobs.some((j) => j.profileId === pid && j.service === name) ||
+      state.dailyEntries.some((e) => e.profileId === pid && e.service === name) ||
+      state.expenses.some((e) => e.profileId === pid && e.service === name);
+    if (inUse) { setMsg(`Cannot remove "${name}" — it is used by jobs, daily entries or expenses. Rename it instead.`); return; }
+    if (!window.confirm(`Remove the service "${name}"? It will no longer appear in service lists.`)) return;
+    update({
+      services: profile.services.filter((x) => x !== name),
+      customServices: profile.customServices.filter((x) => x !== name),
+    });
+    setMsg(`Service "${name}" removed.`);
+  }
+
   return (
     <div>
       <Card title="Customization Studio — per business profile">
@@ -524,14 +688,36 @@ export function CustomizationView({ ctx }: { ctx: Ctx }) {
           <div>
             <h3>Add a Service</h3>
             <div className="btn-row">
-              <input className="input" value={service} onChange={(e) => setService(e.target.value)} placeholder="e.g. Passport Photo" style={{ flex: 1 }} />
+              <input className="input" value={service} onChange={(e) => setService(e.target.value)} placeholder="e.g. Lamination" style={{ flex: 1 }} />
               <Btn onClick={() => {
                 if (!service.trim()) return;
+                if (profile.services.includes(service.trim())) { setMsg(`A service named "${service.trim()}" already exists.`); return; }
                 update({ services: [...profile.services, service.trim()], customServices: [...profile.customServices, service.trim()] });
                 setService('');
+                setMsg(`Service "${service.trim()}" added — it now appears in Daily Business, Services and job forms.`);
               }}>Add</Btn>
             </div>
-            <p>Services: {profile.services.join(', ')}</p>
+            <p className="field-hint">Rename or remove your own services below. Built-in services can be renamed but not removed.</p>
+            <ul style={{ listStyle: 'none', padding: 0, margin: '8px 0 0' }}>
+              {profile.services.map((s) => (
+                <li key={s} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' }}>
+                  {renameTarget === s ? (
+                    <>
+                      <input className="input" style={{ flex: 1, minWidth: 140 }} value={renameValue} onChange={(e) => setRenameValue(e.target.value)} />
+                      <Btn kind="secondary" onClick={() => renameService(s, renameValue)}>Save</Btn>
+                      <Btn kind="ghost" onClick={() => setRenameTarget(null)}>Cancel</Btn>
+                    </>
+                  ) : (
+                    <>
+                      <span style={{ flex: 1, minWidth: 120 }}>{s}{profile.customServices.includes(s) ? ' (yours)' : ''}</span>
+                      <Btn kind="ghost" onClick={() => { setRenameTarget(s); setRenameValue(s); setMsg(''); }}>Rename</Btn>
+                      {profile.customServices.includes(s) && <Btn kind="ghost" onClick={() => removeService(s)}>Remove</Btn>}
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+            {msg && <p className="field-hint" style={{ marginTop: 8 }}>{msg}</p>}
             <h3 style={{ marginTop: 16 }}>Add an Expense Category</h3>
             <div className="btn-row">
               <input className="input" value={expCat} onChange={(e) => setExpCat(e.target.value)} placeholder="e.g. Tea" style={{ flex: 1 }} />
@@ -594,7 +780,6 @@ export function SettingsView({ ctx, section }: { ctx: Ctx; section?: string }) {
   const [mobile, setMobile] = React.useState(profile.mobile);
   const [openingCash, setOpeningCash] = React.useState(String(profile.openingCashPaise / 100));
   const [openingUpi, setOpeningUpi] = React.useState(String(profile.openingUpiPaise / 100));
-  const [geminiKey, setGeminiKey] = React.useState(profile.geminiKey);
   const [msg, setMsg] = React.useState('');
   const [importError, setImportError] = React.useState('');
 
@@ -718,19 +903,14 @@ export function SettingsView({ ctx, section }: { ctx: Ctx; section?: string }) {
           <Btn kind="secondary" onClick={() => ctx.go?.('customize')}>Manage Categories</Btn>
         </Card>
 
-        <Card title="AI (Gemini — free tier, optional)">
+        <Card title="BizKhata AI Assistant">
           <p style={{ color: 'var(--muted)', marginTop: 0 }}>
-            AI is OFF until you add your own free Gemini API key. Get one free from Google AI
-            Studio (aistudio.google.com). The key stays on this device only.
+            BizKhata AI Assistant is built in — ask it anything about your business in Hinglish,
+            English or Hindi, add entries through chat, and get insights from your real records.
+            It works on this device; nothing is sent anywhere and no key is needed.
           </p>
-          <Field label="Gemini API Key (free tier)">
-            <input className="input" type="password" value={geminiKey} onChange={(e) => setGeminiKey(e.target.value)} placeholder="Paste your free Gemini key here" autoComplete="off" />
-          </Field>
           <div className="btn-row">
-            <Btn onClick={() => update({ geminiKey }, 'Gemini key saved')}>Save Key</Btn>
-            {profile.geminiKey && (
-              <Btn kind="danger" onClick={() => { setGeminiKey(''); update({ geminiKey: '' }, 'Gemini key removed'); }}>Remove Key</Btn>
-            )}
+            <Btn kind="secondary" onClick={() => ctx.go?.('chatbot')}>Open AI Assistant</Btn>
           </div>
         </Card>
 
@@ -759,7 +939,7 @@ export function SettingsView({ ctx, section }: { ctx: Ctx; section?: string }) {
         <div id="settings-security"><Card title="Security & Privacy">
           <p style={{ color: 'var(--muted)', marginTop: 0 }}>
             App lock (mobile + PIN) protects this device. Data is local-first — nothing is
-            uploaded anywhere. Gemini key, if added, stays on this device only.
+            uploaded anywhere.
           </p>
           <div className="btn-row">
             <Btn kind="secondary" onClick={() => ctx.go?.('audit')}>Audit Log →</Btn>

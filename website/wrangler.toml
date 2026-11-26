@@ -1,4 +1,4 @@
-# Cloudflare Pages configuration for BizKhata (free tier).
+# Cloudflare Pages configuration for BizKhata (free hosting).
 # This file is used by `wrangler pages deploy` and by the Cloudflare dashboard.
 # The site is a static export: `npm run build` produces the `out/` folder.
 name = "bizkhata"

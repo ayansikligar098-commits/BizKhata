@@ -17,7 +17,7 @@ export interface RouteDef {
 
 export const ROUTES: RouteDef[] = [
   { key: 'dashboard', path: '/dashboard', title: 'Dashboard', sub: 'Your business at a glance', icon: '⌂', i18n: 'dashboard' },
-  { key: 'daily', path: '/daily-business', title: 'Daily Dhandha', sub: 'Billing vs actually received vs profit', icon: '◷', i18n: 'dailyBusiness' },
+  { key: 'daily', path: '/daily-business', title: 'Daily Business', sub: 'One page for the day\u2019s small work \u2014 collection, expenses, earnings', icon: '◷', i18n: 'dailyBusiness' },
   { key: 'cash', path: '/cash-book', title: 'Cash Book', sub: 'Cash received, spent and internal transfers', icon: '▤', i18n: 'cashBook' },
   { key: 'upi', path: '/upi-book', title: 'UPI Book', sub: 'UPI received, spent and internal transfers', icon: '⌁', i18n: 'upiBook' },
   { key: 'mt', path: '/money-transfer', title: 'Money Transfer', sub: 'Separate ledger — commission is the only profit', icon: '⇄', i18n: 'moneyTransfer', module: 'moneyTransfer' },
@@ -68,6 +68,8 @@ export const SERVICE_SLUGS: Record<string, string> = {
   'Ayushman Card': 'ayushman',
   Xerox: 'xerox',
   Printing: 'printing',
+  'Passport Size Photo': 'passport-photo',
+  Scanning: 'scanning',
   'Smart Card': 'smart-card',
   'Document Work': 'document-work',
 };
@@ -97,12 +99,13 @@ export function jobServices(services: string[]): string[] {
 }
 
 /** /reports/<type> -> ReportsView tab. */
-export const REPORT_TYPES = ['income', 'expenses', 'profit', 'service-wise'] as const;
+export const REPORT_TYPES = ['income', 'expenses', 'profit', 'service-wise', 'daily-business'] as const;
 export type ReportType = (typeof REPORT_TYPES)[number];
 
-export function reportTabFromType(type: string): 'business' | 'service' | 'expenses' {
+export function reportTabFromType(type: string): 'business' | 'service' | 'expenses' | 'daily' {
   if (type === 'service-wise') return 'service';
   if (type === 'expenses') return 'expenses';
+  if (type === 'daily-business') return 'daily';
   return 'business'; // income + profit both show the business summary
 }
 

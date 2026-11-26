@@ -28,9 +28,10 @@ Cloudflare Pages.
   English or Hindi about today's profit, who owes money, agent payables,
   Money Transfer commission, or cash/UPI balance. Every figure comes from
   the real ledgers (integer paise) — nothing is invented, and with no data
-  it says so plainly. Works fully with no Gemini key (built-in factual
-  responder); with the owner's free Gemini key in Settings, Gemini only
-  rephrases the same real figures into a natural-language answer.
+  it says so plainly. The assistant is built in and works entirely on your
+  device: no key, no third-party AI provider, nothing sent anywhere. It can
+  also add daily entries, expenses, payments and transfers through chat —
+  always showing a preview first and saving only after you confirm.
 - **Design**: premium dark navy sidebar with expandable Services/Reports
   groups, modern top nav (business profile switcher, global search across
   customers/jobs/receipts, notification bell, owner menu), purple primary
@@ -43,7 +44,7 @@ Cloudflare Pages.
   fully built first for Al Falah Communication. Up to **3 separate business profiles**
   per account, with a switcher — data is never mixed between profiles.
 - **Dashboard**: net profit, Cash/UPI balances, customer due and agent payable (always
-  separate), service-wise income, Cash vs UPI, pending payments, AI insight (off by default).
+  separate), service-wise income, Cash vs UPI, pending payments, AI Business Insights.
 - **Cash Book / UPI Book**: separate books; Cash↔UPI is an internal transfer, never income.
 - **Money Transfer**: fully separate ledger. Fund from brother (by UPI), transfers,
   commission-only profit, MT other expenses (Tea/Food, Transport, Staff, Shop, Misc),
@@ -61,15 +62,31 @@ Cloudflare Pages.
   per-machine lifetime cost (purchase + maintenance).
 - **Receipts**: unique numbers BK-0001…, A4 + thermal layouts, PDF/Print, WhatsApp share,
   duplicate, signature section, Paid vs Due clearly shown.
-- **Daily Dhandha**: billing vs actually-received vs profit, per service, by period.
-- **Reports**: PDF/Print + CSV export, service-wise profit, Cash vs UPI, dues, payables.
+- **Daily Business** (`/daily-business`): the central hub for the day's small work —
+  Today's Total Collection, Cash Collection, UPI Collection, Expenses, Net Earnings,
+  Customer Due (shown separately, never counted as collection), Service-wise Collection
+  and Recent Entries, filterable by period (Today/Week/Month/Year/Custom), date and
+  service. A fast **+ Quick Entry** form (date/time, service, description, quantity,
+  rate, auto total, Cash/UPI/Other, direct expense, notes) saves small sales without
+  opening a full job. Job payments, Money Transfer commission (never the principal)
+  and expenses appear here automatically — one real transaction is counted exactly
+  once (a quick entry writes one Cash/UPI entry; a job payment is its Cash/UPI entry;
+  an expense writes one expense + one Cash/UPI entry). Passport Size Photo and
+  Scanning are first-class services alongside PAN, Aadhaar, Voter ID, Ayushman, Xerox,
+  Printing, Smart Card and Document Work.
+- **Reports**: PDF/Print + CSV export, service-wise profit, Cash vs UPI, dues, payables,
+  plus a combined **Daily Business Report** (`/reports/daily-business`) — daily, weekly,
+  monthly, yearly and all-time collection, expenses, earnings and service-wise totals.
 - **Difference Finder**: expected vs recorded balance, with suggestions only — it never
   changes entries. Separate finders for General / Cash / UPI / Money Transfer / Service.
 - **Recycle Bin + Audit Log**: soft delete with restore; every change logged old → new.
-- **Customization Studio**: add services/expense categories, enable/disable modules,
-  show/hide dashboard cards, restore defaults — per profile.
-- **Gemini AI insight (free tier only)**: OFF until the owner adds his own free Gemini
-  API key in Settings. The app works fully without AI.
+- **Customization Studio**: add services/expense categories, rename or remove your own
+  services (rename updates jobs, daily entries, expenses and receipts; a service in use
+  cannot be removed), enable/disable modules, show/hide dashboard cards, restore
+  defaults — per profile.
+- **AI Business Insights** (Dashboard): short practical insights computed on your device
+  from your real figures — top service, biggest due, agent payable, Money Transfer
+  commission, expense trend. No key, no third-party provider, nothing sent anywhere.
 
 ## Accounting rules (verified by tests)
 
@@ -80,6 +97,12 @@ All money is integer **paise** — never float. See `tests/accounting.test.mjs`
 2. Money Transfer ₹10,000 with ₹50 commission → profit is ₹50 only.
 3. Cash→UPI ₹1,000 internal transfer → ₹0 income, ₹0 expense.
 4. Customer receivable and agent payable are separate ledgers.
+5. Daily Business: one real transaction is counted exactly once — a job's received
+   money is its Cash/UPI entry (never job + entry), a quick entry writes exactly one
+   Cash/UPI entry, an expense writes one expense + one Cash/UPI entry. Money Transfer
+   principal is never income (only commission); 'Other' (credit) entries are due,
+   never collection; internal transfers count 0. See `tests/accounting.test.mjs`
+   (52 checks).
 
 ## URL routing
 
@@ -190,15 +213,16 @@ Every push to the GitHub repo re-deploys automatically with Option A.
 
 - The Android code in `../android/` has never been compiled on this machine
   (no JDK here) — first compile + unit tests need Android Studio.
-- Gemini insight needs the owner's own free Gemini key; without it, AI stays off
-  and the app works fully.
+- The AI Assistant and AI Business Insights work fully on-device with no key;
+  there is no third-party AI provider to configure.
 - Receipt "PDF" uses the browser's Print → Save as PDF (free, no paid service).
 - **Sessions are not yet server-validated** (see "Persistent login" above):
   JS-set cookies cannot be HttpOnly and there is no Pages Functions + KV/D1
   session store yet — that needs Cloudflare dashboard bindings. The current
   token/rotation/revocation layer is the closest secure equivalent on the
   free static tier; it is not presented as server-side validation.
-- **Profile clicks do a full page load** (see "URL routing" above): a static
-  export cannot prerender an RSC payload for user-created customer/agent ids,
-  so the client falls back to a full navigation, which renders correctly via
-  the pathname-aware list page + `_redirects` rewrite.
+- **Customer/agent profiles open as `/customers?id=<id>` / `/agents?id=<id>`**:
+  a static export cannot prerender a page for a user-created id, so profile
+  links use a query param — the list page's HTML always exists, so clicks
+  and full loads both render the profile. Old `/customers/<id>` deep links
+  still work through the pathname-aware list page + `_redirects` rewrite.

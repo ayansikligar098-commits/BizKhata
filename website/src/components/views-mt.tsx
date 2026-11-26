@@ -97,7 +97,7 @@ export function MoneyTransferView({ ctx }: { ctx: Ctx }) {
       <p style={{ color: 'var(--muted)', marginTop: 0 }}>
         Money Transfer is a <strong>fully separate ledger</strong> — never mixed with shop cash, PAN,
         Aadhaar, Xerox or Printing. Profit comes ONLY from commission, never from the money sent.
-        Fund comes from your brother, by UPI.
+        Money Transfer fund comes from your brother, by UPI.
       </p>
 
       <div className="tabs" style={{ marginBottom: 14 }}>
