@@ -208,7 +208,11 @@ export function answerLocally(question: string, f: BusinessFacts, preferred?: Ai
   // includes "kaise ho" — the UPDATE 14 bug was a start-anchored
   // regex that missed "Kaise Ho Bhai". (The unified router in
   // intent.ts normally answers casual messages before this runs.)
-  if (has(q, /\b(hi|hii+|hello|hey|namaste|namaskar|ram\s*ram|good\s(morning|afternoon|evening)|salaam|adaab|vanakkam|namaskaram|sat\s*sri\s*akal|johar|khurumjari|namaskara)\b|kaise ho|how are you|kem cho/)) {
+  // UPDATE 25 (C-5): a greeting PLUS a business question in the same
+  // message is NOT a greeting — "Kaise ho bhai, aaj ka profit kitna
+  // hua?" must reach the profit branch below, not stop here.
+  const asksFigure = /profit|munafa|faayda|fayda|kitna|kitne|hisab|total|kamai|due|udhaar|balance|kharcha|income|collection/.test(q);
+  if (!asksFigure && has(q, /\b(hi|hii+|hello|hey|namaste|namaskar|ram\s*ram|good\s(morning|afternoon|evening)|salaam|adaab|vanakkam|namaskaram|sat\s*sri\s*akal|johar|khurumjari|namaskara)\b|kaise ho|how are you|kem cho/)) {
     return { intent: 'greeting', text: t('greeting') };
   }
   if (has(q, /help|madad|kya kar sakte|what can you|kaise (use|kaam)|how (to|do)/)) {
@@ -407,6 +411,37 @@ export function extractDate(raw: string, today: string = todayISO()): string {
     return addDaysISO(today, -1);
   }
   return today;
+}
+
+/**
+ * UPDATE 25 (C-11): the date NEAR one amount inside a multi-entry
+ * message. "Aaj printing ke 150 hue, aur kal ke 200 bhi add kar do"
+ * has two dates: 150 is today, 200 is yesterday. The whole-message
+ * extractDate() would put BOTH on yesterday. The date word must be
+ * in the SAME clause as the amount (clauses split at commas and
+ * "aur") — a ±N-char window is not enough, because "kal" sits only
+ * a few words after the first amount in that sentence.
+ */
+export function dateNearAmount(segmentText: string, amountIndex: number, today: string = todayISO()): string {
+  const text = segmentText.toLowerCase();
+  const boundaryRe = /,|\baur\b/g;
+  let clauseStart = 0;
+  let clauseEnd = text.length;
+  let m: RegExpExecArray | null;
+  while ((m = boundaryRe.exec(text)) !== null) {
+    if (m.index < amountIndex) clauseStart = m.index + m[0].length;
+    else { clauseEnd = m.index; break; }
+  }
+  const clause = text.slice(clauseStart, clauseEnd);
+  if (/\b(kal|yesterday)\b/.test(clause)) return addDaysISO(today, -1);
+  return today;
+}
+
+/** Preview line for one daily-income entry, with its own date when
+ *  it differs from the action date ("(kal)" for yesterday). */
+export function entryPreviewLine(e: { service: string; amountPaise: number; method: PayMethod | null; customerName?: string; date?: string }, actionDate: string, today: string = todayISO()): string {
+  const dateSuffix = e.date && e.date !== actionDate ? ` (${e.date === addDaysISO(today, -1) ? 'kal' : e.date})` : '';
+  return `${e.service} ${formatINR(e.amountPaise)} ${e.method === 'other' ? '(due — abhi mile nahi)' : `(${(e.method || 'cash').toUpperCase()})`}${e.customerName ? ` — ${e.customerName}` : ''}${dateSuffix}`;
 }
 
 export interface ActionDraft {
@@ -629,15 +664,39 @@ export function parseAssistantMessage(
   profile: BusinessProfile,
   ctx: ChatContext = {},
 ): ParsedMessage {
-  const text = normalizeNumberWords(rawText.trim());
-  const q = text.toLowerCase();
+  let text = normalizeNumberWords(rawText.trim());
+  let q = text.toLowerCase();
   const today = todayISO();
   const amounts = extractAmounts(rawText);
   const date = extractDate(rawText, today);
 
   // --- Confirm / cancel (handled by the chat UI's pending action). ---
-  if (/^(haan|ha+|yes|yep|confirm|save|kar\s*do|karo|theek\s*hai|ok+|save\s*kar|confirm\s*kar|bilkul|ji\s*haan)\b/.test(q)) return { kind: 'confirm' };
-  if (/^(nahi|nahin|no|cancel|mat\s*karo|rehne\s*do|chhodo|ruk[o]?|cancel\s*kar)\b/.test(q)) return { kind: 'cancel' };
+  // UPDATE 25 (C-2): a leading "Haan/Ha" must NOT swallow the rest
+  // of the message. "Haan, aur Xerox 300 cash hue" is a NEW entry
+  // (₹300 Xerox), not a confirmation — strip the leading yes and
+  // parse the remainder as an action (or merge it into the pending
+  // preview per C-1). A bare "Haan" / "Haan, banao" (no amount or
+  // service of its own) is still a confirm.
+  const CONFIRM_START_RE = /^(haan|ha+|yes|yep|confirm|save|kar\s*do|karo|theek\s*hai|ok+|save\s*kar|confirm\s*kar|bilkul|ji\s*haan)\b/;
+  if (CONFIRM_START_RE.test(q)) {
+    const rest = q.replace(CONFIRM_START_RE, '').replace(/^[,!.\s]+/, '').trim();
+    const restAmounts = extractAmounts(rest);
+    const restHasAction = restAmounts.length > 0
+      && /(xerox|printing|pan|aadhaar|aadhar|voter|ayushman|smart|scan|kharcha|expense|agent|transfer|commission|cash|upi|nagad|hue|hua|mile|mila|diye|diya|jama|payment|refund|wapas)/.test(rest);
+    if (!restHasAction) return { kind: 'confirm' };
+    text = rest;
+    q = rest;
+  }
+  // UPDATE 25: a correction ("Nahi, 250 the", "Nahi, 3 the, 5 nahi")
+  // is NEVER a cancel — it carries a number and there is a preview /
+  // question / checklist value to correct. A bare "Nahi" (no number)
+  // is still a cancel. Without this, the chat UI's confirm/cancel
+  // gate (which runs before the router) swallowed corrections.
+  const isCorrectionLike = /\d/.test(q)
+    && (ctx.pendingAction !== undefined
+      || ctx.pendingQuestion?.answeredValue !== undefined
+      || ctx.activeChecklist?.count !== undefined);
+  if (!isCorrectionLike && /^(nahi|nahin|no|cancel|mat\s*karo|rehne\s*do|chhodo|ruk[o]?|cancel\s*kar)\b/.test(q)) return { kind: 'cancel' };
 
   // --- UPDATE 15 plan guard: a statement/plan (future work, no
   // amount, no money question) is NEVER a financial action and must
@@ -713,6 +772,25 @@ export function parseAssistantMessage(
       }
       return deleteActionFor(recent[0]);
     }
+    // 3b. UPDATE 25 (C-18): ordinal delete — "Dusra wala delete kar
+    //      do" / "Pehli wali entry hata do" resolves to the Nth most
+    //      recent entry (1st = most recent). With fewer entries than
+    //      the ordinal, list the candidates instead of guessing.
+    {
+      const s = paddedWords(rawText);
+      const ordMatch = s.match(/\s(pehla|pehli|pahla|pahli|first|1st)\s/);
+      const ord2 = s.match(/\s(dusra|dusri|doosra|doosri|second|2nd)\s/);
+      const ord3 = s.match(/\s(teesra|teesri|third|3rd)\s/);
+      const ordinal = ordMatch ? 1 : ord2 ? 2 : ord3 ? 3 : 0;
+      if (ordinal > 0) {
+        const recent = recentAssistantTargets(state, profile.id, 3);
+        if (recent.length === 0) {
+          return { kind: 'error', text: 'Abhi koi entry nahi hai jo delete kar sakun.' };
+        }
+        if (recent.length >= ordinal) return deleteActionFor(recent[ordinal - 1]);
+        return deleteCandidatesDraft(recent, rawText);
+      }
+    }
     // 4. Bare delete ("Hatana hai", "delete kar do") → ask WHICH
     //    entry, listing the recent candidates. Never a cloud reply,
     //    never a success claim, never a silent delete.
@@ -740,7 +818,14 @@ export function parseAssistantMessage(
   }
 
   // --- Internal transfer: "1000 cash se UPI kar do". ---
-  if (/transfer|bhej|move|badal/.test(q) && /\bcash\b/.test(q) && /\bupi\b/.test(q) && amounts.length >= 1) {
+  // UPDATE 25 (C-10): "cash se UPI kar do" / "UPI se cash kar do"
+  // is an internal transfer even without the words transfer/bhej/
+  // move/badal — the "se" between the two modes + "kar do" says it.
+  // A plain "Xerox 300 cash, 200 UPI" (two collections, no "se" /
+  // "kar do") is NOT this — it stays a daily-income pair.
+  const transferWord = /transfer|bhej|move|badal/.test(q);
+  const transferSe = /(cash\s*se\s*upi|upi\s*se\s*cash|cash.*upi.*(kar\s*do|bana|badal|convert)|upi.*cash.*(kar\s*do|bana|badal|convert))/.test(q);
+  if ((transferWord || transferSe) && /\bcash\b/.test(q) && /\bupi\b/.test(q) && amounts.length >= 1) {
     const amt = amounts[0].paise;
     const cashFirst = q.indexOf('cash') < q.indexOf('upi');
     const from: 'cash' | 'upi' = /cash\s*(se|to|->|→)/.test(q) || (cashFirst && /cash.*upi/.test(q)) ? 'cash' : 'upi';
@@ -840,7 +925,12 @@ export function parseAssistantMessage(
 
   // --- Generic customer due collection: "customer ka baki 300 jama kar"
   // (no customer named yet) — ask which customer, never invent one.
-  if (/customer|grahak/.test(q) && !/customers\b/.test(q) && !findServiceIn(q, profile.services) && amounts.length >= 1 && /(jama|mila|mile|diye|diya|paid|payment|collect)/.test(q) && !/agent/.test(q)) {
+  // UPDATE 25 (C-12): NOT for a baaki/udhaar split ("200 diye, baaki
+  // 300 udhaar") — that message carries a due that this generic draft
+  // (customerPaymentAmount only) would silently drop. Let it fall
+  // through to the baaki block below, which asks for the customer AND
+  // confirms the due.
+  if (/customer|grahak/.test(q) && !/customers\b/.test(q) && !findServiceIn(q, profile.services) && amounts.length >= 1 && /(jama|mila|mile|diye|diya|paid|payment|collect)/.test(q) && !/agent/.test(q) && !(/\b(baaki|baki|udhaar|udhar)\b/.test(q) && amounts.length >= 2)) {
     const custName = findNameIn(q, [...state.customers.filter((c) => c.profileId === profile.id).map((c) => c.name), ...state.jobs.filter((j) => j.profileId === profile.id).map((j) => j.customerName)]);
     if (!custName) {
       const names = state.customers.filter((c) => c.profileId === profile.id).map((c) => c.name);
@@ -898,6 +988,73 @@ export function parseAssistantMessage(
     return { kind: 'action', action, previewLines: [`Expense: ${category} — ${money(amt)} (${method.toUpperCase()})`, `Service: ${svc}`], totalPaise: amt };
   }
 
+  // --- "Baaki / udhaar" split (UPDATE 25, C-12): "Ramesh ne 200
+  //     diye, baaki 300 udhaar" — ₹200 received AND ₹300 due. The due
+  //     used to be silently dropped. Two cases:
+  //     (a) the customer already has a due job whose due equals
+  //         received + stated-due (or covers the payment): the
+  //         payment goes against THAT job (customer_payment), and
+  //         the preview shows the due falling to the stated ₹300 —
+  //         no new due is invented on top of the old one.
+  //     (b) no matching due job: a new split — received entry +
+  //         'other' (due) entry on the same customer (the backend
+  //         creates the customer/job; received stays received and
+  //         the due stays due, never mixed).
+  //     Unknown customer → draft asking for the customer AND
+  //     confirming the due (never silently dropped). Unknown service
+  //     → draft asking for the service, carrying the split along.
+  {
+    const normQ = normalizeMultilingual(rawText.toLowerCase());
+    const baakiIdx = normQ.search(/\b(baaki|baki|udhaar|udhar)\b/);
+    if (baakiIdx >= 0 && amounts.length >= 2) {
+      const dueAmt = amounts.find((a) => a.index > baakiIdx);
+      const recvAmt = [...amounts].reverse().find((a) => a.index < baakiIdx) || amounts[0];
+      if (dueAmt && recvAmt && dueAmt.paise !== recvAmt.paise) {
+        const custName = findNameIn(q, [...state.customers.filter((c) => c.profileId === profile.id).map((c) => c.name), ...state.jobs.filter((j) => j.profileId === profile.id).map((j) => j.customerName)]);
+        const method = cashUpiMethod(extractMethod(q), 'cash');
+        const svc = findServiceIn(q, profile.services)
+          || (() => {
+            if (!custName) return null;
+            const custJobs = state.jobs
+              .filter((j) => j.profileId === profile.id && j.customerName.toLowerCase() === custName.toLowerCase())
+              .sort((a, b) => (a.date < b.date ? 1 : -1));
+            return custJobs[0]?.service || null;
+          })();
+        if (!custName) {
+          return draftFor('customer', askIn(rawText, 'askCustomer', {}) + ` ${money(recvAmt.paise)} mile aur ${money(dueAmt.paise)} due (udhaar) hai — customer ka naam batao, dono record kar dunga.`, { baakiReceived: recvAmt.paise, baakiDue: dueAmt.paise, baakiService: svc, baakiMethod: method, date }, rawText);
+        }
+        if (!svc) {
+          return draftFor('service', `${custName} se ${money(recvAmt.paise)} mile aur ${money(dueAmt.paise)} due hai — ye kis service ka kaam tha? Services: ${profile.services.join(', ')}.`, { baakiReceived: recvAmt.paise, baakiDue: dueAmt.paise, baakiCustomer: custName, baakiMethod: method, date }, rawText);
+        }
+        const dueJobs = state.jobs
+          .filter((j) => j.profileId === profile.id && j.customerName.toLowerCase() === custName.toLowerCase() && jobDuePaise(j) > 0)
+          .sort((a, b) => (a.date < b.date ? -1 : 1));
+        const matching = dueJobs.find((j) => jobDuePaise(j) === recvAmt.paise + dueAmt.paise)
+          || dueJobs.find((j) => jobDuePaise(j) > recvAmt.paise);
+        if (matching) {
+          const job = matching;
+          const action: AssistantAction = { kind: 'customer_payment', date, jobId: job.id, customerName: custName, amountPaise: recvAmt.paise, method };
+          return { kind: 'action', action, previewLines: [`Payment received: ${custName} se ${money(recvAmt.paise)} (${method.toUpperCase()})`, `${job.service} job — due ${money(jobDuePaise(job))} se ${money(jobDuePaise(job) - recvAmt.paise)} reh jayega (baaki ${money(dueAmt.paise)} udhaar).`], totalPaise: recvAmt.paise };
+        }
+        const action: AssistantAction = {
+          kind: 'daily_income', date,
+          entries: [
+            { service: svc, amountPaise: recvAmt.paise, method, customerName: custName },
+            { service: svc, amountPaise: dueAmt.paise, method: 'other', customerName: custName },
+          ],
+        };
+        return {
+          kind: 'action', action,
+          previewLines: [
+            `${svc} ${money(recvAmt.paise)} (${method.toUpperCase()}) — ${custName} se mile`,
+            `${svc} ${money(dueAmt.paise)} (due — abhi mile nahi) — ${custName} ka udhaar`,
+          ],
+          totalPaise: recvAmt.paise,
+        };
+      }
+    }
+  }
+
   // --- Daily income (the main flow): service + amount (+ method). ---
   {
     const segments = splitServiceSegments(text, profile.services);
@@ -911,7 +1068,7 @@ export function parseAssistantMessage(
     const followUp = /^(aur|or|also|bhi|add|aur\s+ek|phir)\b/.test(q)
       || (/\b(aur|bhi)\b/.test(q) && !!ctx.lastService);
     if ((hasServiceWord && amounts.length >= 1) || (followUp && amounts.length >= 1 && ctx.lastService) || (hasServiceWord && amounts.length >= 1 && hasMoneyWord)) {
-      const entries: { service: string; amountPaise: number; method: PayMethod | null; customerName?: string }[] = [];
+      const entries: { service: string; amountPaise: number; method: PayMethod | null; customerName?: string; date?: string }[] = [];
       const globalMethods = (text.match(/\b(cash|upi|nagad|online|gpay|phonepe|paytm)\b/g) || []).map((w) => extractMethod(w));
       const uniqueGlobal = [...new Set(globalMethods)];
       let lastService = ctx.lastService || null;
@@ -921,6 +1078,8 @@ export function parseAssistantMessage(
       // service later keeps "300 cash, 200 UPI" as cash + UPI instead
       // of flattening both to one mode.
       let missingServiceMethods: (PayMethod | null)[] = [];
+      // UPDATE 25 (C-11): per-amount dates for the no-service draft.
+      let missingServiceDates: string[] = [];
       for (const seg of segments) {
         const segAmounts = extractAmounts(seg.text);
         if (segAmounts.length === 0) continue;
@@ -933,6 +1092,7 @@ export function parseAssistantMessage(
             let m = methodNear(seg.text, a.index, amtLen, ai + 1 < segAmounts.length ? segAmounts[ai + 1].index : undefined);
             if (!m && uniqueGlobal.length === 1) m = uniqueGlobal[0];
             missingServiceMethods.push(m);
+            missingServiceDates.push(dateNearAmount(seg.text, a.index, today));
           }
           continue;
         }
@@ -944,12 +1104,14 @@ export function parseAssistantMessage(
           let method = methodNear(seg.text, a.index, amtLen, ai + 1 < segAmounts.length ? segAmounts[ai + 1].index : undefined);
           if (!method && uniqueGlobal.length === 1) method = uniqueGlobal[0];
           if (!method) missingMethod = true;
-          entries.push({ service, amountPaise: a.paise, method });
+          // UPDATE 25 (C-11): each amount keeps its own date
+          // ("aaj ... 150, aur kal ke 200" — 150 today, 200 yesterday).
+          entries.push({ service, amountPaise: a.paise, method, date: dateNearAmount(seg.text, a.index, today) });
         }
         lastService = service;
       }
       if (missingService && entries.length === 0) {
-        return draftFor('service', askIn(rawText, 'askService', { amount: money(amounts[0].paise), services: profile.services.join(', ') }), { pendingAmounts: amounts.map((a) => a.paise), pendingMethods: missingServiceMethods, date }, rawText);
+        return draftFor('service', askIn(rawText, 'askService', { amount: money(amounts[0].paise), services: profile.services.join(', ') }), { pendingAmounts: amounts.map((a) => a.paise), pendingMethods: missingServiceMethods, pendingDates: missingServiceDates, date }, rawText);
       }
       if (entries.length === 0) {
         return draftFor('amount', askIn(rawText, 'askAmount', { service: segments[0]?.service || ctx.lastService || 'Service' }), { pendingService: segments[0]?.service || ctx.lastService, date }, rawText);
@@ -963,9 +1125,9 @@ export function parseAssistantMessage(
       if (custName && entries.some((e) => e.method === 'other')) {
         for (const e of entries) if (e.method === 'other') e.customerName = custName;
       }
-      const action: AssistantAction = { kind: 'daily_income', date, entries: entries.map((e) => ({ service: e.service, amountPaise: e.amountPaise, method: e.method || 'cash', customerName: e.customerName })) };
+      const action: AssistantAction = { kind: 'daily_income', date, entries: entries.map((e) => ({ service: e.service, amountPaise: e.amountPaise, method: e.method || 'cash', customerName: e.customerName, date: e.date })) };
       const total = entries.reduce((a, e) => a + e.amountPaise, 0);
-      const previewLines = entries.map((e) => `${e.service} ${money(e.amountPaise)} ${e.method === 'other' ? '(due — abhi mile nahi)' : `(${(e.method || 'cash').toUpperCase()})`}${e.customerName ? ` — ${e.customerName}` : ''}`);
+      const previewLines = entries.map((e) => entryPreviewLine(e, date, today));
       const dup = findDuplicateWarning(state, profile.id, action);
       return { kind: 'action', action, previewLines, totalPaise: total, duplicateWarning: dup || undefined };
     }
@@ -1004,12 +1166,36 @@ export function applyDraftAnswer(
     // Fill ONLY the entries whose mode is still unknown — entries
     // whose mode the user already stated keep it ("300 cash, 200 UPI"
     // never flattens to one mode).
-    const entries = (p.pendingEntries as { service: string; amountPaise: number; method: PayMethod | null }[]).map((e) => ({ ...e, method: e.method || method }));
+    const entries = (p.pendingEntries as { service: string; amountPaise: number; method: PayMethod | null; date?: string }[]).map((e) => ({ ...e, method: e.method || method }));
     const date = (p.date as string) || todayISO();
-    const action: AssistantAction = { kind: 'daily_income', date, entries: entries.map((e) => ({ service: e.service, amountPaise: e.amountPaise, method: e.method || 'cash' })) };
+    const action: AssistantAction = { kind: 'daily_income', date, entries: entries.map((e) => ({ service: e.service, amountPaise: e.amountPaise, method: e.method || 'cash', date: (e as { date?: string }).date })) };
     const total = entries.reduce((a, e) => a + e.amountPaise, 0);
     const dup = findDuplicateWarning(state, profile.id, action);
-    return { kind: 'action', action, previewLines: entries.map((e) => `${e.service} ${formatINR(e.amountPaise)} ${e.method === 'other' ? '(due — abhi mile nahi)' : `(${e.method.toUpperCase()})`}`), totalPaise: total, duplicateWarning: dup || undefined };
+    return { kind: 'action', action, previewLines: entries.map((e) => entryPreviewLine(e, date, todayISO())), totalPaise: total, duplicateWarning: dup || undefined };
+  }
+  // UPDATE 25 (C-12): baaki split waiting on the service — the reply
+  // names the service; the received + due split is built as one action.
+  if (draft.missing === 'service' && p.baakiReceived !== undefined) {
+    const svc = findServiceIn(q, profile.services);
+    if (!svc) return draftFor('service', `Service samajh nahi aaya. Services: ${profile.services.join(', ')}.`, p, draft.original);
+    const custName = p.baakiCustomer as string;
+    const method = (p.baakiMethod as Method) || cashUpiMethod(extractMethod(q), 'cash');
+    const date = (p.date as string) || todayISO();
+    const action: AssistantAction = {
+      kind: 'daily_income', date,
+      entries: [
+        { service: svc, amountPaise: p.baakiReceived as number, method, customerName: custName },
+        { service: svc, amountPaise: p.baakiDue as number, method: 'other', customerName: custName },
+      ],
+    };
+    return {
+      kind: 'action', action,
+      previewLines: [
+        `${svc} ${formatINR(p.baakiReceived as number)} (${method.toUpperCase()}) — ${custName} se mile`,
+        `${svc} ${formatINR(p.baakiDue as number)} (due — abhi mile nahi) — ${custName} ka udhaar`,
+      ],
+      totalPaise: p.baakiReceived as number,
+    };
   }
   if (draft.missing === 'service' && p.pendingAmounts) {
     const svc = findServiceIn(q, profile.services);
@@ -1019,15 +1205,17 @@ export function applyDraftAnswer(
     // survive: the reply's mode fills only the amounts whose mode is
     // still unknown, it never overwrites a stated mode.
     const pendingMethods = (p.pendingMethods as (PayMethod | null)[] | undefined) || [];
-    const entries = (p.pendingAmounts as number[]).map((a, i) => ({ service: svc, amountPaise: a, method: (pendingMethods[i] || method || null) as PayMethod | null }));
+    // UPDATE 25 (C-11): per-amount dates survive the draft too.
+    const pendingDates = (p.pendingDates as (string | undefined)[] | undefined) || [];
+    const entries = (p.pendingAmounts as number[]).map((a, i) => ({ service: svc, amountPaise: a, method: (pendingMethods[i] || method || null) as PayMethod | null, date: pendingDates[i] }));
     if (entries.some((e) => !e.method)) {
       return draftFor('method', `${svc} ke ${formatINR(entries[0].amountPaise)} — Cash mein mile ya UPI mein?`, { pendingEntries: entries, date: p.date }, draft.original);
     }
     const date = (p.date as string) || todayISO();
-    const action: AssistantAction = { kind: 'daily_income', date, entries: entries.map((e) => ({ service: e.service, amountPaise: e.amountPaise, method: e.method || 'cash' })) };
+    const action: AssistantAction = { kind: 'daily_income', date, entries: entries.map((e) => ({ service: e.service, amountPaise: e.amountPaise, method: e.method || 'cash', date: e.date })) };
     const total = entries.reduce((a, e) => a + e.amountPaise, 0);
     const dup = findDuplicateWarning(state, profile.id, action);
-    return { kind: 'action', action, previewLines: entries.map((e) => `${e.service} ${formatINR(e.amountPaise)} (${(e.method || 'cash').toUpperCase()})`), totalPaise: total, duplicateWarning: dup || undefined };
+    return { kind: 'action', action, previewLines: entries.map((e) => entryPreviewLine(e, date, todayISO())), totalPaise: total, duplicateWarning: dup || undefined };
   }
   if (draft.missing === 'amount' && p.pendingService) {
     if (amounts.length === 0) return draftFor('amount', 'Amount kitna tha? Sirf number likho (jaise: 300).', p, draft.original);
@@ -1088,6 +1276,35 @@ export function applyDraftAnswer(
     const method = cashUpiMethod(extractMethod(q), 'cash');
     const action: AssistantAction = { kind: 'agent_payment', date: (p.date as string) || todayISO(), agentId: agent.id, agentName, amountPaise: amt, method };
     return { kind: 'action', action, previewLines: [`Agent payment: ${agentName} ko ${formatINR(amt)} (${method.toUpperCase()})`], totalPaise: amt };
+  }
+  // UPDATE 25 (C-12): baaki split waiting on the customer — the
+  // reply names the customer; received + due are recorded together.
+  // If the service is still unknown, ask for it next (carrying the
+  // split along) instead of guessing a service.
+  if (draft.missing === 'customer' && p.baakiReceived !== undefined) {
+    const name = replyText.trim().replace(/\s+ko$/, '');
+    if (name.length < 2) return draftFor('customer', 'Customer ka naam batao.', p, draft.original);
+    const svc = p.baakiService as string | null;
+    if (!svc) {
+      return draftFor('service', `${name} se ${formatINR(p.baakiReceived as number)} mile aur ${formatINR(p.baakiDue as number)} due hai — ye kis service ka kaam tha? Services: ${profile.services.join(', ')}.`, { baakiReceived: p.baakiReceived, baakiDue: p.baakiDue, baakiCustomer: name, baakiMethod: p.baakiMethod, date: p.date }, draft.original);
+    }
+    const method = (p.baakiMethod as Method) || 'cash';
+    const date = (p.date as string) || todayISO();
+    const action: AssistantAction = {
+      kind: 'daily_income', date,
+      entries: [
+        { service: svc, amountPaise: p.baakiReceived as number, method, customerName: name },
+        { service: svc, amountPaise: p.baakiDue as number, method: 'other', customerName: name },
+      ],
+    };
+    return {
+      kind: 'action', action,
+      previewLines: [
+        `${svc} ${formatINR(p.baakiReceived as number)} (${method.toUpperCase()}) — ${name} se mile`,
+        `${svc} ${formatINR(p.baakiDue as number)} (due — abhi mile nahi) — ${name} ka udhaar`,
+      ],
+      totalPaise: p.baakiReceived as number,
+    };
   }
   if (draft.missing === 'customer') {
     if (p.mtReceiver === undefined && p.mtPrincipal !== undefined) {

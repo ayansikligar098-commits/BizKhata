@@ -49,6 +49,12 @@ export type UnifiedIntent =
   | 'checklist_translate'
   | 'checklist_show'
   | 'topic_followup'
+  // UPDATE 25: key-status statements ("Mene Key Dal Di"), one-off
+  // "translate THIS reply" (vs switching the profile language), and
+  // typed "Bas, short mein batao" (shorten the last reply).
+  | 'key_status'
+  | 'translate_reply'
+  | 'shorten_reply'
   | 'unknown';
 
 export type CasualKind = 'greeting' | 'farewell' | 'bored' | 'thanks' | 'mood' | 'morning' | 'doing' | 'advice' | 'helpOffer';
@@ -139,12 +145,32 @@ export function isCorrection(raw: string, ctx: ChatContext): boolean {
   }
   return false;
 }
-/** The corrected value: the first number that is NOT the old answer. */
+/** The corrected value: the number NOT rejected by a negation.
+ *  UPDATE 25 (C-3): the old code returned the FIRST number ≠ old,
+ *  so "nahi, 500 nahi 600 tha" (old ₹300) returned 500 — the very
+ *  value the user just rejected. The number immediately BEFORE a
+ *  negation word ("500 nahi") is the REJECTED value; the corrected
+ *  value is another number in the message (prefer the last one).
+ *  The count case still works: "Nahi, 3 the, 5 nahi" (old 5) —
+ *  rejected 5, corrected 3. A bare "nahi, 250 the" has no number
+ *  before "nahi", so 250 is the corrected value, not a rejection. */
 export function correctedNumber(raw: string, ctx: ChatContext): number | null {
   const old = ctx.pendingQuestion?.answeredValue
     ?? ctx.activeChecklist?.count
     ?? (ctx.pendingAction?.kind === 'daily_income' ? ctx.pendingAction.entries[0]?.amountPaise / 100 : undefined);
-  const nums = (norm(raw).match(/\d+/g) || []).map((n) => parseInt(n, 10));
+  const normed = norm(raw);
+  const nums = (normed.match(/\d+/g) || []).map((n) => parseInt(n, 10));
+  if (nums.length === 0) return null;
+  // Numbers immediately before "nahi/nahin/galat" are rejected.
+  const rejected = new Set<number>();
+  const re = /(\d+)\s+(nahi|nahin|galat|wrong)\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(normed)) !== null) rejected.add(parseInt(m[1], 10));
+  // Prefer the LAST non-rejected number that is not the old value.
+  for (let i = nums.length - 1; i >= 0; i--) {
+    if (!rejected.has(nums[i]) && nums[i] !== old) return nums[i];
+  }
+  // Fallback: first number that is not the old value (old behaviour).
   for (const n of nums) if (n !== old) return n;
   return null;
 }
@@ -219,7 +245,8 @@ export function isTopicFollowup(raw: string, ctx: ChatContext): boolean {
  * and ask "kitne rupaye hue?" for work that has not happened yet.
  */
 export function hasMoneyAmount(raw: string): boolean {
-  if (!/\d/.test(raw)) return false;
+  // UPDATE 25 (C-4): test norm(raw) — number words become digits.
+  if (!/\d/.test(norm(raw))) return false;
   const s = norm(raw);
   return /(₹|\brs\b|rupees?|rupaye|rupay|paise|paisa|cash|upi|nagad|kharcha|kharach|commission|transfer|diye|diya|mila|mile|hue|hua|jama|payment|bill|due|udhaar|udhar|bheja|bheje|add\s*kar)/.test(s);
 }
@@ -270,6 +297,14 @@ export function casualKindFor(raw: string): CasualKind | null {
   // hai" / "namaste" words must not hijack them into a greeting.
   if (/mausam|weather/.test(s)) return null;
   if (/matlab|translate/.test(s)) return null;
+  // UPDATE 25 (C-5): a greeting PLUS a real business question in the
+  // same message is a business question, not a greeting — "Aaj su
+  // chale chhe, ketlo profit thayo?" must answer the profit, and
+  // "Kaise ho bhai, aaj ka profit kitna hua?" must answer the profit.
+  // A bare greeting ("Kaise ho bhai?") has no business signal and
+  // still returns 'greeting' below.
+  if (/(profit|munafa|faayda|fayda|kamai|hisab|total|due|udhaar|udhar|balance|kharcha|income|collection)/.test(s)
+    && /(kitna|kitne|kitni|kya|kaise|ketlo|ketla|ketlu|thayo|thaya|hoga|hua|hai|hain|chhe|batao|\?)/.test(s)) return null;
   if (/\b(thank|thanks|shukriya|dhanyavad|dhanyavaad|aabhar|thank you)\b/.test(s)) return 'thanks';
   if (/\b(bored|bore ho|bore hoon|bore ho raha|boring|boriyat)\b/.test(s)) return 'bored';
   if (/(mood (kharab|off|nahi)|mood.*kharab|feeling (sad|low|down|bored)|dukhi|pareshan|mood kharab)/.test(s)) return 'mood';
@@ -443,6 +478,25 @@ export function answerStatement(raw: string, lang: AiLangCode): { text: string; 
   return null;
 }
 
+/** UPDATE 25 (C-7): a statement that the key was entered ("Mene Key
+ *  Dal Di Starting Me", "Key daal di hai", "Key add kar di") — the
+ *  assistant must CHECK whether the key is actually saved and answer
+ *  honestly, never tell the owner to enter a key he just entered. */
+export function isKeyStatus(raw: string): boolean {
+  const s = norm(raw);
+  if (!/\bkey\b/.test(s)) return false;
+  return /(dal\s*di|daal\s*di|dali|dal\s*diya|daal\s*diya|add\s*kar\s*di|save\s*(kar\s*di|ho\s*gayi|ki)|enter\s*(kar\s*di|ki)|daal\s*di\s*hai|dal\s*di\s*hai)/.test(s);
+}
+
+/** UPDATE 25 (C-17): typed "Bas, short mein batao" / "short mein
+ *  batao" — shorten the last reply instead of not-understood. A bare
+ *  typed "Bas" alone is NOT this (voice-mode interrupt only). */
+export function isShortenRequest(raw: string): boolean {
+  const s = norm(raw).trim();
+  return /^(bas|ruk|chup)\b[,.!]?\s*(short\s*(mein|me)\s*batao|chhota\s*batao|short\s*mein)/.test(s)
+    || /^short\s*(mein|me)\s*batao/.test(s);
+}
+
 /**
  * Classify one message. Order matters: do-commands and casual/plan
  * are decided BEFORE the financial parser ever sees the message, so
@@ -456,6 +510,17 @@ export function classifyIntent(raw: string, ctx: ChatContext, services: string[]
   //    active checklist converts the checklist — it is NOT a language
   //    switch (detectLanguageSwitch would claim "English ... mein").
   if (ctx.activeChecklist && isChecklistTranslate(raw)) return 'checklist_translate';
+  // 0b. UPDATE 25 (C-13): "X mein likho/batao" with NO active
+  //     checklist translates JUST the last reply — it must NOT
+  //     permanently switch the profile language. Only "X mein baat
+  //     karo / samjhao" (or the Settings control) switches it.
+  //     Anchored to the whole message: "Hindi mein batao, PAN card
+  //     kya hai?" is a new question, not a translate request.
+  if (!ctx.activeChecklist && /^(aur\s+)?(english|hindi|gujarati|marathi|bengali|bangla|punjabi|tamil|telugu|kannada|malayalam|odia|oriya|assamese|urdu|nepali)\s*(mein|me|main)\s*(likho|likh|batao|kar\s*do|convert|likh\s*do|bata\s*do)[\s.!]*$/.test(s)) return 'translate_reply';
+  // 0c. UPDATE 25 (C-17): typed "Bas, short mein batao".
+  if (isShortenRequest(raw)) return 'shorten_reply';
+  // 0d. UPDATE 25 (C-7): key-status statements.
+  if (isKeyStatus(raw)) return 'key_status';
   // 1. Language switch — the user tells the AI what to DO. A translation
   //    question ("Dhanyavaad ka matlab English mein kya hai?") mentions a
   //    language but is NOT a switch — it must reach the general engine.
@@ -504,7 +569,10 @@ export function classifyIntent(raw: string, ctx: ChatContext, services: string[]
   //    money — "miles" contains "mile" (received), which used to route
   //    them to the money parser and ask for a service.
   const isConversion = /(km|miles|kg|pound|percent|% of)/.test(s);
-  if (HAS_AMOUNT.test(raw) && !isConversion) {
+  // UPDATE 25 (C-4): the amount test runs on norm(raw), not raw —
+  // norm() converts number words ("do sau" → 200), so "do sau Xerox
+  // cash hue" reaches the router instead of falling to unknown.
+  if (HAS_AMOUNT.test(norm(raw)) && !isConversion) {
     if (/(xerox|printing|pan|aadhaar|aadhar|voter|ayushman|smart|scan|kharcha|expense|agent|transfer|commission|cash|upi|hue|hua|mile|mila|diye|diya|add kar|jama|payment|repair|bijli|electricity|internet|kagaz|paper|ink|kiraya|rent|refund|wapas|return)/.test(s)) return 'business_action';
     if ((/^(aur|or|also|bhi|add)\b/.test(s) || /\b(aur|bhi)\b/.test(s)) && ctx.lastService) return 'business_action';
     if (/kharcha|expense/.test(s)) return 'business_action';
@@ -523,6 +591,11 @@ export function classifyIntent(raw: string, ctx: ChatContext, services: string[]
   //    kaise use karte hain?" gets steps + a link, not a web answer.
   //    "Where do I record this?" (UPDATE 20 §1/§5) — Daily Business is
   //    the place for the day's mixed shop work.
+  //    UPDATE 25 (C-8): "Kaise add karu dhadhe ka" — a how-to-add
+  //    question with no recognised feature word ("dhadhe" is a
+  //    misspelling of "dhandhe") still reaches app help.
+  if (/(kaise|how)\s*(add|likh|daal|note|likhu|karu|karna|kart[aei])/.test(s)
+    || (/dhadhe|dhande|dhandhe/.test(s) && /kaise/.test(s))) return 'app_help';
   if (/\b(kha|kahan|kidhar|where)\b.*(likh|likhu|likhna|entry|note|record|daal)/.test(s)
     || /(dhandha|kamai|collection)\b.*\b(kha|kahan|kidhar|likh)/.test(s)) return 'app_help';
   if (/(cash\s*book|upi\s*book|customer|agent|receipt|daily business|daily dhandha|dhandha|profile|service|language|difference finder|money transfer|backup|settings|customization|maintenance|report)/.test(s)

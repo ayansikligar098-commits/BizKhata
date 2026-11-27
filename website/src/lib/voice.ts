@@ -7,8 +7,22 @@
  *
  *   spoken words → Web Speech API (SpeechRecognition) → transcript
  *     → the SAME respondToMessage() / intent pipeline as typed chat
- *     (conversation.ts) → reply text → Web Speech API
- *     (speechSynthesis) spoken aloud.
+ *     (conversation.ts) → reply text → AI voice (ai-voice.ts).
+ *
+ * UPDATE 25 — the device-voice OUTPUT is GONE. The owner (2026-11-27
+ * 19:01 IST): "Phone Ki Awaz Mat Do Proper Ai Ki Voice Chahiye Muje".
+ * Speech synthesis (speechSynthesis) is no longer a speech path
+ * anywhere: VoiceController.speak() returns false and never touches
+ * a synthesis object, and no code in this module creates an
+ * utterance. Spoken replies are AI voice only (src/lib/ai-voice.ts:
+ * quota + Interactions API + <audio> playback). When the AI voice
+ * cannot speak, the reply stays text-only — never the device voice.
+ * Speech INPUT (recognition) is unchanged and still lives here.
+ *
+ * UPDATE 25 — STT thresholds unified with Android (C-16): low-
+ * confidence 0.5 (was 0.6 web / 0.45 Android), duplicate window
+ * 5 s (was 6 s web / 4 s Android) — the same mumble is treated the
+ * same on both surfaces.
  *
  * The conversational intelligence behind the reply is the SAME
  * provider-neutral conversational-AI client as text chat
@@ -40,8 +54,8 @@
  *  1. Pure, dependency-free helpers (pickVoice, cleanSpokenText,
  *     handleVoiceTranscript, ...) — unit-tested without a browser.
  *  2. VoiceController — a thin, injectable adapter over the browser
- *     SpeechRecognition / speechSynthesis objects. Tests drive it
- *     with fakes; the chat UI uses the real browser objects.
+ *     SpeechRecognition object (input only). Tests drive it with
+ *     fakes; the chat UI uses the real browser object.
  * This VM has no microphone, so no real-voice conversation is ever
  * claimed as tested here — see tests/voice.test.mjs.
  */
@@ -102,18 +116,17 @@ export function preferredVoiceName(settings: VoiceSettings, langCode: AiLangCode
 export interface SpeechEnv {
   SpeechRecognition?: unknown;
   webkitSpeechRecognition?: unknown;
-  speechSynthesis?: unknown;
 }
 
 export function isSpeechRecognitionSupported(env: SpeechEnv): boolean {
   return Boolean(env.SpeechRecognition || env.webkitSpeechRecognition);
 }
 
-export function isSpeechSynthesisSupported(env: SpeechEnv): boolean {
-  return Boolean(env.speechSynthesis);
-}
-
-/* ================= Voice picking (TTS) ================= */
+/* ================= Voice picking (device voices — legacy) =================
+ * pickVoice / preferredVoiceName are pure helpers kept for the
+ * Settings voice-name plumbing and the unit tests. They no longer
+ * drive any speech output: UPDATE 25 removed the device voice
+ * entirely (ai-voice.ts is the only speech path). */
 
 export interface SpeechVoiceLike {
   name: string;
@@ -152,7 +165,7 @@ export function pickVoice(
   return voices[0];
 }
 
-/** BCP-47 tag to request from recognition / synthesis for a reply. */
+/** BCP-47 tag to request from recognition for a reply language. */
 export function recognitionLangFor(profile: BusinessProfile | null | undefined, text: string): string {
   if (profile?.aiLanguage && profile.aiLanguage !== 'auto') return voiceLangFor(profile.aiLanguage);
   return voiceLangFor(detectLanguage(text).code);
@@ -178,7 +191,8 @@ export function cleanSpokenText(text: string, maxChars = 400): string {
   const lastStop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('। '), cut.lastIndexOf('? '), cut.lastIndexOf('! '));
   if (lastStop > maxChars * 0.4) return cut.slice(0, lastStop + 1).trim();
   const lastSpace = cut.lastIndexOf(' ');
-  return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trim() + '…';
+  // Keep the total at most maxChars even with the trailing '…'.
+  return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut.slice(0, maxChars - 1)).trim() + '…';
 }
 
 /** "Short mein batao": keep only the first N sentences of a reply. */
@@ -233,8 +247,8 @@ export const INTERRUPT_ACK_GU = 'Barabar — tunkma kahish. Bolo, shu joie chhe?
 
 /* ================= Transcript handling (the voice edge) ================= */
 
-export const LOW_CONFIDENCE_THRESHOLD = 0.6;
-export const REPEAT_WINDOW_MS = 6000;
+export const LOW_CONFIDENCE_THRESHOLD = 0.5;
+export const REPEAT_WINDOW_MS = 5000;
 
 export function normalizeTranscript(text: string): string {
   return (text || '').trim().replace(/\s+/g, ' ').replace(/[।.]+$/, '').toLowerCase();
@@ -363,28 +377,9 @@ export interface SpeechRecognitionLike {
   abort?: () => void;
 }
 
-export interface UtteranceLike {
-  text: string;
-  lang: string;
-  rate: number;
-  voice?: SpeechVoiceLike | undefined;
-  onend: (() => void) | null;
-  onerror: ((error: string) => void) | null;
-  onboundary: ((charIndex: number) => void) | null;
-}
-
-export interface SpeechSynthesisLike {
-  speak: (u: UtteranceLike) => void;
-  cancel: () => void;
-  getVoices: () => SpeechVoiceLike[];
-  speaking: boolean;
-}
-
 export interface VoiceControllerDeps {
   /** Factory for a fresh recognition object (null = unsupported). */
   createRecognition: () => SpeechRecognitionLike | null;
-  synthesis: SpeechSynthesisLike | null;
-  createUtterance: (text: string) => UtteranceLike;
   getSettings: () => VoiceSettings;
   /** Test hook: silence timeout (default SILENCE_TIMEOUT_MS). */
   silenceTimeoutMs?: number;
@@ -395,18 +390,16 @@ export interface VoiceControllerCallbacks {
   onFinalTranscript: (text: string, confidence: number | null) => void;
   onInterimTranscript: (text: string) => void;
   onError: (kind: VoiceErrorKind) => void;
-  /** A spoken reply finished (used to restart listening in continuous mode). */
-  onSpeechEnd: () => void;
-  /** Speech-synthesis boundary event (word highlight). */
-  onBoundary: (charIndex: number) => void;
 }
 
 /**
- * Thin adapter over the browser voice objects. It owns NO business
- * logic: transcripts go out through onFinalTranscript (the chat UI
- * routes them through handleVoiceTranscript + send()), and replies
- * come in through speak(). Continuous mode restarts listening after
- * each result and after each spoken reply — always visibly, through
+ * Thin adapter over the browser speech-recognition object (INPUT
+ * only — UPDATE 25 removed the device-voice output; spoken replies
+ * are AI voice via ai-voice.ts, and the chat UI owns that player).
+ * It owns NO business logic: transcripts go out through
+ * onFinalTranscript (the chat UI routes them through
+ * handleVoiceTranscript + send()). Continuous mode restarts
+ * listening after each result — always visibly, through
  * onState('listening'), never secretly.
  */
 export class VoiceController {
@@ -417,16 +410,11 @@ export class VoiceController {
   private continuous = false;
   private listeningWanted = false;
   /** True while a recognition session is live. In continuous mode the
-   *  session stays live across results — it must NOT be restarted
-   *  after every spoken reply (a second live session throws in
-   *  Chrome). Restart only happens when the session actually ended
-   *  (onend) or was never started. */
+   *  session stays live across results. Restart only happens when
+   *  the session actually ended (onend) or was never started. */
   private recognitionActive = false;
-  private speakingNow = false;
   private silenceTimer: ReturnType<typeof setTimeout> | null = null;
-  private suppressRestartOnce = false;
   private disposed = false;
-  private lastSpoken: UtteranceLike | null = null;
 
   constructor(deps: VoiceControllerDeps, cb: VoiceControllerCallbacks) {
     this.deps = deps;
@@ -441,8 +429,12 @@ export class VoiceController {
     return this.state === 'listening';
   }
 
+  /** UPDATE 25: always false — the device voice is gone, so this
+   *  controller never speaks. The chat UI tracks AI-voice playback
+   *  (AiVoicePlayer) separately. Kept so callers can ask without
+   *  knowing which voice path is live. */
   get isSpeaking(): boolean {
-    return this.speakingNow;
+    return false;
   }
 
   setContinuous(on: boolean): void {
@@ -472,7 +464,6 @@ export class VoiceController {
   /** Start listening for one utterance (or continuously, if set). */
   startListening(langBcp47: string): boolean {
     if (this.disposed) return false;
-    this.stopSpeakingInternal();
     const recog = this.deps.createRecognition();
     if (!recog) {
       this.cb.onError('unsupported');
@@ -551,89 +542,32 @@ export class VoiceController {
     this.stopListeningInternal();
   }
 
-  /** Speak a reply aloud. Returns false when speech is unavailable. */
-  speak(text: string, langBcp47: string): boolean {
-    if (this.disposed) return false;
-    const synth = this.deps.synthesis;
-    if (!synth) return false;
-    const settings = this.deps.getSettings();
-    const spoken = cleanSpokenText(text);
-    if (!spoken) return false;
-    // A fresh utterance starts fresh: an earlier interrupt must not
-    // suppress the restart after THIS reply finishes speaking.
-    this.suppressRestartOnce = false;
-    try {
-      synth.cancel();
-    } catch { /* ignore */ }
-    const u = this.deps.createUtterance(spoken);
-    u.lang = langBcp47;
-    u.rate = settings.rate;
-    const voices = (() => { try { return synth.getVoices(); } catch { return []; } })();
-    u.voice = pickVoice(voices, langBcp47, preferredVoiceName(settings, langBcp47 as AiLangCode) || undefined);
-    this.speakingNow = true;
-    this.lastSpoken = u;
-    this.setState('speaking');
-    u.onboundary = (charIndex) => { if (!this.disposed) this.cb.onBoundary(charIndex); };
-    const finish = () => {
-      if (this.lastSpoken !== u) return;
-      this.speakingNow = false;
-      this.lastSpoken = null;
-      if (this.disposed) return;
-      // Restart listening only when no recognition session is live:
-      // in continuous mode the session usually survives the reply,
-      // and the state must keep showing "listening" while it does —
-      // the mic is never shown idle while it is actually on.
-      const restart = this.continuous && this.listeningWanted && !this.recognitionActive && !this.suppressRestartOnce;
-      this.suppressRestartOnce = false;
-      if (restart) {
-        this.setState('listening');
-        this.cb.onSpeechEnd();
-        this.startListening(langBcp47);
-        return;
-      }
-      this.setState(this.recognitionActive && this.listeningWanted ? 'listening' : 'idle');
-      this.cb.onSpeechEnd();
-    };
-    u.onend = finish;
-    u.onerror = (err) => {
-      if (err === 'canceled' || err === 'interrupted') { finish(); return; }
-      this.speakingNow = false;
-      this.lastSpoken = null;
-      if (!this.disposed) this.setState('idle');
-    };
-    try {
-      synth.speak(u);
-    } catch {
-      this.speakingNow = false;
-      this.lastSpoken = null;
-      this.setState('idle');
-      return false;
-    }
-    return true;
+  /**
+   * UPDATE 25 — device voice REMOVED by the owner's instruction
+   * ("Phone Ki Awaz Mat Do Proper Ai Ki Voice Chahiye Muje"). This
+   * method now always returns false and never touches any speech
+   * synthesis object: there is no device-voice fallback anywhere.
+   * Spoken replies go through AiVoicePlayer (ai-voice.ts). Kept as a
+   * method (rather than deleted) so old call sites fail loudly in
+   * tests instead of silently speaking with the phone's voice.
+   */
+  speak(_text: string, _langBcp47: string): boolean {
+    void _text;
+    void _langBcp47;
+    return false;
   }
 
-  private stopSpeakingInternal(): void {
-    const synth = this.deps.synthesis;
-    if (synth && this.speakingNow) {
-      try { synth.cancel(); } catch { /* ignore */ }
-    }
-    this.speakingNow = false;
-    this.lastSpoken = null;
+  /** Stop any speech state. The AI-voice player is owned by the chat
+   *  UI, not by this controller — interruptSpeech() here only clears
+   *  the controller's own state (it never speaks, so there is
+   *  nothing to cancel). The UI stops the <audio> player itself. */
+  interruptSpeech(): void {
     if (this.state === 'speaking') this.setState('idle');
   }
 
-  /** Stop the current speech immediately (mic tap / Stop button /
-   *  "Bas, short mein batao"). Does NOT stop listening — the new
-   *  instruction can come straight away. */
-  interruptSpeech(): void {
-    this.suppressRestartOnce = true;
-    this.stopSpeakingInternal();
-  }
-
-  /** Stop everything: speech + listening. The mic is never left on. */
+  /** Stop everything: listening off. The mic is never left on. */
   stopAll(): void {
-    this.suppressRestartOnce = true;
-    this.stopSpeakingInternal();
+    this.interruptSpeech();
     this.stopListeningInternal();
   }
 

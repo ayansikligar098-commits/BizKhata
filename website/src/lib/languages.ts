@@ -161,7 +161,7 @@ export const VOCAB_ENTRIES: VocabEntry[] = [
   ['transfer', 'ट्रांसफर', 'ટ્રાન્સફર', 'ট্রান্সফার', 'ਟ੍ਰਾਂਸਫਰ', 'பரிமாற்றம்', 'బదిలీ', 'ವರ್ಗಾವಣೆ', 'ട്രാൻസ്ഫർ', 'ଟ୍ରାନ୍ସଫର', 'ট্ৰেন্সফাৰ', 'ٹرانسفر', 'स्थानान्तरणम्', 'ٹرانسفر', 'ट्रान्सफर', 'ٽرانسفر', 'bheja', 'bheje', 'bhej', 'parimaatram', 'badili', 'vargavane', 'transfer'],
   ['commission', 'कमीशन', 'કમિશન', 'কমিশন', 'ਕਮਿਸ਼ਨ', 'கமிஷன்', 'కమిషన్', 'ಕಮಿಷನ್', 'കമ്മീഷൻ', 'କମିଶନ', 'কমিছন', 'کمیشن', 'आयोगः', 'کمیٖشن', 'कमिसन', 'ڪميشن', 'kamishan', 'commission'],
   ['kamai', 'कमाई', 'કમાણી', 'আয়', 'ਕਮਾਈ', 'வருமானம்', 'ఆదాయం', 'ಆದಾಯ', 'വരുമാനം', 'ଆୟ', 'আয়', 'کمائی', 'आयः', 'کمایٖ', 'कमाई', 'ڪمائي', 'kamani', 'aay', 'varumanam', 'aadayam', 'aadaaya', 'varumanam', 'aaya', 'kamai', 'income', 'earning'],
-  ['dhandha', 'धंधा', 'ધંધો', 'ব্যবসা', 'ਧੰਦਾ', 'வியாபாரம்', 'వ్యాపారం', 'ವ್ಯಾಪಾರ', 'ബിസിനസ്', 'ବ୍ୟବସାୟ', 'ব্যৱসায়', 'دھندہ', 'व्यापारः', 'دھندٕ', 'धन्दा', 'ڌنڌو', 'dhandho', 'vyapaar', 'vyaparam', 'vyaparam', 'vyapara', 'business', 'byabsa', 'dhanda', 'hisab', 'हिसाब', 'હિસાબ', 'হিসাব', 'ਹਿਸਾਬ', 'கணக்கு', 'లెక్క', 'ಲೆಕ್ಕ', 'കണക്ക്', 'ହିସାବ', 'হিচাপ', 'حساب', 'गणना', 'حساب', 'हिसाब', 'حساب', 'hisab', 'kanakku', 'lekka', 'hisab'],
+  ['dhandha', 'धंधा', 'ધંધો', 'ব্যবসা', 'ਧੰਦਾ', 'வியாபாரம்', 'వ్యాపారం', 'ವ್ಯಾಪಾರ', 'ബിസിനസ്', 'ବ୍ୟବସାୟ', 'ব্যৱসায়', 'دھندہ', 'व्यापारः', 'دھندٕ', 'धन्दा', 'ڌنڌو', 'dhandho', 'vyapaar', 'vyaparam', 'vyaparam', 'vyapara', 'business', 'byabsa', 'dhanda', 'hisab', 'हिसाब', 'હિસાબ', 'হিসাব', 'ਹਿਸਾਬ', 'கணக்கு', 'లెక్క', 'ಲೆಕ್ಕ', 'കണക്ക്', 'ହିସାବ', 'হিচাপ', 'حساب', 'गणना', 'حساب', 'हिसाब', 'حساب', 'hisab', 'kanakku', 'lekka', 'hisab', 'dhadhe', 'dhande', 'dhandhe'],
   ['mahina', 'महीना', 'મહિનો', 'মাস', 'ਮਹੀਨਾ', 'மாதம்', 'నెల', 'ತಿಂಗಳು', 'മാസം', 'ମାସ', 'মাহ', 'مہینہ', 'मासः', 'مہیٖنہ', 'महिना', 'مهينو', 'mahino', 'maas', 'maadham', 'nela', 'thingalu', 'maasam', 'maasa', 'maah', 'mahina'],
   ['saal', 'साल', 'વર્ષ', 'বছর', 'ਸਾਲ', 'ஆண்டு', 'సంవత్సరం', 'ವರ್ಷ', 'വർഷം', 'ବର୍ଷ', 'বছৰ', 'سال', 'वर्षम्', 'ؤرِ', 'साल', 'سال', 'varsh', 'bochhor', 'aandu', 'samvatsaram', 'varsha', 'varsham', 'barsha', 'bosor', 'saal'],
   ['hafta', 'हफ्ता', 'અઠવાડિયું', 'সপ্তাহ', 'ਹਫ਼ਤਾ', 'வாரம்', 'వారం', 'ವಾರ', 'ആഴ്ച', 'ସପ୍ତାହ', 'সপ্তাহ', 'ہفتہ', 'सप्ताहः', 'ہفتہٕ', 'हप्ता', 'هفتو', 'athvadiyu', 'soptah', 'hafta', 'vaaram', 'vaaram', 'vaara', 'aazhcha', 'saptaha', 'hapta', 'hafto'],
@@ -351,7 +351,13 @@ export function detectLanguage(text: string): DetectedLanguage {
     // are Hinglish too — without them a bare "Namaste" scored as
     // English and the first reply came back in English.
     if (has(/\b(kaise|bhai|hoon|hun|mujhe|kaisa|namaste|namaskar|salaam|adaab|ram ram)\b/)
-      || (has(/\b(kya|hai|rahe|mera|tum|batao|banane|chahiye|tha|nahi|nahin|raha|rahi|chal|gaya|hua)\b/) && has(/\b(aaj|kal|kitna|kaam|shop|hisab|dhandha|kharcha|rupaye|kaisa|internet|printer|phone|upi|payment|wifi|computer|mobile|slow|fail|band|garam|hang)\b/))) {
+      || (has(/\b(kya|hai|rahe|mera|tum|batao|banane|chahiye|tha|nahi|nahin|raha|rahi|chal|gaya|hua)\b/) && has(/\b(aaj|kal|kitna|kaam|shop|hisab|dhandha|kharcha|rupaye|kaisa|internet|printer|phone|upi|payment|wifi|computer|mobile|slow|fail|band|garam|hang)\b/))
+      // UPDATE 25 (C-14): weak-marker Hinglish — "samjhao", "kiya",
+      // "mila" are Hinglish verbs; combined with a Hindi function
+      // word (ke/ko/ne/se/mein) or a shop word they are enough.
+      // "PAN card ke baare mein samjhao" and "Rahul ko 10000 transfer
+      // kiya commission 50 mila" both hit this, never English.
+      || (has(/\b(samjhao|samjha|kiya|kiye|mila|mile|samajh|batao)\b/) && has(/\b(ke|ka|ki|ko|ne|se|mein|me|pan|aadhaar|transfer|commission|bare|baare)\b/))) {
       return { code: 'hi', style: 'romanized', confidence: 0.85, languages: ['hi'], script: null };
     }
   }
@@ -373,7 +379,7 @@ export function detectLanguage(text: string): DetectedLanguage {
     or: ['aji', 'kete', 'kemiti', 'kana', 'gatakali', 'milila'],
     as: ['aji', 'kiman', 'ketiya', 'kowa', 'palo'],
     ur: ['aaj', 'kitna', 'batao', 'paisa', 'diye', 'kya', 'kaise'],
-    hi: ['aaj', 'kal', 'kitna', 'batao', 'munafa', 'kharcha', 'baaki', 'kaise', 'bhai', 'kya', 'hai', 'hoon', 'rahe', 'mujhe', 'mera', 'tum', 'karna', 'banane', 'chahiye', 'tha', 'kaisa', 'nahi', 'raha', 'chal', 'kaam', 'gaya', 'hua', 'namaste', 'namaskar', 'salaam', 'adaab'],
+    hi: ['aaj', 'kal', 'kitna', 'batao', 'munafa', 'kharcha', 'baaki', 'kaise', 'bhai', 'kya', 'hai', 'hoon', 'rahe', 'mujhe', 'mera', 'tum', 'karna', 'banane', 'chahiye', 'tha', 'kaisa', 'nahi', 'raha', 'chal', 'kaam', 'gaya', 'hua', 'namaste', 'namaskar', 'salaam', 'adaab', 'samjhao', 'samjha', 'kiya', 'kiye', 'mila', 'mile', 'ko', 'ne', 'se'],
     ne: ['aaja', 'kati', 'kasari', 'kahile', 'paayo', 'hijo'],
     sa: ['adya', 'katham', 'labhah', 'vyayah'],
     ks: ['az', 'kith', 'kath', 'chhu'],
@@ -418,7 +424,12 @@ export function detectLanguage(text: string): DetectedLanguage {
   const second = ranked[1];
   const mixed = ranked.length >= 2 && second && second[1] >= 1 && top && top[1] <= second[1] + 2;
   // English: Latin script, no non-English markers, English words present.
-  const englishWords = /\b(today|yesterday|profit|expense|income|balance|how much|total|customer|agent|money|cash|upi|show|tell|open|what|is|the)\b/.test(lower);
+  // UPDATE 25 (C-14): 'upi' is NOT an English word — it used to make
+  // "Aur 200 UPI" score as English (0.8). 'cash' stays: it is shared,
+  // but a bare "cash" message with no Hinglish marker is genuinely
+  // ambiguous and the low-confidence fallback (conversation.ts) keeps
+  // the conversation language instead of flipping to English.
+  const englishWords = /\b(today|yesterday|profit|expense|income|balance|how much|total|customer|agent|money|cash|show|tell|open|what|is|the)\b/.test(lower);
   if (!script && !top) {
     return { code: 'en', style: 'english', confidence: englishWords ? 0.8 : 0.5, languages: ['en'], script: null };
   }

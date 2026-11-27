@@ -31,7 +31,7 @@
  * call lives in the chat UI, which replaces the text only when the
  * service actually answers.
  */
-import { answerLocally, computeFacts, parseAssistantMessage, type ParsedMessage } from './chatbot';
+import { answerLocally, computeFacts, entryPreviewLine, findDuplicateWarning, parseAssistantMessage, type ParsedMessage } from './chatbot';
 import { applyAssistantAction, findAssistantTargetById, type AssistantAction } from './assistant';
 import {
   answerGeneral, buildChecklist, checklistDocItems, checklistItemsFor, checklistText,
@@ -44,7 +44,10 @@ import {
 } from './intent';
 import { computeKnowledge, navigationRequest, type ActiveChecklist, type ChatContext, type KnowledgeTable } from './knowledge';
 import { detectLanguage, LANG_BY_CODE, replyIn, type AiLangCode } from './languages';
+import { hasAiServiceKey } from './conversation-ai';
+import { shortenForVoice } from './voice';
 import { formatINR } from './money';
+import { todayISO } from './types';
 import {
   appChangeQueuedText, appChangeSpecText, buildAppChangeSpec, listDevRequests, queueDevRequest,
   type AppChangeSpec, type DevRequest,
@@ -146,7 +149,8 @@ export function respondToMessage(opts: {
 }): ConversationResult {
   const { message, state, profile } = opts;
   const ctx: ChatContext = opts.ctx || {};
-  const detectedLang = detectLanguage(message).code;
+  const det = detectLanguage(message);
+  const detectedLang = det.code;
   // A bare follow-up ("5", "Ha", "Aur 200 UPI") carries no language
   // signal of its own — keep the conversation's language instead of
   // defaulting to English. Without this the confirm prompt flipped
@@ -158,9 +162,16 @@ export function respondToMessage(opts: {
     || /^\d+\s*$/.test(message.trim())
     || /^(haan?|ha+|yes|nahi|nahin|no)\b/i.test(message.trim())
     || /^(shukriya|dhanyavaad?|thanks?|thank you|bye|alvida|namaste|namaskar|hi+|hello|hey|theek hai|ok+)\b/i.test(message.trim());
+  // UPDATE 25 (C-14): a LOW-CONFIDENCE detection (≤0.5 — the message
+  // carries almost no language signal, e.g. "PAN card ke baare mein
+  // samjhao", "Rahul ko 10000 transfer kiya...") falls back to the
+  // conversation language instead of flipping the reply to English.
+  // The follow-up stickiness above already did this for short
+  // messages; this extends it to every low-confidence message.
   const lang: AiLangCode = opts.preferredLang && opts.preferredLang !== 'auto'
     ? opts.preferredLang
     : isFollowup && ctx.lastLanguage ? ctx.lastLanguage
+    : det.confidence <= 0.5 && ctx.lastLanguage ? ctx.lastLanguage
     : /[\p{L}]/u.test(message) ? detectedLang : (ctx.lastLanguage || detectedLang);
   const intent = classifyIntent(message, ctx, profile.services);
   const baseCtx: ChatContext = { ...ctx, lastLanguage: lang };
@@ -193,6 +204,59 @@ export function respondToMessage(opts: {
     const code = detectLanguageSwitch(message)!;
     const text = LANG_SWITCH_REPLY[code] || LANG_SWITCH_REPLY.en;
     return done({ text, kind: 'text', languageChanged: code, newCtx: { ...baseCtx, lastTopic: 'language' } });
+  }
+
+  // --- Key status (UPDATE 25, C-7): "Mene Key Dal Di Starting Me" —
+  //     check the ACTUAL on-device key slot and answer honestly.
+  //     This also answers the open UPDATE 14/15 key-migration
+  //     question: the answer comes from the device's storage state,
+  //     never a guess, and the key itself is never shown.
+  if (intent === 'key_status') {
+    const saved = hasAiServiceKey();
+    const text = saved
+      ? (lang === 'en'
+        ? 'Haan — key save hai ✓, AI chat chalu hai. Kuch bhi poochho, main jawab dunga.'
+        : 'Haan, key save hai ✓ — AI chat chalu hai. Kuch bhi poochho, main jawab dunga.')
+      : (lang === 'en'
+        ? 'Key save nahi dikh rahi — Settings → AI Chat mein check karo. Wahan key save karo, phir AI chat chalega.'
+        : 'Key save nahi dikh rahi — Settings → AI Chat mein check karo. Wahan key save karo, phir AI chat chalega.');
+    return done({ text, newCtx: { ...baseCtx, lastTopic: 'general' } });
+  }
+
+  // --- Translate THIS reply (UPDATE 25, C-13): "Aur English mein
+  //     likho" with no active checklist translates just the last
+  //     reply. It NEVER changes profile.aiLanguage (no
+  //     languageChanged). The real translation comes from the cloud
+  //     engine when a key is saved (cloudNeeded); without a key the
+  //     last reply is shown again with an honest note in the target
+  //     language — the profile language stays exactly as it was.
+  if (intent === 'translate_reply') {
+    const target = targetLangFor(message) || 'en';
+    const last = (ctx.lastBotText || '').trim();
+    if (!last) {
+      const text = target === 'en'
+        ? 'Which reply should I translate? Please tell me what to translate.'
+        : target === 'gu'
+          ? 'Kevo jawab translate karvo chhe? Kaho, shu translate karu.'
+          : 'Kaunsa jawab translate karun? Batao, kya translate karna hai.';
+      return done({ text, newCtx: { ...baseCtx, lastTopic: 'general' } });
+    }
+    const note = target === 'en'
+      ? '\n\n(Translation needs the AI chat key — add it in Settings → AI Chat. Maine aapki bhasha setting nahi badli hai.)'
+      : target === 'gu'
+        ? '\n\n(Translate karva mate AI chat ni key joie chhe — Settings → AI Chat ma key add karo. Me tamari bhasha setting badli nathi.)'
+        : '\n\n(Translate karne ke liye AI chat ki key chahiye — Settings → AI Chat mein key add karo. Maine aapki bhasha setting nahi badli hai.)';
+    return done({ text: `${last}${note}`, cloudNeeded: true, newCtx: { ...baseCtx, lastTopic: 'general', translateTarget: target } });
+  }
+
+  // --- Shorten the last reply (UPDATE 25, C-17): typed "Bas, short
+  //     mein batao" — first 2 sentences of the last reply, nothing else.
+  if (intent === 'shorten_reply') {
+    const last = (ctx.lastBotText || '').trim();
+    if (!last) {
+      return done({ text: lang === 'en' ? 'There is no reply to shorten yet — ask me something first.' : 'Abhi koi jawab nahi hai jo short karun — pehle kuch poochho.', newCtx: { ...baseCtx, lastTopic: 'general' } });
+    }
+    return done({ text: shortenForVoice(last, 2), newCtx: { ...baseCtx, lastTopic: 'general' } });
   }
 
   // --- Navigation (UPDATE 16: actually open the page). ---
@@ -469,22 +533,48 @@ export function respondToMessage(opts: {
   if (intent === 'business_action') {
     const parsed = parseAssistantMessage(message, state, profile, ctx);
     if (parsed.kind === 'action') {
+      // UPDATE 25 (C-1): a follow-up amount ("Aur 200 UPI" after a
+      // ₹300 cash preview) APPENDS to the pending preview instead of
+      // replacing it — "Aaj Xerox ke 300 cash hue" → "Aur 200 UPI" →
+      // "Ha" must save BOTH entries. Only daily_income merges, and
+      // only when the message is a follow-up amount (starts with
+      // aur/bhi/... or carries aur/bhi with a pending preview). The
+      // chat UI only passes ctx.pendingAction while a preview is
+      // actually pending (after Confirm/Cancel it passes none), so a
+      // follow-up after a SAVED entry starts a fresh preview.
+      let finalAction = parsed.action;
+      let finalLines = parsed.previewLines;
+      let finalTotal = parsed.totalPaise;
+      let finalDup = parsed.duplicateWarning;
+      const prev = ctx.pendingAction;
+      const isFollowupAmount = /^(aur|or|also|bhi|add|phir)\b/i.test(message.trim())
+        || /\b(aur|bhi)\b/i.test(message);
+      if (prev?.kind === 'daily_income' && parsed.action.kind === 'daily_income' && isFollowupAmount) {
+        const mergedEntries = [...prev.entries, ...parsed.action.entries];
+        finalAction = { ...parsed.action, date: prev.date, entries: mergedEntries };
+        finalLines = [
+          ...prev.entries.map((e) => entryPreviewLine(e, prev.date, todayISO())),
+          ...parsed.previewLines,
+        ];
+        finalTotal = mergedEntries.reduce((a, e) => a + e.amountPaise, 0);
+        finalDup = findDuplicateWarning(state, profile.id, finalAction) || parsed.duplicateWarning;
+      }
       // Record the service NOW (at preview time), so the next message
       // ("Aur 200 UPI") resolves as a follow-up on the same service —
       // waiting for confirmation would lose it (UPDATE 21 §5). Also
       // keep the whole previewed action, so a correction ("Nahi, 250
       // the") can rebuild the preview instead of starting over.
-      const svc = parsed.action.kind === 'daily_income' ? parsed.action.entries[0]?.service
-        : parsed.action.kind === 'refund' ? parsed.action.service
+      const svc = finalAction.kind === 'daily_income' ? finalAction.entries[0]?.service
+        : finalAction.kind === 'refund' ? finalAction.service
         : undefined;
       return done({
         text: replyIn(lang, 'confirmPrompt'),
         kind: 'action',
-        action: parsed.action,
-        previewLines: parsed.previewLines,
-        totalPaise: parsed.totalPaise,
-        duplicateWarning: parsed.duplicateWarning,
-        newCtx: { ...baseCtx, lastTopic: 'action', lastService: svc || ctx.lastService, pendingAction: parsed.action },
+        action: finalAction,
+        previewLines: finalLines,
+        totalPaise: finalTotal,
+        duplicateWarning: finalDup,
+        newCtx: { ...baseCtx, lastTopic: 'action', lastService: svc || ctx.lastService, pendingAction: finalAction },
       });
     }
     if (parsed.kind === 'draft') {

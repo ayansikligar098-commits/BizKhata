@@ -46,6 +46,7 @@
  * through preview → confirm → backend flow (assistant.ts).
  */
 import type { AiLangCode } from './languages';
+import { detectLanguage } from './languages';
 import { consumeSSE, StreamError } from './streaming';
 
 /** Local-storage keys (browser only; never part of the app state). */
@@ -312,6 +313,26 @@ export function guardCloudReply(
     return { text: HONEST_DELETE_LIMIT, blocked: true, reason: 'financial_claim' };
   }
   return { text: t, blocked: false, reason: null };
+}
+
+/**
+ * UPDATE 25 (C-15): did a successful cloud reply stay in the user's
+ * language? The system prompt ASKS for it, but a cloud reply in
+ * English to a Hinglish user (or a Marathi-mixed reply) used to be
+ * shown as-is. The chat UI calls this at stream completion: on a
+ * mismatch it shows the local reply instead (never the wrong-
+ * language cloud text). Uncertain detections (confidence < 0.7, or
+ * a mixed reply that still contains the expected language) pass —
+ * the check only fires on a clear mismatch.
+ */
+export function cloudReplyMatchesLanguage(text: string, expected: AiLangCode): boolean {
+  const t = String(text || '').trim();
+  if (!/[\p{L}]/u.test(t)) return true;
+  const det = detectLanguage(t);
+  if (det.code === expected) return true;
+  if (det.confidence < 0.7) return true;
+  if (det.languages && det.languages.includes(expected)) return true;
+  return false;
 }
 
 /**

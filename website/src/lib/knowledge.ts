@@ -164,6 +164,12 @@ export interface ChatContext {
   /** Last unified intent (intent.ts) + reply language, for context. */
   lastIntent?: string;
   lastLanguage?: AiLangCode;
+  /** UPDATE 25: the last bot reply's text (set by the chat UI each
+   *  turn) — "Aur English mein likho" translates THIS reply, and
+   *  "Bas, short mein batao" shortens it. Never a financial record. */
+  lastBotText?: string;
+  /** UPDATE 25: the language a translate-this request asked for. */
+  translateTarget?: AiLangCode;
   /** Honest no-key notice already shown once in this conversation. */
   keyNoticeShown?: boolean;
 }
@@ -388,6 +394,13 @@ export function appHelp(q: string): KnowledgeAnswer | null {
   }
   if (/customer.*add|add.*customer|naya customer|new customer/.test(s)) {
     return help('Naya customer add karne ke liye:', ['Customers page kholo.', '"Add Customer" dabao.', 'Naam aur mobile number likho.', 'Save dabao — customer Customer Khata mein bhi dikhega.'], '/customers', 'Open Customers');
+  }
+  // UPDATE 25 (C-8): "Kaise add karu dhadhe ka" — how to add the
+  // day's shop work, with no feature word in the question. Daily
+  // Business is the place; give the steps + the link.
+  if (/kaise.*(add|likh|daal|note|likhu|karu|karna)/.test(s)
+    || (/dhadhe|dhande|dhandhe/.test(s) && /kaise/.test(s))) {
+    return help('Dukaan ka dhandha add karne ke liye — Daily Business:', ['Daily Business page kholo — yehi jagah hai din bhar ki mixed service collection likhne ki (Xerox, Printing, PAN Card, sab ek jagah).', '"Add Entry" dabao.', 'Service chuno (Xerox, Printing, PAN Card...), amount aur Cash/UPI likho.', 'Save dabao — entry Daily Business ke saath-saath Cash Book / UPI Book aur service report mein bhi dikhegi.', 'Ya seedha yahin chat mein likh do — jaise "Aaj Xerox ke 300 cash hue" — main preview dikhakar confirm karwaunga.'], '/daily-business', 'Open Daily Business');
   }
   if (/profile.*change|business.*(change|switch|badlo)|profile.*badlo/.test(s)) {
     return help('Business profile badalne ke liye:', ['Upar top bar mein business ka naam (profile switcher) dabao.', 'Jo business kholna hai use chuno.', 'Poora app usi business ka data dikhane lagega — profiles ka data kabhi mix nahi hota.'], '/dashboard', 'Open Dashboard');

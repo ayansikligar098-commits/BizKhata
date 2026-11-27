@@ -62,6 +62,12 @@ export interface BusinessProfile {
   voiceRate?: number;
   voiceContinuous?: boolean;
   voiceByLang?: Record<string, string>;
+  /** UPDATE 25: the AI voice picked in Settings → Voice (a prebuilt
+   *  voice name such as 'Kore'; default 'Kore'). The device-voice
+   *  fields above (voiceRate / voiceByLang) no longer drive any
+   *  speech output — the owner rejected the phone's voice; spoken
+   *  replies are AI voice only (src/lib/ai-voice.ts). */
+  aiVoice?: string;
   theme: Theme;
   createdAt: string;
 }

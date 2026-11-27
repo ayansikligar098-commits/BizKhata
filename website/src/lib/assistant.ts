@@ -36,7 +36,10 @@ export type AssistantAction =
   | {
       kind: 'daily_income';
       date: string;
-      entries: { service: string; amountPaise: number; method: 'cash' | 'upi' | 'other'; customerName?: string }[];
+      /** UPDATE 25 (C-11): an entry may carry its own date ("aaj ...
+       *  150, aur kal ke 200") — the backend saves each entry on its
+       *  own date instead of flattening both onto action.date. */
+      entries: { service: string; amountPaise: number; method: 'cash' | 'upi' | 'other'; customerName?: string; date?: string }[];
     }
   | {
       kind: 'expense';
@@ -275,6 +278,9 @@ export function applyAssistantAction(
         }
       }
       for (const e of action.entries) {
+        // UPDATE 25 (C-11): each entry is saved on its own date when
+        // the parser gave it one, else on the action date.
+        const eDate = e.date || date;
         if (e.customerName) {
           // Named customer → a real job. 'other' (udhaar) means the money
           // was NOT collected: received stays 0 and the full amount is
@@ -283,13 +289,13 @@ export function applyAssistantAction(
             id: uid('job'), profileId, service: e.service, customerName: e.customerName,
             mobile: '', refNo: '', status: 'Completed', totalPaise: e.amountPaise,
             receivedPaise: e.method === 'other' ? 0 : e.amountPaise, receivedMethod: e.method === 'other' ? 'cash' : e.method,
-            agentId: null, agentChargePaise: 0, agentPaidPaise: 0, date,
+            agentId: null, agentChargePaise: 0, agentPaidPaise: 0, date: eDate,
             notes: 'Added via AI Assistant', docIds: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
           };
           s.jobs.push(job);
           appliedIds.push(job.id);
           if (e.method !== 'other') {
-            const txn: CashTxn = { id: uid('txn'), profileId, kind: 'in', method: e.method, amountPaise: e.amountPaise, category: `${e.service} — ${e.customerName}`, note: `Job payment (${job.id})`, date, jobId: job.id, createdAt: new Date().toISOString() };
+            const txn: CashTxn = { id: uid('txn'), profileId, kind: 'in', method: e.method, amountPaise: e.amountPaise, category: `${e.service} — ${e.customerName}`, note: `Job payment (${job.id})`, date: eDate, jobId: job.id, createdAt: new Date().toISOString() };
             s.cashTxns.push(txn);
             appliedIds.push(txn.id);
           }
@@ -305,13 +311,13 @@ export function applyAssistantAction(
           const entry: DailyEntry = {
             id: uid('de'), profileId, service: e.service, description: `${e.service} collection`,
             quantity: 1, ratePaise: e.amountPaise, totalPaise: e.amountPaise, method: e.method,
-            expensePaise: 0, expenseMethod: 'cash', date, time: nowTime(),
+            expensePaise: 0, expenseMethod: 'cash', date: eDate, time: nowTime(),
             notes: 'Added via AI Assistant', createdAt: new Date().toISOString(),
           };
           s.dailyEntries.push(entry);
           appliedIds.push(entry.id);
           if (e.method !== 'other') {
-            const txn: CashTxn = { id: uid('txn'), profileId, kind: 'in', method: e.method, amountPaise: e.amountPaise, category: `${e.service} collection`, note: `Daily entry (${entry.id})`, date, dailyEntryId: entry.id, createdAt: new Date().toISOString() };
+            const txn: CashTxn = { id: uid('txn'), profileId, kind: 'in', method: e.method, amountPaise: e.amountPaise, category: `${e.service} collection`, note: `Daily entry (${entry.id})`, date: eDate, dailyEntryId: entry.id, createdAt: new Date().toISOString() };
             s.cashTxns.push(txn);
             appliedIds.push(txn.id);
           }

@@ -1,5 +1,12 @@
 /**
- * BizKhata voice acceptance suite — UPDATE 18.
+ * BizKhata voice acceptance suite — UPDATE 25 (device voice REMOVED).
+ *
+ * UPDATE 25: the phone/device voice is gone by the owner's instruction —
+ * speak() always returns false and never touches speechSynthesis. Spoken
+ * replies are a real AI voice (tests/ai-voice.test.mjs); this suite keeps
+ * the mic/STT side (recognition, transcripts, interruption edge) plus the
+ * pure helpers that still exist. The 'no device voice' assertion lives in
+ * the AI-voice suite (grep over the sources + speak() returns false).
  *
  * Drives the REAL conversational pipeline with SIMULATED transcripts
  * (text standing in for speech-recognition output) plus the real
@@ -13,7 +20,8 @@
  * navigation targets, spoken-text queue) — never animations. The
  * things that remain unverified until a real device is used are
  * listed at the end of the run: live microphone recognition quality
- * per language, real-device TTS voices, and the live cloud-AI reply
+ * per language, real AI-voice quality/latency on his phone, and the live
+ * cloud-AI reply
  * (no key is configured on this VM; the cloud path is tested here
  * only against a stubbed endpoint).
  *
@@ -135,51 +143,21 @@ class FakeRecognition {
   emitEnd() { if (this.onend) this.onend(); }
 }
 
-class FakeSynthesis {
-  static voices = [
-    { name: 'Google हिन्दी', lang: 'hi-IN', default: false },
-    { name: 'Google Gujarati', lang: 'gu-IN', default: false },
-    { name: 'Google US English', lang: 'en-US', default: true },
-  ];
-  constructor() {
-    this.spoken = [];
-    this.cancelCalls = 0;
-    this.utterances = [];
-    this.speaking = false;
-  }
-  speak(u) { this.spoken.push(u); this.utterances.push(u); this.speaking = true; }
-  cancel() { this.cancelCalls++; this.speaking = false; }
-  getVoices() { return FakeSynthesis.voices; }
-  finishLast() {
-    const u = this.utterances[this.utterances.length - 1];
-    this.speaking = false;
-    if (u && u.onend) u.onend();
-  }
-  fireBoundary(charIndex) {
-    const u = this.utterances[this.utterances.length - 1];
-    if (u && u.onboundary) u.onboundary(charIndex);
-  }
-}
+/** A static voice list for the pure pickVoice helper (kept — it is
+ *  still used by the legacy voice-name plumbing + these tests). */
+const FAKE_VOICES = [
+  { name: 'Google हिन्दी', lang: 'hi-IN', default: false },
+  { name: 'Google Gujarati', lang: 'gu-IN', default: false },
+  { name: 'Google US English', lang: 'en-US', default: true },
+];
 
-class FakeUtterance {
-  constructor(text) {
-    this.text = text;
-    this.lang = '';
-    this.rate = 1;
-    this.voice = undefined;
-    this.onend = null;
-    this.onerror = null;
-    this.onboundary = null;
-  }
-}
-
-function makeController(synth, settings, opts = {}) {
-  const events = { states: [], finals: [], interims: [], errors: [], speechEnds: 0, boundaries: [] };
+/** UPDATE 25: the controller is recognition-only now — no synthesis,
+ *  no utterance factory, no speech-end / boundary callbacks. */
+function makeController(settings, opts = {}) {
+  const events = { states: [], finals: [], interims: [], errors: [] };
   const ctrl = new voice.VoiceController(
     {
       createRecognition: () => new FakeRecognition(),
-      synthesis: synth,
-      createUtterance: (t) => new FakeUtterance(t),
       getSettings: () => settings,
       silenceTimeoutMs: opts.silenceTimeoutMs,
     },
@@ -188,8 +166,6 @@ function makeController(synth, settings, opts = {}) {
       onFinalTranscript: (t, c) => events.finals.push({ text: t, confidence: c }),
       onInterimTranscript: (t) => events.interims.push(t),
       onError: (k) => events.errors.push(k),
-      onSpeechEnd: () => events.speechEnds++,
-      onBoundary: (i) => events.boundaries.push(i),
     },
   );
   return { ctrl, events };
@@ -200,7 +176,7 @@ console.log('BizKhata voice — UPDATE 18 (simulated transcripts; no microphone 
 /* ================= 1. Pure voice helpers ================= */
 section('voice helpers (pure, no browser)');
 {
-  const voices = FakeSynthesis.voices;
+  const voices = FAKE_VOICES;
   check('pickVoice exact lang gu-IN', voice.pickVoice(voices, 'gu-IN')?.name, 'Google Gujarati');
   check('pickVoice preferred name wins', voice.pickVoice(voices, 'gu-IN', 'Google हिन्दी')?.name, 'Google हिन्दी');
   check('pickVoice prefix hi matches hi-IN', voice.pickVoice(voices, 'hi')?.name, 'Google हिन्दी');
@@ -241,12 +217,13 @@ section('voice helpers (pure, no browser)');
   check('SR webkit supported', voice.isSpeechRecognitionSupported({ webkitSpeechRecognition: {} }), true);
   check('SR unsupported', voice.isSpeechRecognitionSupported({}), false);
   check('silence timeout', voice.SILENCE_TIMEOUT_MS, 5000);
-  check('low confidence threshold', voice.LOW_CONFIDENCE_THRESHOLD, 0.6);
+  check('low confidence threshold (UPDATE 25 unified 0.5)', voice.LOW_CONFIDENCE_THRESHOLD, 0.5);
   const bcp = lang.SUPPORTED_LANGUAGES.map((l) => lang.voiceLangFor(l.code));
   check('all 23 languages have BCP-47 tags', bcp.every((t) => typeof t === 'string' && t.includes('-')), true);
   check('error message denied mentions permission', voice.voiceErrorMessage('denied').includes('permission'), true);
   check('error message unsupported mentions browser', voice.voiceErrorMessage('unsupported').includes('browser'), true);
   check('no provider name in voice messages', hasNone(Object.values(voice.VOICE_MESSAGES).join(' '), 'Gemini', 'Google', 'OpenAI', 'API key'), true);
+  check('speak() never speaks (UPDATE 25 — device voice removed)', new voice.VoiceController({ createRecognition: () => null, getSettings: () => ({ ...voice.DEFAULT_VOICE_SETTINGS }) }, { onState: () => {}, onFinalTranscript: () => {}, onInterimTranscript: () => {}, onError: () => {} }).speak('Namaste', 'hi-IN'), false);
 }
 
 /* ================= 2. The 6 brief sentences, VERBATIM ================= */
@@ -350,9 +327,14 @@ section('natural phrasing — his own words, no fixed grammar');
     const r1 = asst.applyAssistantAction(state, p1.id, first.res.action, 'voice-fu1');
     check('follow-up first saved', r1.ok, true);
     // The chat UI remembers the service just saved (lastService).
-    const ctx = { ...first.res.newCtx, lastService: 'Xerox', lastTopic: 'daily_income' };
+    // UPDATE 25 (C-1 gate): the first entry is SAVED now, so its
+    // preview is gone — the ctx handed to the follow-up must NOT
+    // carry pendingAction, or the saved entry would be re-previewed
+    // and saved twice. The follow-up is a fresh 1-entry action.
+    const ctx = { ...first.res.newCtx, pendingAction: undefined, lastService: 'Xerox', lastTopic: 'daily_income' };
     const second = conv.respondToMessage({ message: 'Aur 200 UPI bhi add kar do', state, profile: p1, ctx });
     check('follow-up text turn is action', second.kind, 'action');
+    check('follow-up is exactly 1 entry (no re-add of the saved one)', second.action.entries.length, 1);
     check('follow-up keeps Xerox service', second.action.entries[0].service, 'Xerox');
     check('follow-up is UPI 200', second.action.entries[0].method === 'upi' && second.action.entries[0].amountPaise === 20000, true);
     const r2 = asst.applyAssistantAction(state, p1.id, second.action, 'voice-fu2');
@@ -445,18 +427,16 @@ section('scenario 7 — open Cash Book by voice (actual navigation)');
   check('UPI Book navigates', upi.res.navigateTo, '/upi-book');
 }
 
-section('scenario 8 — interrupt AI speech');
+section('scenario 8 — interrupt AI speech (UPDATE 25: no device voice)');
 {
-  const synth = new FakeSynthesis();
-  const { ctrl, events } = makeController(synth, { ...voice.DEFAULT_VOICE_SETTINGS, rate: 1, continuous: false, voicesByLang: {} });
-  check('speak starts', ctrl.speak('Aaj ka hisab lamba jawab hai jo bol raha hai', 'hi-IN'), true);
-  check('controller speaking', ctrl.currentState, 'speaking');
-  check('utterance queued', synth.spoken.length, 1);
-  check('utterance lang hi-IN', synth.spoken[0].lang, 'hi-IN');
-  const cancelsBefore = synth.cancelCalls;
-  ctrl.interruptSpeech();
-  check('interrupt cancels speech', synth.cancelCalls, cancelsBefore + 1);
-  check('interrupt state idle', ctrl.currentState, 'idle');
+  // speak() is gone as a speech path: it returns false, queues
+  // nothing, and interruptSpeech() is a no-op for speech (the UI
+  // stops the <audio> player instead — tested in ai-voice.test.mjs).
+  const { ctrl } = makeController({ ...voice.DEFAULT_VOICE_SETTINGS, rate: 1, continuous: false, voicesByLang: {} });
+  check('speak returns false (no device voice)', ctrl.speak('Aaj ka hisab lamba jawab hai jo bol raha hai', 'hi-IN'), false);
+  check('controller never enters speaking state', ctrl.currentState, 'idle');
+  check('interrupt when idle is a safe no-op', (() => { ctrl.interruptSpeech(); return ctrl.currentState; })(), 'idle');
+  check('isSpeaking always false', ctrl.isSpeaking, false);
   // "Bas, short mein batao" + new instruction: stop + process the rest.
   const intr = voice.splitInterrupt('Bas, short mein batao, aaj ka hisab batao');
   check('interrupt remainder is the new instruction', intr.remainder, 'aaj ka hisab batao');
@@ -464,14 +444,6 @@ section('scenario 8 — interrupt AI speech');
   const { res } = voiceTurn(intr.remainder, {}, state, p1);
   check('new instruction answered after interrupt', has(res.text, '₹0.00'), true);
   check('short version is shorter', voice.shortenForVoice('Pehla. Dusra. Teesra.').length < 'Pehla. Dusra. Teesra.'.length, true);
-  // Boundary events drive the spoken-word highlight.
-  const synth2 = new FakeSynthesis();
-  const c2 = makeController(synth2, { ...voice.DEFAULT_VOICE_SETTINGS, rate: 1, continuous: false, voicesByLang: {} });
-  c2.ctrl.speak('Namaste bhai', 'hi-IN');
-  synth2.fireBoundary(4);
-  check('boundary event delivered', c2.events.boundaries[0], 4);
-  check('no crash on interrupt when idle', (() => { c2.ctrl.interruptSpeech(); return true; })(), true);
-  void events;
 }
 
 section('scenario 9 — voice ↔ text switching (context preserved)');
@@ -479,22 +451,25 @@ section('scenario 9 — voice ↔ text switching (context preserved)');
   const { state, p1 } = emptyState();
   const v1 = voiceTurn('Aaj Xerox ke 300 cash hue', {}, state, p1);
   asst.applyAssistantAction(state, p1.id, v1.res.action, 'voice-s9a');
-  const ctx = { ...v1.res.newCtx, lastService: 'Xerox', lastTopic: 'daily_income' };
+  // UPDATE 25 (C-1 gate): saved already → no pendingAction in ctx.
+  const ctx = { ...v1.res.newCtx, pendingAction: undefined, lastService: 'Xerox', lastTopic: 'daily_income' };
   // Text follow-up in the same conversation reuses the voice context.
   const t1 = conv.respondToMessage({ message: 'Aur 200 UPI bhi add kar do', state, profile: p1, ctx });
   check('text follow-up after voice works', t1.kind, 'action');
+  check('text follow-up is exactly 1 entry', t1.action.entries.length, 1);
   check('text follow-up same service', t1.action.entries[0].service, 'Xerox');
+  check('text follow-up is UPI 200', t1.action.entries[0].method === 'upi' && t1.action.entries[0].amountPaise === 20000, true);
+  asst.applyAssistantAction(state, p1.id, t1.action, 'voice-s9b');
   // And a voice turn after a text turn keeps the same history context.
-  const ctx2 = { ...t1.newCtx, lastService: 'Xerox', lastTopic: 'daily_income' };
+  const ctx2 = { ...t1.newCtx, pendingAction: undefined, lastService: 'Xerox', lastTopic: 'daily_income' };
   const v2 = voiceTurn('Aaj ka total hisab batao', ctx2, state, p1);
-  check('voice question after text works', has(v2.res.text, '₹300.00'), true);
+  check('voice question after text works (300 cash + 200 UPI)', has(v2.res.text, '₹500.00'), true);
 }
 
 section('scenario 10 — continuous mode (multi-turn, no re-tap)');
 {
   FakeRecognition.instances = [];
-  const synth = new FakeSynthesis();
-  const { ctrl, events } = makeController(synth, { ...voice.DEFAULT_VOICE_SETTINGS, rate: 1, continuous: true, voicesByLang: {} });
+  const { ctrl, events } = makeController({ ...voice.DEFAULT_VOICE_SETTINGS, rate: 1, continuous: true, voicesByLang: {} });
   ctrl.setContinuous(true);
   check('continuous listen starts', ctrl.startListening('hi-IN'), true);
   check('state listening', ctrl.currentState, 'listening');
@@ -503,12 +478,10 @@ section('scenario 10 — continuous mode (multi-turn, no re-tap)');
   check('interim transcript shown', events.interims[0], 'Kaise ho');
   rec1.emitFinal('Kaise ho bhai', 0.93);
   check('turn 1 transcript delivered', events.finals[0].text, 'Kaise ho bhai');
-  // In continuous mode the same session stays live across the reply.
+  // In continuous mode the same session stays live across turns —
+  // the reply is spoken by the AI-voice <audio> player (not here),
+  // and listening restarts from its onEnded (chatbot.tsx).
   check('session still live after turn 1', ctrl.currentState, 'listening');
-  check('speak reply', ctrl.speak('Main badhiya hoon bhai', 'hi-IN'), true);
-  synth.finishLast();
-  check('speech end reported', events.speechEnds, 1);
-  check('still listening after reply (session live)', ctrl.currentState, 'listening');
   // Turn 2 on the SAME session, without tapping the mic again.
   rec1.emitFinal('Aaj ka total hisab batao', 0.91);
   check('turn 2 transcript delivered without re-tap', events.finals[1].text, 'Aaj ka total hisab batao');
@@ -524,8 +497,7 @@ section('scenario 10 — continuous mode (multi-turn, no re-tap)');
 section('scenario 11 — mic permission denial (clean error, text fallback)');
 {
   FakeRecognition.instances = [];
-  const synth = new FakeSynthesis();
-  const { ctrl, events } = makeController(synth, { ...voice.DEFAULT_VOICE_SETTINGS, rate: 1, continuous: false, voicesByLang: {} });
+  const { ctrl, events } = makeController({ ...voice.DEFAULT_VOICE_SETTINGS, rate: 1, continuous: false, voicesByLang: {} });
   ctrl.startListening('hi-IN');
   const rec = FakeRecognition.instances[FakeRecognition.instances.length - 1];
   rec.emitError('not-allowed');
@@ -538,8 +510,8 @@ section('scenario 11 — mic permission denial (clean error, text fallback)');
   check('text fallback answers after denial', has(res.text, '₹0.00'), true);
   // Unsupported browser: no recognition factory at all.
   const noRec = new voice.VoiceController(
-    { createRecognition: () => null, synthesis: synth, createUtterance: (t) => new FakeUtterance(t), getSettings: () => ({ ...voice.DEFAULT_VOICE_SETTINGS }) },
-    { onState: () => {}, onFinalTranscript: () => {}, onInterimTranscript: () => {}, onError: (k) => events.errors.push(k), onSpeechEnd: () => {}, onBoundary: () => {} },
+    { createRecognition: () => null, getSettings: () => ({ ...voice.DEFAULT_VOICE_SETTINGS }) },
+    { onState: () => {}, onFinalTranscript: () => {}, onInterimTranscript: () => {}, onError: (k) => events.errors.push(k) },
   );
   check('unsupported start fails cleanly', noRec.startListening('hi-IN'), false);
   check('unsupported error reported', events.errors[events.errors.length - 1], 'unsupported');
@@ -572,8 +544,7 @@ section('scenario 12 — network failure + recovery (local engine answers)');
   cai.setAiServiceEndpoint('');
   check('key cleared after test', cai.hasAiServiceKey(), false);
   // Voice recognition itself reports network errors honestly too.
-  const synth = new FakeSynthesis();
-  const { ctrl, events } = makeController(synth, { ...voice.DEFAULT_VOICE_SETTINGS, rate: 1, continuous: false, voicesByLang: {} });
+  const { ctrl, events } = makeController({ ...voice.DEFAULT_VOICE_SETTINGS, rate: 1, continuous: false, voicesByLang: {} });
   ctrl.startListening('hi-IN');
   FakeRecognition.instances[FakeRecognition.instances.length - 1].emitError('network');
   check('recognition network error reported', events.errors[0], 'network');
@@ -617,8 +588,7 @@ section('scenario 14 — duplicate prevention (repeat transcript / repeat Haan)'
 /* ================= 5. Silence detection ================= */
 section('silence detection');
 {
-  const synth = new FakeSynthesis();
-  const { ctrl, events } = makeController(synth, { ...voice.DEFAULT_VOICE_SETTINGS, rate: 1, continuous: false, voicesByLang: {} }, { silenceTimeoutMs: 40 });
+  const { ctrl, events } = makeController({ ...voice.DEFAULT_VOICE_SETTINGS, rate: 1, continuous: false, voicesByLang: {} }, { silenceTimeoutMs: 40 });
   ctrl.startListening('hi-IN');
   await sleep(90);
   check('silence stops listening', ctrl.currentState, 'idle');
@@ -672,7 +642,7 @@ for (const [name, r] of Object.entries(results)) {
 console.log(`  TOTAL: ${totalPass}/${total} checks passed`);
 console.log('\nUnverified on this VM (no microphone, no owner key here):');
 console.log('  - Live microphone recognition quality per language/browser');
-console.log('  - Real-device speech voices + spoken-word highlight timing');
+console.log('  - Real AI-voice quality/latency + Roman-Hinglish pronunciation (owner phone test)');
 console.log('  - Live cloud-AI reply (owner key lives on his device only)');
 console.log('  - Continuous conversation across a real multi-minute call');
 if (failures > 0 || totalPass !== total) {

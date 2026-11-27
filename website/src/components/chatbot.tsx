@@ -12,25 +12,33 @@ import {
   type ActionDraft,
 } from '@/lib/chatbot';
 import { applyAssistantAction, type AssistantAction, type ExecResult } from '@/lib/assistant';
-import { buildSystemPrompt, callConversationAIStream, guardCloudReply, hasAiServiceKey, type AiChatMessage } from '@/lib/conversation-ai';
+import { buildSystemPrompt, callConversationAIStream, cloudReplyMatchesLanguage, getAiServiceKey, guardCloudReply, hasAiServiceKey, type AiChatMessage } from '@/lib/conversation-ai';
 import { langName, respondToMessage } from '@/lib/conversation';
 import { STREAM_UNREACHABLE_MSG, Typewriter } from '@/lib/streaming';
 import { markdownToHtml } from '@/lib/markdown';
 import {
   INTERRUPT_ACK_HI,
   VoiceController,
-  cleanSpokenText,
   handleVoiceTranscript,
   isSpeechRecognitionSupported,
-  shortenForVoice,
+  recognitionLangFor,
   voiceErrorMessage,
   voiceSettingsFor,
   type SpeechRecognitionLike,
-  type SpeechSynthesisLike,
-  type UtteranceLike,
   type VoiceErrorKind,
   type VoiceState,
 } from '@/lib/voice';
+import {
+  AI_VOICE_DAILY_LIMIT,
+  AiVoicePlayer,
+  aiVoiceFor,
+  speakAiReply,
+  voiceUsageToday,
+  VOICE_LONG_REPLY_NOTE,
+  VOICE_NO_KEY,
+  VOICE_QUOTA_DONE,
+  type AudioLike,
+} from '@/lib/ai-voice';
 import { type ChatContext, type KnowledgeTable } from '@/lib/knowledge';
 import { loadState } from '@/lib/store';
 import { formatINR } from '@/lib/money';
@@ -101,6 +109,10 @@ interface ChatMsg {
    *  UI shows one honest line saying so. Never a silent substitution,
    *  never a bare Retry with no answer. */
   cloudFailed?: boolean;
+  /** UPDATE 25 (C-15): the cloud reply arrived in the WRONG language
+   *  (e.g. English to a Hinglish user), so the on-device reply is
+   *  shown instead — the UI shows one honest line saying so. */
+  cloudLangMismatch?: boolean;
   /** Where the reply came from: the on-device engine ('local') or the
    *  owner's configured service via real SSE ('cloud'). */
   source?: 'local' | 'cloud';
@@ -140,6 +152,10 @@ function cloudContextNote(ctx: ChatContext): string {
   if (ctx.pendingOffer?.kind === 'app_change' && ctx.pendingOffer.spec) parts.push(`You already showed a proposed plan for "${ctx.pendingOffer.spec.name}"; if the user says yes, confirm it will be saved to the development queue (it is NOT built yet).`);
   if (ctx.pendingQuestion) parts.push(`You asked: how many ${ctx.pendingQuestion.label} (${ctx.pendingQuestion.topic})? The user may answer with just a number${ctx.pendingQuestion.answeredValue !== undefined ? ` (current value: ${ctx.pendingQuestion.answeredValue})` : ''}.`);
   if (ctx.activeChecklist) parts.push(`There is an active checklist (${ctx.activeChecklist.topic}, ${ctx.activeChecklist.when}); the user may ask to edit it, translate it, or see it again.`);
+  // UPDATE 25 (C-13): translate-THIS-reply — the cloud must translate
+  // ONLY the previous reply into the asked language, never switch
+  // any language setting.
+  if (ctx.translateTarget) parts.push(`The user asked to translate the previous reply into ${langName(ctx.translateTarget)} — translate ONLY that reply into that language, nothing else; do not change any language setting.`);
   // UPDATE 23 — the last VERIFIED save, so the cloud can never invent
   // a different history ("koi entry save hi nahi ki thi... pehle se
   // tha" was the 2026-11-27 16:03 fabrication).
@@ -296,7 +312,6 @@ function useChat(onNavigateAway?: () => void) {
   const [speaking, setSpeaking] = React.useState<{ msgId: string; wordIndex: number; totalWords: number } | null>(null);
   const [voiceSupported, setVoiceSupported] = React.useState(false);
   const voiceRef = React.useRef<VoiceController | null>(null);
-  const utteranceMapRef = React.useRef(new WeakMap<object, SpeechSynthesisUtterance>());
   const profileRef = React.useRef(app.profile);
   profileRef.current = app.profile;
   // UPDATE 18 — the voice controller's callbacks are bound ONCE (when
@@ -310,8 +325,15 @@ function useChat(onNavigateAway?: () => void) {
   const voiceTurnRef = React.useRef(false);
   const shortReplyRef = React.useRef(false);
   const prevTranscriptRef = React.useRef<{ text: string; atMs: number } | null>(null);
-  const spokenTextRef = React.useRef('');
   const speakingMsgRef = React.useRef<string | null>(null);
+  // UPDATE 25 — AI voice (ai-voice.ts): one <audio> player + the
+  // daily quota counter, shown near the mic and in Settings → Voice.
+  const aiPlayerRef = React.useRef<AiVoicePlayer | null>(null);
+  const lastTtsCallRef = React.useRef<number | undefined>(undefined);
+  const speakTokenRef = React.useRef(0);
+  const voiceKeyNoticeShownRef = React.useRef(false);
+  const voiceQuotaNoticeDateRef = React.useRef('');
+  const [voiceUsed, setVoiceUsed] = React.useState(() => voiceUsageToday().used);
   const listening = voiceState === 'listening';
   // UPDATE 17 streaming state: one generation at a time, cancellable.
   const [streaming, setStreaming] = React.useState(false);
@@ -434,29 +456,34 @@ function useChat(onNavigateAway?: () => void) {
     updateActive((c) => ({ ...c, messages: c.messages.map((m) => (m.id === id ? fn(m) : m)) }));
   }
 
-  /* ================= UPDATE 18 — voice (Web Speech API) =================
-   * Mic = browser SpeechRecognition, replies = speechSynthesis. The
-   * intelligence is the SAME pipeline as typed chat (send() below →
-   * respondToMessage → preview → confirm); voice only changes how
-   * words go in and out. No recording is stored or uploaded; the
-   * transcript is the only thing that reaches the chat pipeline.
+  /* ================= UPDATE 25 — voice (AI voice out, mic in) =================
+   * Mic = browser SpeechRecognition (voice.ts), replies = REAL AI
+   * voice (ai-voice.ts: quota + Interactions API + <audio> playback).
+   * The phone/device voice is GONE by the owner's instruction
+   * (2026-11-27 19:01 IST) — no speechSynthesis anywhere, no silent
+   * fallback to it. The intelligence is the SAME pipeline as typed
+   * chat (send() below → respondToMessage → preview → confirm);
+   * voice only changes how words go in and out. No recording is
+   * stored or uploaded; the transcript is the only thing that reaches
+   * the chat pipeline, and the spoken reply text is sent only to the
+   * voice service the owner configured with his own key.
    */
 
   const speakOnRef = React.useRef(false);
   speakOnRef.current = speakOn;
+  const continuousRef = React.useRef(false);
+  continuousRef.current = continuous;
 
   /** Build (once) the injectable voice controller over the real
-   *  browser recognition + synthesis objects. */
+   *  browser recognition object (input only — UPDATE 25). */
   function ensureVoiceController(): VoiceController | null {
     if (typeof window === 'undefined') return null;
     if (voiceRef.current) return voiceRef.current;
     const w = window as unknown as {
       SpeechRecognition?: new () => BrowserSpeechRecognition;
       webkitSpeechRecognition?: new () => BrowserSpeechRecognition;
-      speechSynthesis?: SpeechSynthesis;
     };
     const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
-    const synth = w.speechSynthesis || null;
     const adaptRecognition = (r: BrowserSpeechRecognition): SpeechRecognitionLike => {
       const like: SpeechRecognitionLike = {
         get lang() { return r.lang; },
@@ -485,46 +512,6 @@ function useChat(onNavigateAway?: () => void) {
       r.onend = () => like.onend?.();
       return like;
     };
-    const adaptUtterance = (u: SpeechSynthesisUtterance): UtteranceLike => {
-      const like: UtteranceLike = {
-        get text() { return u.text; },
-        set text(v: string) { u.text = v; },
-        get lang() { return u.lang; },
-        set lang(v: string) { u.lang = v; },
-        get rate() { return u.rate; },
-        set rate(v: number) { u.rate = v; },
-        get voice() { return u.voice ? { name: u.voice.name, lang: u.voice.lang, default: u.voice.default } : undefined; },
-        set voice(v) {
-          if (!v) { u.voice = null; return; }
-          try {
-            const voices = window.speechSynthesis.getVoices();
-            u.voice = voices.find((x) => x.name === v.name) || null;
-          } catch { u.voice = null; }
-        },
-        onend: null,
-        onerror: null,
-        onboundary: null,
-      };
-      u.onend = () => like.onend?.();
-      u.onerror = (e) => like.onerror?.((e as unknown as { error?: string })?.error || 'error');
-      u.onboundary = (e) => like.onboundary?.(typeof (e as unknown as { charIndex?: number })?.charIndex === 'number' ? (e as unknown as { charIndex: number }).charIndex : 0);
-      return like;
-    };
-    const synthesis: SpeechSynthesisLike | null = synth
-      ? {
-          speak: (u: UtteranceLike) => {
-            const real = utteranceMapRef.current.get(u);
-            if (real) synth.speak(real);
-          },
-          cancel: () => { try { synth.cancel(); } catch { /* ignore */ } },
-          getVoices: () => {
-            try {
-              return synth.getVoices().map((v) => ({ name: v.name, lang: v.lang, default: v.default }));
-            } catch { return []; }
-          },
-          get speaking() { return synth.speaking; },
-        }
-      : null;
     const ctrl = new VoiceController(
       {
         createRecognition: () => {
@@ -534,13 +521,6 @@ function useChat(onNavigateAway?: () => void) {
           } catch {
             return null;
           }
-        },
-        synthesis,
-        createUtterance: (text: string) => {
-          const real = new SpeechSynthesisUtterance(text);
-          const like = adaptUtterance(real);
-          utteranceMapRef.current.set(like, real);
-          return like;
         },
         getSettings: () => voiceSettingsFor(profileRef.current),
       },
@@ -557,23 +537,39 @@ function useChat(onNavigateAway?: () => void) {
           setInterim('');
           pushMsg({ id: uid('m'), role: 'bot', text: voiceErrorMessage(kind), ts: new Date().toISOString() });
         },
-        onSpeechEnd: () => {
-          setSpeaking(null);
-          speakingMsgRef.current = null;
-        },
-        onBoundary: (charIndex) => {
-          const spoken = spokenTextRef.current;
-          const msgId = speakingMsgRef.current;
-          if (!spoken || !msgId) return;
-          const words = spoken.split(/\s+/).filter(Boolean);
-          const said = spoken.slice(0, Math.max(0, charIndex)).split(/\s+/).filter(Boolean).length;
-          setSpeaking({ msgId, wordIndex: Math.min(said, words.length), totalWords: words.length });
-        },
       },
     );
     ctrl.setContinuous(continuous);
     voiceRef.current = ctrl;
     return ctrl;
+  }
+
+  /** Build (once) the AI-voice <audio> player. Playback stops
+   *  immediately on interrupt; nothing is ever queued behind a
+   *  stopped reply. In continuous mode, listening restarts when the
+   *  spoken reply ends. */
+  function ensureAiPlayer(): AiVoicePlayer | null {
+    if (typeof window === 'undefined') return null;
+    if (aiPlayerRef.current) return aiPlayerRef.current;
+    const player = new AiVoicePlayer({
+      // HTMLAudioElement.onended carries a `this` type that the
+      // narrow AudioLike shape does not — the cast is structural
+      // only; play/pause/src/onended behave identically.
+      createAudio: () => new Audio() as unknown as AudioLike,
+      createObjectUrl: (bytes, mime) => URL.createObjectURL(new Blob([bytes as BlobPart], { type: mime })),
+      revokeObjectUrl: (url) => URL.revokeObjectURL(url),
+    });
+    player.onEnded = () => {
+      setSpeaking(null);
+      speakingMsgRef.current = null;
+      setVoiceState((s) => (s === 'speaking' ? 'idle' : s));
+      if (continuousRef.current) {
+        const ctrl = voiceRef.current;
+        if (ctrl) ctrl.startListening(recognitionLang());
+      }
+    };
+    aiPlayerRef.current = player;
+    return player;
   }
 
   /** Route one final transcript through the voice edge, then through
@@ -591,6 +587,8 @@ function useChat(onNavigateAway?: () => void) {
       return;
     }
     if (decision.action === 'interrupt') {
+      speakTokenRef.current++;
+      aiPlayerRef.current?.stop();
       voiceRef.current?.interruptSpeech();
       setSpeaking(null);
       if (!decision.remainder) {
@@ -607,28 +605,84 @@ function useChat(onNavigateAway?: () => void) {
     void send(decision.text, { fromVoice: true });
   }
 
-  /** Speak a bot reply aloud — when voice replies are on, or when
-   *  this turn came from the microphone. Speaks the FINAL text (the
-   *  typewriter/stream already finished it), in the reply's language,
-   *  at the profile's speech rate, with the preferred voice. */
-  function speak(text: string, msgId?: string) {
+  /** Speak a bot reply aloud with the REAL AI voice (UPDATE 25) —
+   *  when voice replies are on, or when this turn came from the
+   *  microphone. Speaks the FINAL text (the typewriter/stream
+   *  already finished it). Short replies only (first 2 sentences,
+   *  max 400 chars); long replies stay text-only with a note.
+   *  No key → one honest guidance message, never speaks. Daily
+   *  limit reached → one honest line for the day, never the device
+   *  voice. Rate-gap (called <21s after the last voice call) → one
+   *  retry after the gap, then gives up quietly for this reply. */
+  async function speak(text: string, msgId?: string) {
     if (typeof window === 'undefined') return;
     if (!speakOnRef.current && !voiceTurnRef.current) return;
-    const ctrl = ensureVoiceController();
-    if (!ctrl) return;
-    const toSpeak = shortReplyRef.current ? shortenForVoice(text) : text;
-    shortReplyRef.current = false;
+    const token = ++speakTokenRef.current;
     const profile = profileRef.current;
-    const lang = profile?.aiLanguage && profile.aiLanguage !== 'auto'
-      ? voiceLangFor(profile.aiLanguage)
-      : voiceLangFor(detectLanguage(text).code);
-    spokenTextRef.current = cleanSpokenText(toSpeak);
-    speakingMsgRef.current = msgId || null;
-    if (msgId) {
-      const words = spokenTextRef.current.split(/\s+/).filter(Boolean);
-      setSpeaking({ msgId, wordIndex: 0, totalWords: words.length });
+    const player = ensureAiPlayer();
+    if (!player) return;
+    if (!hasAiServiceKey()) {
+      if (!voiceKeyNoticeShownRef.current) {
+        voiceKeyNoticeShownRef.current = true;
+        pushMsg({ id: uid('m'), role: 'bot', text: VOICE_NO_KEY, ts: new Date().toISOString() });
+      }
+      return;
     }
-    ctrl.speak(toSpeak, lang);
+    // speakAiReply always speaks the short version (first 2
+    // sentences, max 400 chars) — the old "short" flag only marked
+    // turns after an interruption, and is consumed here.
+    const toSpeak = text;
+    shortReplyRef.current = false;
+    const run = async (lastCallMs: number | undefined): Promise<void> => {
+      if (token !== speakTokenRef.current) return; // superseded / stopped
+      let res;
+      try {
+        res = await speakAiReply({
+          text: toSpeak,
+          voiceName: aiVoiceFor(profile),
+          key: getAiServiceKey(),
+          fetchImpl: (input, init) => fetch(input, init as RequestInit) as unknown as Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>,
+          player,
+          nowMs: Date.now(),
+          lastCallMs,
+        });
+      } catch {
+        return; // network failure — the text reply already stands
+      }
+      if (token !== speakTokenRef.current) return;
+      if (res.ok) {
+        lastTtsCallRef.current = res.lastCallMs;
+        setVoiceUsed(res.used);
+        speakingMsgRef.current = msgId || null;
+        if (msgId) {
+          const words = toSpeak.split(/\s+/).filter(Boolean);
+          setSpeaking({ msgId, wordIndex: 0, totalWords: words.length });
+        }
+        setVoiceState('speaking');
+        if (res.trimmed) {
+          pushMsg({ id: uid('m'), role: 'bot', text: VOICE_LONG_REPLY_NOTE, ts: new Date().toISOString() });
+        }
+        return;
+      }
+      if (res.reason === 'rate-gap' && res.waitMs !== undefined) {
+        // One retry after the gap — rapid successive replies must
+        // never 429 in the user's face.
+        window.setTimeout(() => { void run(lastTtsCallRef.current); }, res.waitMs);
+        return;
+      }
+      if (res.reason === 'quota') {
+        const today = voiceUsageToday().date;
+        if (voiceQuotaNoticeDateRef.current !== today) {
+          voiceQuotaNoticeDateRef.current = today;
+          setVoiceUsed(AI_VOICE_DAILY_LIMIT);
+          pushMsg({ id: uid('m'), role: 'bot', text: VOICE_QUOTA_DONE, ts: new Date().toISOString() });
+        }
+        return;
+      }
+      // 'no-key' (key removed mid-turn), 'network', 'upstream',
+      // 'empty' — the text reply already stands; stay silent.
+    };
+    void run(lastTtsCallRef.current);
   }
 
   /** Voice-replies toggle — persisted on the business profile. */
@@ -660,8 +714,11 @@ function useChat(onNavigateAway?: () => void) {
 
   /** Stop the current speech immediately (Stop button / mic tap).
    *  Listening is left alone — the user can speak the next
-   *  instruction straight away. */
+   *  instruction straight away. Stops the AI-voice <audio> player
+   *  immediately (UPDATE 25) — nothing queued ever plays after. */
   function stopVoice() {
+    speakTokenRef.current++;
+    aiPlayerRef.current?.stop();
     voiceRef.current?.interruptSpeech();
     setSpeaking(null);
     speakingMsgRef.current = null;
@@ -819,6 +876,8 @@ function useChat(onNavigateAway?: () => void) {
    *  the message stopped. Safe to call when nothing is streaming. */
   function stopGeneration() {
     // Stopping a generation also stops any speech of a previous reply.
+    speakTokenRef.current++;
+    aiPlayerRef.current?.stop();
     voiceRef.current?.interruptSpeech();
     setSpeaking(null);
     speakingMsgRef.current = null;
@@ -873,7 +932,7 @@ function useChat(onNavigateAway?: () => void) {
   async function displayText(
     msgId: string,
     fullText: string,
-    opts: { source: 'local' | 'cloud'; cloudJob?: { history: AiChatMessage[]; system: string } },
+    opts: { source: 'local' | 'cloud'; cloudJob?: { history: AiChatMessage[]; system: string }; expectedLang?: import('@/lib/languages').AiLangCode },
   ) {
     const token = genRef.current + 1;
     genRef.current = token;
@@ -906,12 +965,20 @@ function useChat(onNavigateAway?: () => void) {
         // messages never reach the cloud at all) is the primary
         // prevention; this is the second layer.
         let finalText = displayed;
+        let langMismatch = false;
         if (opts.source === 'cloud') {
           const ctxNow = (convRef.current.conversations.find((c) => c.id === convRef.current.activeId)?.ctx) || {};
           const guarded = guardCloudReply(displayed, { verifiedSaveLabel: ctxNow.lastVerifiedSave || ctxNow.lastSavedEntry?.label || null });
           if (guarded.blocked) finalText = guarded.text;
+          // UPDATE 25 (C-15): a cloud reply in the WRONG language is
+          // replaced with the local reply (fullText) — never shown
+          // as-is. The message is flagged so the UI says so honestly.
+          else if (opts.expectedLang && !cloudReplyMatchesLanguage(displayed, opts.expectedLang)) {
+            finalText = fullText;
+            langMismatch = true;
+          }
         }
-        updateMsg(msgId, (m) => (m.streaming ? { ...m, text: finalText, streaming: false, ts: new Date().toISOString() } : m));
+        updateMsg(msgId, (m) => (m.streaming ? { ...m, text: finalText, streaming: false, cloudLangMismatch: langMismatch || undefined, ts: new Date().toISOString() } : m));
         speak(finalText, msgId);
       },
     });
@@ -969,6 +1036,7 @@ function useChat(onNavigateAway?: () => void) {
     text2: string,
     extra?: Partial<ChatMsg>,
     cloudJob?: { history: AiChatMessage[]; system: string },
+    expectedLang?: import('@/lib/languages').AiLangCode,
   ): ChatMsg {
     const msg: ChatMsg = {
       id: uid('m'),
@@ -980,7 +1048,7 @@ function useChat(onNavigateAway?: () => void) {
       source: cloudJob ? 'cloud' : 'local',
     };
     pushMsg(msg);
-    void displayText(msg.id, text2, cloudJob ? { source: 'cloud', cloudJob } : { source: 'local' });
+    void displayText(msg.id, text2, cloudJob ? { source: 'cloud', cloudJob, expectedLang } : { source: 'local' });
     return msg;
   }
 
@@ -1027,7 +1095,11 @@ function useChat(onNavigateAway?: () => void) {
     shortReplyRef.current = !!opts?.short;
     // A new message stops any speech in progress (interruption) and
     // any streaming generation — never two generations at once.
-    if (voiceRef.current?.isSpeaking) voiceRef.current.interruptSpeech();
+    if (aiPlayerRef.current?.isPlaying) {
+      speakTokenRef.current++;
+      aiPlayerRef.current.stop();
+    }
+    voiceRef.current?.interruptSpeech();
     setSpeaking(null);
     if (streamingRef.current) stopGeneration();
     setInput('');
@@ -1040,6 +1112,19 @@ function useChat(onNavigateAway?: () => void) {
 
   async function respond(q: string) {
     const ctx: ChatContext = (convRef.current.conversations.find((c) => c.id === convRef.current.activeId)?.ctx) || {};
+    // UPDATE 25: the last bot reply's text, for "translate this" /
+    // "shorten this" requests (conversation.ts reads ctx.lastBotText).
+    const convMsgs = convRef.current.conversations.find((c) => c.id === convRef.current.activeId)?.messages || [];
+    const lastBot = [...convMsgs].reverse().find((m) => m.role === 'bot' && m.text && !m.streaming);
+    // UPDATE 25 (C-1): a pendingAction is only real while its preview
+    // is actually still on screen (pendingRef). After Confirm/Cancel
+    // the ctx must NOT carry the old pendingAction — otherwise a
+    // later "Aur 200 UPI" would merge into (and re-save) an entry
+    // that is already saved. The draft/confirm gates below read
+    // ctxIn, never the raw ctx.
+    const ctxIn: ChatContext = pendingRef.current
+      ? { ...ctx, lastBotText: lastBot?.text }
+      : { ...ctx, pendingAction: undefined, lastBotText: lastBot?.text };
     // Latest store/profile through refs (see stateRef note above): this
     // function is also reached from the once-bound voice callbacks, whose
     // closure snapshot predates entries saved after the mic was first
@@ -1053,7 +1138,7 @@ function useChat(onNavigateAway?: () => void) {
     try {
       // 1. Answering a clarification question for an incomplete action.
       if (draftRef.current) {
-        const parsed = applyDraftAnswer(draftRef.current, q, state, profile, ctx);
+        const parsed = applyDraftAnswer(draftRef.current, q, state, profile, ctxIn);
         if (parsed.kind === 'draft') {
           draftRef.current = parsed.draft;
           botReply(parsed.draft.question);
@@ -1089,14 +1174,14 @@ function useChat(onNavigateAway?: () => void) {
       //    (accept_offer), never the "no pending entry" line. And with
       //    no pending preview AND no pending offer, "haan" confirms
       //    nothing: say so honestly instead of claiming a missing entry.
-      const parsed0 = parseAssistantMessage(q, state, profile, ctx);
+      const parsed0 = parseAssistantMessage(q, state, profile, ctxIn);
       if (parsed0.kind === 'confirm') {
         if (pendingRef.current) {
           setBusy(false);
           await confirmPreview(pendingRef.current.msgId);
           return;
         }
-        if (!ctx.pendingOffer) {
+        if (!ctxIn.pendingOffer) {
           botReply('Theek hai! Batao kis liye haan — koi entry save karni hai, checklist banana hai, ya kuch aur help chahiye?');
           setBusy(false);
           return;
@@ -1110,7 +1195,7 @@ function useChat(onNavigateAway?: () => void) {
           setBusy(false);
           return;
         }
-        if (!ctx.pendingOffer) {
+        if (!ctxIn.pendingOffer) {
           botReply('Cancel karne ke liye koi pending entry nahi hai.');
           setBusy(false);
           return;
@@ -1125,7 +1210,7 @@ function useChat(onNavigateAway?: () => void) {
       //    actions return here as structured actions (preview below);
       //    do-commands (navigation / checklist / summary / language
       //    switch) are EXECUTED, not described.
-      const res = respondToMessage({ message: q, state, profile, ctx, preferredLang: profile.aiLanguage || 'auto' });
+      const res = respondToMessage({ message: q, state, profile, ctx: ctxIn, preferredLang: profile.aiLanguage || 'auto' });
       setCtx(res.newCtx);
 
       // Language switch: apply it to the profile immediately so the
@@ -1217,7 +1302,7 @@ function useChat(onNavigateAway?: () => void) {
       }
       // Contextual follow-up chips for this reply (UPDATE 20 §2).
       setSuggestions(res.suggestions || []);
-      botReply(res.text, { table: res.table, links: res.links }, cloudJob);
+      botReply(res.text, { table: res.table, links: res.links }, cloudJob, res.newCtx.lastLanguage || 'hi');
       setBusy(false);
     } catch (e) {
       botReply('Sorry, kuch gadbad hui — AI abhi available nahi hai, baad me try karo. Aapka data safe hai, kuch save nahi hua.');
@@ -1241,9 +1326,11 @@ function useChat(onNavigateAway?: () => void) {
       pushMsg({ id: uid('m'), role: 'bot', text: voiceErrorMessage('unsupported'), ts: new Date().toISOString() });
       return;
     }
-    if (voiceState === 'speaking' || voiceRef.current?.isSpeaking) {
-      ctrl.interruptSpeech();
+    if (voiceState === 'speaking' || aiPlayerRef.current?.isPlaying) {
+      speakTokenRef.current++;
+      aiPlayerRef.current?.stop();
       setSpeaking(null);
+      ctrl.interruptSpeech();
       ctrl.setContinuous(continuous);
       ctrl.startListening(recognitionLang());
       return;
@@ -1257,14 +1344,21 @@ function useChat(onNavigateAway?: () => void) {
     ctrl.startListening(recognitionLang());
   }
 
-  /** Recognition language: the profile's AI language when set, else
-   *  the language of the current conversation, else en-IN. */
+  /** Recognition language (UPDATE 25, B-1): the profile's AI language
+   *  when set, else the language of the current conversation — via
+   *  recognitionLangFor, which detects it from the last user message
+   *  (the helper existed but nothing called it) — else hi-IN, the
+   *  owner's language. The old en-IN default made a fresh
+   *  conversation recognise Hinglish speech with the English
+   *  recogniser. */
   function recognitionLang(): string {
     const profile = profileRef.current;
     if (profile?.aiLanguage && profile.aiLanguage !== 'auto') return voiceLangFor(profile.aiLanguage);
-    const ctx = convRef.current.conversations.find((c) => c.id === convRef.current.activeId)?.ctx;
-    if (ctx?.lastLanguage) return voiceLangFor(ctx.lastLanguage);
-    return 'en-IN';
+    const conv = convRef.current.conversations.find((c) => c.id === convRef.current.activeId);
+    const lastUser = [...(conv?.messages || [])].reverse().find((m) => m.role === 'user');
+    if (lastUser?.text) return recognitionLangFor(profile, lastUser.text);
+    if (conv?.ctx?.lastLanguage) return voiceLangFor(conv.ctx.lastLanguage);
+    return 'hi-IN';
   }
 
   return {
@@ -1276,6 +1370,8 @@ function useChat(onNavigateAway?: () => void) {
     listening, toggleMic, speakOn, setSpeakOn,
     voiceState, continuous, toggleContinuous, stopVoice, interim, speaking, voiceSupported,
     streaming, stopGeneration, regenerate, retryFailed,
+    // UPDATE 25: AI-voice daily counter (10/day) for the chat UI.
+    voiceUsed, voiceLimit: AI_VOICE_DAILY_LIMIT,
     profileName: app.profile?.name || '',
   };
 }
@@ -1477,6 +1573,9 @@ function ChatBody({ chat }: { chat: ReturnType<typeof useChat> }) {
             {m.role === 'bot' && m.cloudFailed && !m.streaming && (
               <div className="chat-cloud-note">Cloud AI se jawab nahi mila — ye jawab aapke record aur app ki madad se diya hai.</div>
             )}
+            {m.role === 'bot' && m.cloudLangMismatch && !m.streaming && (
+              <div className="chat-cloud-note">Cloud AI ne galat bhasha mein jawab diya — ye jawab aapki bhasha mein, aapke record se diya hai.</div>
+            )}
             {m.preview && <PreviewCard msg={m} chat={chat} />}
             {m.result && <ResultCard msg={m} />}
             {m.table && (
@@ -1571,6 +1670,12 @@ function ChatBody({ chat }: { chat: ReturnType<typeof useChat> }) {
         BizKhata AI Assistant • Figures always from your real records — nothing is sent anywhere.
         {voiceStatus() ? ` • ${voiceStatus()}` : ''}
         {chat.streaming ? ' • Generating…' : ''}
+        {/* UPDATE 25: the AI-voice daily counter — visible whenever
+            voice replies are on, so the 10-a-day limit is never a
+            surprise. */}
+        {chat.speakOn && (
+          <span data-testid="voice-counter"> • AI voice: {chat.voiceUsed}/{chat.voiceLimit} aaj</span>
+        )}
       </div>
     </>
   );

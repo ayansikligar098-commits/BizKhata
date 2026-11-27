@@ -8,8 +8,8 @@ import { auditEntry, exportBackup, exportCSV } from '@/lib/store';
 import { t, LANG_OPTIONS } from '@/lib/i18n';
 import type { Lang, Theme } from '@/lib/types';
 import { SUPPORTED_LANGUAGES, type AiLangCode } from '@/lib/languages';
-import { clearAiServiceKey, getAiServiceEndpoint, hasAiServiceKey, setAiServiceEndpoint, setAiServiceKey } from '@/lib/conversation-ai';
-import { voiceLangKeyFor, voiceSettingsFor } from '@/lib/voice';
+import { clearAiServiceKey, getAiServiceEndpoint, getAiServiceKey, hasAiServiceKey, setAiServiceEndpoint, setAiServiceKey } from '@/lib/conversation-ai';
+import { AI_VOICES, AI_VOICE_DAILY_LIMIT, AI_VOICE_TEST_SENTENCE, AiVoicePlayer, aiVoiceFor, speakAiReply, voiceCounterText, type AudioLike } from '@/lib/ai-voice';
 import { todayISO } from '@/lib/types';
 import { BarChart, Btn, Card, Empty, Field, Pager, Stat, formatDate, pageSlice, type Ctx } from './ui';
 import { jobServices } from '@/lib/routes';
@@ -796,23 +796,55 @@ export function SettingsView({ ctx, section }: { ctx: Ctx; section?: string }) {
     setAiKeySaved(hasAiServiceKey());
     setAiEndpointInput(getAiServiceEndpoint());
   }, []);
-  // Voice (UPDATE 18): browser/device speech voices for the voice
-  // picker. Voices depend on the browser + device; the list can
-  // arrive late (voiceschanged), and may be empty on some browsers.
-  const [browserVoices, setBrowserVoices] = React.useState<{ name: string; lang: string }[]>([]);
+  // Voice (UPDATE 25): the spoken replies are a REAL AI voice now —
+  // the phone's device voice is gone by the owner's instruction
+  // (2026-11-27). The counter + test button live here; the voice
+  // picker is a plain list of prebuilt voices (no provider names).
+  const [voiceCounter, setVoiceCounter] = React.useState(() => voiceCounterText());
+  const [voiceTestStatus, setVoiceTestStatus] = React.useState('');
+  const aiPlayerRef = React.useRef<AiVoicePlayer | null>(null);
+  const lastTtsCallRef = React.useRef<number | undefined>(undefined);
   React.useEffect(() => {
-    const load = () => {
-      try {
-        if (!('speechSynthesis' in window)) return;
-        setBrowserVoices(window.speechSynthesis.getVoices().map((v) => ({ name: v.name, lang: v.lang })));
-      } catch { /* voice list unavailable — picker stays hidden */ }
-    };
-    load();
-    try {
-      window.speechSynthesis.addEventListener('voiceschanged', load);
-      return () => window.speechSynthesis.removeEventListener('voiceschanged', load);
-    } catch { return undefined; }
+    const id = window.setInterval(() => setVoiceCounter(voiceCounterText()), 30000);
+    return () => window.clearInterval(id);
   }, []);
+  async function hearVoice() {
+    setVoiceTestStatus('Bol raha hoon…');
+    if (!hasAiServiceKey()) {
+      setVoiceTestStatus('AI awaz ke liye key chahiye — pehle "AI Chat" card mein key save karo.');
+      return;
+    }
+    if (!aiPlayerRef.current) {
+      aiPlayerRef.current = new AiVoicePlayer({
+        createAudio: () => new Audio() as unknown as AudioLike,
+        createObjectUrl: (bytes, mime) => URL.createObjectURL(new Blob([bytes as BlobPart], { type: mime })),
+        revokeObjectUrl: (url) => URL.revokeObjectURL(url),
+      });
+    }
+    const res = await speakAiReply({
+      text: AI_VOICE_TEST_SENTENCE,
+      voiceName: aiVoiceFor(profile),
+      key: getAiServiceKey(),
+      fetchImpl: (input, init) => fetch(input, init as RequestInit) as unknown as Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>,
+      player: aiPlayerRef.current,
+      nowMs: Date.now(),
+      lastCallMs: lastTtsCallRef.current,
+    });
+    if (res.ok) {
+      lastTtsCallRef.current = res.lastCallMs;
+      setVoiceCounter(voiceCounterText());
+      setVoiceTestStatus('Ye thi AI ki awaz — upar se voice badal kar phir suno.');
+    } else if (res.reason === 'quota') {
+      setVoiceCounter(voiceCounterText());
+      setVoiceTestStatus('Aaj ki AI awaz khatam ho gayi hai — kal subah phir milegi.');
+    } else if (res.reason === 'rate-gap') {
+      setVoiceTestStatus('Thoda ruko — awaz abhi taiyar ho rahi hai, phir dobara try karo.');
+    } else if (res.reason === 'no-key') {
+      setVoiceTestStatus('AI awaz ke liye key chahiye — pehle "AI Chat" card mein key save karo.');
+    } else {
+      setVoiceTestStatus('Awaz abhi nahi mili — network check karke dobara try karo.');
+    }
+  }
 
   // Deep link: /settings/<section> scrolls to that card.
   React.useEffect(() => {
@@ -943,7 +975,7 @@ export function SettingsView({ ctx, section }: { ctx: Ctx; section?: string }) {
         </Card></div>
 
         <div id="settings-voice"><Card title="Voice">
-          <p className="muted" style={{ marginTop: 0 }}>Talk to the AI Assistant with the mic in chat — it understands Hinglish, Gujarati, Hindi and 20 other languages, and speaks its replies aloud. Voice is processed in this browser only: no recording is stored, uploaded or sent anywhere.</p>
+          <p className="muted" style={{ marginTop: 0 }}>Talk to the AI Assistant with the mic in chat — it understands Hinglish, Gujarati, Hindi and 20 other languages, and speaks its replies aloud in a real AI voice (phone ki awaz nahi). Mic input is processed in this browser only: no recording is stored, uploaded or sent anywhere. The spoken reply is sent only to the AI voice service, using the key you saved in the AI Chat card above — the key stays on this device.</p>
           <Field label="Voice replies (speak AI answers aloud)">
             <div className="btn-row">
               {([true, false] as const).map((v) => (
@@ -953,18 +985,27 @@ export function SettingsView({ ctx, section }: { ctx: Ctx; section?: string }) {
               ))}
             </div>
           </Field>
-          <Field label="Speech rate">
+          <Field label="AI voice — kaunsi awaz mein bole">
             <select
               className="input"
-              value={String(voiceSettingsFor(profile).rate)}
-              onChange={(e) => update({ voiceRate: parseFloat(e.target.value) }, 'Voice speech rate changed')}
-              aria-label="Speech rate"
+              value={aiVoiceFor(profile)}
+              onChange={(e) => update({ aiVoice: e.target.value }, 'AI voice changed')}
+              aria-label="AI voice"
             >
-              <option value="0.8">Slow (0.8×)</option>
-              <option value="1">Normal (1×)</option>
-              <option value="1.2">Fast (1.2×)</option>
+              {AI_VOICES.map((v) => (
+                <option key={v.id} value={v.id}>{v.label} — {v.hint}</option>
+              ))}
             </select>
           </Field>
+          <p className="field-hint">{voiceCounter} — har din {AI_VOICE_DAILY_LIMIT} baar bolta hai, phir sirf text mein jawab milega. Kal subah phir se {AI_VOICE_DAILY_LIMIT} milenge.</p>
+          <div className="btn-row">
+            <Btn kind="secondary" onClick={() => { void hearVoice(); }}>🔊 Awaz suno</Btn>
+            <span className="field-hint" style={{ alignSelf: 'center' }}>Awaz sunna 1 baar ginta hai — test bhi usi {AI_VOICE_DAILY_LIMIT} mein se hai.</span>
+          </div>
+          {voiceTestStatus && <p className="field-hint">{voiceTestStatus}</p>}
+          {!aiKeySaved && (
+            <p className="field-hint">AI awaz ke liye pehle "AI Chat" card mein key save karo — bina key ke sirf text mein jawab milega.</p>
+          )}
           <Field label="Continuous conversation (keep listening across turns)">
             <div className="btn-row">
               {([true, false] as const).map((v) => (
@@ -974,22 +1015,7 @@ export function SettingsView({ ctx, section }: { ctx: Ctx; section?: string }) {
               ))}
             </div>
           </Field>
-          {browserVoices.length > 0 && (
-            <Field label={`Preferred voice (${(profile.aiLanguage && profile.aiLanguage !== 'auto' ? profile.aiLanguage : 'auto-detect')} — voices come from this browser/device)`}>
-              <select
-                className="input"
-                value={(profile.voiceByLang || {})[voiceLangKeyFor(profile)] || ''}
-                onChange={(e) => update({ voiceByLang: { ...(profile.voiceByLang || {}), [voiceLangKeyFor(profile)]: e.target.value } }, 'Preferred voice changed')}
-                aria-label="Preferred voice"
-              >
-                <option value="">Browser default voice</option>
-                {browserVoices.map((v) => (
-                  <option key={`${v.lang}:${v.name}`} value={v.name}>{v.name} ({v.lang})</option>
-                ))}
-              </select>
-            </Field>
-          )}
-          <p className="field-hint">Voice input needs microphone permission and works best in Chrome. If this browser does not support voice, type your message — text chat always works. The mic is never on without the listening indicator in chat.</p>
+          <p className="field-hint">Voice input needs microphone permission and works best in Chrome. If this browser does not support voice, type your message — text chat always works. The mic is never on without the listening indicator in chat. Lambe jawab sirf text mein milte hain — awaz mein sirf pehle 2 vakya bolta hai.</p>
         </Card></div>
 
         <Card title={t(lang, 'theme')}>

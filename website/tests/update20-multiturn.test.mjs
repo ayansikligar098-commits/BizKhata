@@ -78,7 +78,7 @@ ARC('M1', 'PAN arc: greeting → plan → count → docs → English → Xerox s
   { q: 'Documents bhi batao', expected: 'Same PAN topic: document list', check: and(isIntent('topic_followup'), has('Aadhaar')) },
   { q: 'Aur English mein likho', expected: 'Checklist converted to English, content kept (5 applications)', check: and(isIntent('checklist_translate'), isKind('checklist'), has('PAN Card work checklist'), re(/5 applications/)) },
   { q: 'Aaj Xerox ke 300 cash hue', expected: 'Topic switch: Xerox income preview, NOT saved', check: and(isIntent('business_action'), isKind('action'), (r) => r.action.kind === 'daily_income' && r.totalPaise === 30000, unchanged) },
-  { q: 'Aur 200 UPI', expected: 'Follow-up on the SAME service (Xerox), ₹200 UPI', check: and(isIntent('business_action'), isKind('action'), (r) => r.action.kind === 'daily_income' && r.totalPaise === 20000 && /Xerox/.test((r.previewLines || []).join(' '))) },
+  { q: 'Aur 200 UPI', expected: 'Follow-up MERGES into the pending preview (UPDATE 25 C-1): Xerox ₹300 cash + ₹200 UPI', check: and(isIntent('business_action'), isKind('action'), (r) => r.action.kind === 'daily_income' && r.totalPaise === 50000 && r.action.entries.length === 2 && /Xerox/.test((r.previewLines || []).join(' '))) },
   { q: 'PAN wali checklist phir dikhao', expected: 'Return to the earlier topic: PAN checklist shown again (5 applications)', check: and(isIntent('checklist_show'), isKind('checklist'), re(/5 applications/)) },
   { q: 'Nahi, 3 the, 5 nahi', expected: 'Correction after the topic switch: 3, not 5', check: and(isIntent('followup_correct'), isKind('checklist'), re(/3 applications/), (r) => !/5 applications/.test(T(r.text))) },
   { q: 'Aaj ka dhandha kitna hua?', expected: 'Real total (nothing was saved — previews only): ₹0.00', check: and(isIntent('business_query'), has('₹0.00')) },
@@ -90,7 +90,7 @@ ARC('M1', 'PAN arc: greeting → plan → count → docs → English → Xerox s
 // ============================================================ M2 — voice arc (text transcripts)
 ARC('M2', 'Voice arc: spoken income → spoken follow-up → summary → plan → checklist', [
   { q: 'Aaj Xerox ke 300 cash hue.', viaVoice: true, expected: 'Voice income → Xerox preview', check: and(isIntent('business_action'), isKind('action'), (r) => r.action.kind === 'daily_income' && r.totalPaise === 30000, unchanged) },
-  { q: 'Aur 200 UPI.', viaVoice: true, expected: 'Voice follow-up: same service, ₹200 UPI', check: and(isIntent('business_action'), isKind('action'), (r) => r.action.kind === 'daily_income' && r.totalPaise === 20000) },
+  { q: 'Aur 200 UPI.', viaVoice: true, expected: 'Voice follow-up MERGES into the pending preview (UPDATE 25 C-1): ₹500 total', check: and(isIntent('business_action'), isKind('action'), (r) => r.action.kind === 'daily_income' && r.totalPaise === 50000 && r.action.entries.length === 2) },
   { q: 'Aaj ka dhandha kitna hua?', expected: 'Summary from real ledger: ₹0.00 (previews not saved)', check: and(isIntent('business_query'), has('₹0.00')) },
   { q: 'Kal Pan Card banane hai', expected: 'Plan + checklist offer', check: and(isIntent('plan'), has('checklist')) },
   { q: 'Checklist bana do', expected: 'PAN checklist (topic from the plan, not a shop list)', check: and(isIntent('do_checklist'), isKind('checklist'), (r) => /PAN/.test(r.checklist.title)) },

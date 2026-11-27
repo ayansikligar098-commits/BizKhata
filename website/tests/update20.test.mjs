@@ -273,19 +273,19 @@ C('9-followup', 'Kal Pan Card banane hai', 'Checklist → "Isme documents bhi ad
   const r3 = a.send('Isme documents bhi add karo');
   return r3.kind === 'checklist' && clen(r3) > before && /Aadhaar/.test(T(r3.text));
 }));
-C('9-followup', 'Aaj Xerox ke 300 cash hue', 'Preview → "Aur 200 UPI" uses the SAME service (Xerox)', and((r, a) => {
+C('9-followup', 'Aaj Xerox ke 300 cash hue', 'Preview → "Aur 200 UPI" MERGES into the pending preview (UPDATE 25 C-1: ₹300 cash + ₹200 UPI, same service)', and((r, a) => {
   const r2 = a.send('Aur 200 UPI');
-  return r2.kind === 'action' && r2.action.kind === 'daily_income' && /Xerox/.test((r2.previewLines || []).join(' ')) && r2.totalPaise === 20000;
+  return r2.kind === 'action' && r2.action.kind === 'daily_income' && /Xerox/.test((r2.previewLines || []).join(' ')) && r2.totalPaise === 50000 && r2.action.entries.length === 2;
 }));
 C('9-followup', 'Aaj Xerox ke 300 cash hue', 'Preview → "Ha": lib level must NOT fake-save (real confirm is the UI pending-preview flow, verified in the drive)', and((r, a) => {
   const r2 = a.send('Ha');
   return r2.kind !== 'action' && totalPaise(a.state) === 0 && !/save ho gaya|saved/i.test(T(r2.text));
 }));
-C('9-followup', 'Aaj Xerox ke 300 cash hue', 'Voice transcript "Aur 200 UPI" continues the same context', and((r, a) => {
+C('9-followup', 'Aaj Xerox ke 300 cash hue', 'Voice transcript "Aur 200 UPI" continues the same context (UPDATE 25 C-1: merges, ₹500 total)', and((r, a) => {
   const d = voiceLib.handleVoiceTranscript({ transcript: 'Aur 200 UPI' });
   if (d.action !== 'send') return { ok: false, detail: 'voice decision=' + d.action };
   const r2 = a.send(d.text);
-  return r2.kind === 'action' && r2.action.kind === 'daily_income' && r2.totalPaise === 20000;
+  return r2.kind === 'action' && r2.action.kind === 'daily_income' && r2.totalPaise === 50000 && r2.action.entries.length === 2;
 }));
 C('9-followup', 'Kal Pan Card banane hai', 'Topic switch then return: "PAN wali checklist phir dikhao" restores it', and((r, a) => {
   const r2 = a.send('Checklist bana do');

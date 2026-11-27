@@ -646,10 +646,17 @@ export function answerGeneral(message: string, lang: AiLangCode, seed: string): 
   // the assistant cannot submit anything to UIDAI or any government
   // portal. It can only track the shop's own work in BizKhata.
   if (/(uidai|portal)/.test(s) && /(update|submit|apply|kar\s*do|karo|karna|bana|bhare|bharna)/.test(s)) {
+    // UPDATE 25 (C-6): the old text TOLD the user to say "Aadhaar
+    // Mobile Number Update ka module bana do" — that suggestion is
+    // removed. The owner cancelled building that module; the
+    // assistant must never prompt him to ask for it. (An EXPLICIT
+    // request from him still goes through the sanctioned queue path
+    // in dev-requests.ts / conversation.ts — that behaviour is
+    // unchanged; only this proactive suggestion is gone.)
     return {
       text: lang === 'en'
-        ? 'I cannot submit anything to UIDAI or any government portal — I have no access to submit applications there, and I will not pretend otherwise.\n\nWhat I CAN do: track this work in BizKhata (customer, old/new mobile, date, charge, status) so nothing is forgotten. If you want, I can queue a module for it — say "Aadhaar Mobile Number Update ka module bana do" — or tell me the customer details and I will record the job.'
-        : 'Main UIDAI ya kisi government portal par kuch submit nahi kar sakta — wahan application submit karne ka mere paas koi access nahi hai, aur main aisa dikhawa bhi nahi karunga.\n\nMain ye kar sakta hoon: ye kaam BizKhata mein track karna (customer, purana/naya mobile, date, charge, status) taaki kuch bhoole nahi. Agar chaho to main iske liye module queue kar dun — "Aadhaar Mobile Number Update ka module bana do" bolo — ya customer ki details batao, main job record kar dunga.',
+        ? 'I cannot submit anything to UIDAI or any government portal — I have no access to submit applications there, and I will not pretend otherwise.\n\nWhat I CAN do: track this work in BizKhata (customer, old/new mobile, date, charge, status) so nothing is forgotten. Tell me the customer details and I will record the job — you can track it in Aadhaar Services.'
+        : 'Main UIDAI ya kisi government portal par kuch submit nahi kar sakta — wahan application submit karne ka mere paas koi access nahi hai, aur main aisa dikhawa bhi nahi karunga.\n\nMain ye kar sakta hoon: ye kaam BizKhata mein track karna (customer, purana/naya mobile, date, charge, status) taaki kuch bhoole nahi. Customer ki details batao, main job record kar dunga — Aadhaar Services mein is kaam ko track kar sakte ho.',
     };
   }
   // Identity — "Tum kaun ho?" (UPDATE 20 §2: normal conversation).
@@ -813,6 +820,38 @@ export function answerGeneral(message: string, lang: AiLangCode, seed: string): 
   if (/translate|matlab.*(english|gujarati|hindi)|ka matlab/.test(s)) {
     if (/dhanyavaad|dhanyavad|thank/.test(s)) return { text: lang === 'en' ? '"Dhanyavaad" means "Thank you". In Gujarati it is "Aabhar".' : '"Dhanyavaad" ka matlab hai "Thank you". Gujarati mein ise "Aabhar" kehte hain.' };
     if (/namaste/.test(s)) return { text: lang === 'en' ? '"Namaste" is a respectful greeting — it means "Hello" with respect. In Gujarati: "Namaste" or "Kem chho".' : '"Namaste" ek samman wala greeting hai — matlab "Hello". Gujarati mein: "Namaste" ya "Kem chho".' };
+  }
+  // UPDATE 25 (C-9): small local general-knowledge KB — capitals.
+  // "Bharat ki rajdhani kya hai?" failed locally (cloud-only) even
+  // though the answer never changes. Only fixed, stable facts live
+  // here; anything live/current still goes to the cloud (or an
+  // honest "I don't know"). No invented facts, no live data.
+  if (/(rajdhani|capital)/.test(s)) {
+    const capitals: { re: RegExp; place: string; capital: string }[] = [
+      { re: /(bharat|india|hindustan)/, place: 'Bharat', capital: 'New Delhi' },
+      { re: /maharashtra/, place: 'Maharashtra', capital: 'Mumbai' },
+      { re: /gujarat/, place: 'Gujarat', capital: 'Gandhinagar' },
+      { re: /uttar\s*pradesh|\bup\b/, place: 'Uttar Pradesh', capital: 'Lucknow' },
+      { re: /tamil\s*nadu/, place: 'Tamil Nadu', capital: 'Chennai' },
+      { re: /karnataka/, place: 'Karnataka', capital: 'Bengaluru' },
+      { re: /west\s*bengal|paschim\s*banga/, place: 'West Bengal', capital: 'Kolkata' },
+      { re: /rajasthan/, place: 'Rajasthan', capital: 'Jaipur' },
+      { re: /punjab/, place: 'Punjab', capital: 'Chandigarh' },
+      { re: /madhya\s*pradesh/, place: 'Madhya Pradesh', capital: 'Bhopal' },
+      { re: /bihar/, place: 'Bihar', capital: 'Patna' },
+      { re: /\bdelhi\b/, place: 'Delhi', capital: 'New Delhi' },
+    ];
+    for (const c of capitals) {
+      if (c.re.test(s)) {
+        return {
+          text: lang === 'en'
+            ? `The capital of ${c.place === 'Bharat' ? 'India' : c.place} is ${c.capital}.`
+            : lang === 'gu'
+              ? `${c.place} ni rajdhani ${c.capital} chhe.`
+              : `${c.place} ki rajdhani ${c.capital} hai.`,
+        };
+      }
+    }
   }
   return null;
 }
