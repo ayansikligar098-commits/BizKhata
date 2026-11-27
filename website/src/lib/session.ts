@@ -13,16 +13,30 @@
  * What this module DOES implement, honestly, on the static tier:
  * - Opaque random session tokens (256-bit, crypto.getRandomValues), NOT a
  *   boolean `loggedIn` flag and NOT the PIN hash in storage.
- * - Access token (15 min) + refresh token (30 days). Raw tokens live ONLY
- *   in cookies (Secure on HTTPS, SameSite=Lax, Path=/). localStorage holds
- *   ONLY SHA-256 hashes of the tokens + metadata (owner, expiry, device).
+ * - Access token (15 min) + refresh token (30 days). Raw tokens live in
+ *   cookies (Secure on HTTPS, SameSite=Lax, Path=/). UPDATE 24: the raw
+ *   refresh token is ALSO kept in localStorage (key bizkhata.rt.v1) and
+ *   read from there FIRST, because cookies alone do not survive in-app
+ *   browsers / cleared cookies — that was why "Login Save Nahi Rehta".
+ *   Honest trade-off on this static local-first deployment: there is no
+ *   server, so the refresh token only guards LOCAL data on this device;
+ *   storing it in localStorage is the accepted cost of login surviving
+ *   cookie loss. Server-side sessions (Pages Functions + KV/D1) remain
+ *   the documented next step; until then no claim of server security is
+ *   made. localStorage also holds ONLY SHA-256 hashes of the tokens +
+ *   metadata (owner, expiry, device).
  *   NOTE: cookies set from JS cannot be HttpOnly — that needs a server
  *   (Pages Functions). This is the known gap; see README.md.
  * - Rotation: using the refresh token issues a NEW access token (and a new
- *   refresh token) and revokes the old refresh token hash.
- * - Revocation: logout deletes the cookies + the session record and records
- *   the token hashes in a local revocation list, so a revoked session can
- *   never be replayed on this device.
+ *   refresh token) and revokes the old refresh token hash — with a 60s
+ *   grace window for the previous hash, so two tabs renewing at once do
+ *   not revoke each other (UPDATE 24). A localStorage single-flight lock
+ *   makes renewal tab-safe; a tab that finds the lock held waits briefly
+ *   and then re-reads the (shared) record instead of failing.
+ * - Revocation: logout deletes the cookies + the localStorage refresh
+ *   token + the session record and records the token hashes in a local
+ *   revocation list, so a revoked session can never be replayed on this
+ *   device.
  * - Multi-tab sync: BroadcastChannel + storage events (logout in one tab
  *   logs out every tab; a fresh login in one tab is visible to others).
  * - Offline-aware verification: no network = "retry", NEVER "logged out".
@@ -34,9 +48,16 @@
 export const ACCESS_TTL_MS = 15 * 60 * 1000; // 15 minutes
 export const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 export const RENEW_BEFORE_MS = 5 * 60 * 1000; // renew access when < 5 min left
+/** Previous refresh hash stays usable this long after rotation (tab-race grace). */
+export const REFRESH_GRACE_MS = 60 * 1000; // 60 seconds
+/** How long one tab may hold the renewal lock before another tab treats it as stale. */
+const RENEW_LOCK_TTL_MS = 10 * 1000;
 
 const RECORD_KEY = 'bizkhata.session.v1';
 const REVOKED_KEY = 'bizkhata.session.revoked.v1';
+/** Raw refresh token mirror (UPDATE 24) — read FIRST, cookie is the fallback. */
+const REFRESH_LS_KEY = 'bizkhata.rt.v1';
+const RENEW_LOCK_KEY = 'bizkhata.renew.lock.v1';
 const LAST_PATH_KEY = 'bizkhata.lastPath';
 const CHANNEL = 'bizkhata-session';
 
@@ -46,6 +67,9 @@ export interface SessionRecord {
   deviceId: string;
   accessHash: string;
   refreshHash: string;
+  /** Previous refresh hash, still accepted until previousRefreshExpiresAt (grace). */
+  previousRefreshHash?: string;
+  previousRefreshExpiresAt?: number;
   accessExpiresAt: number; // epoch ms
   refreshExpiresAt: number; // epoch ms
   issuedAt: number;
@@ -102,6 +126,42 @@ function writeCookie(name: string, value: string, maxAgeSeconds: number): void {
 function deleteCookie(name: string): void {
   if (!isBrowser()) return;
   document.cookie = `${name}=; Path=/; Max-Age=0; SameSite=Lax`;
+}
+
+/**
+ * Refresh token, UPDATE 24: localStorage FIRST, cookie as fallback.
+ * Cookies alone did not survive in-app browsers / cleared cookies, so
+ * renewal died and the user was logged out. Both stores are written on
+ * issue/renew and both are cleared on logout.
+ */
+function readRefreshToken(): string | null {
+  if (!isBrowser()) return null;
+  try {
+    const fromLs = window.localStorage.getItem(REFRESH_LS_KEY);
+    if (fromLs) return fromLs;
+  } catch { /* ignore */ }
+  return readCookie('bizkhata.rt');
+}
+
+function writeRefreshToken(value: string): void {
+  if (!isBrowser()) return;
+  try {
+    window.localStorage.setItem(REFRESH_LS_KEY, value);
+  } catch { /* ignore — cookie still written below */ }
+  writeCookie('bizkhata.rt', value, Math.floor(REFRESH_TTL_MS / 1000));
+}
+
+function clearRefreshToken(): void {
+  if (!isBrowser()) return;
+  try {
+    window.localStorage.removeItem(REFRESH_LS_KEY);
+  } catch { /* ignore */ }
+  deleteCookie('bizkhata.rt');
+}
+
+/** True when a session record exists on this device/browser (UPDATE 24). */
+export function hasSessionRecord(): boolean {
+  return readRecord() !== null;
 }
 
 function readRecord(): SessionRecord | null {
@@ -173,36 +233,122 @@ export async function issueSession(ownerMobile: string): Promise<void> {
   };
   writeRecord(rec);
   writeCookie('bizkhata.at', access, Math.floor(ACCESS_TTL_MS / 1000));
-  writeCookie('bizkhata.rt', refresh, Math.floor(REFRESH_TTL_MS / 1000));
+  writeRefreshToken(refresh);
   broadcast('login');
 }
 
-/** Rotate the access token using the refresh token. Returns false if the refresh session is gone. */
-export async function renewSession(): Promise<boolean> {
-  const rec = readRecord();
-  const refresh = readCookie('bizkhata.rt');
-  if (!rec || !refresh) return false;
-  if (Date.now() >= rec.refreshExpiresAt) return false;
-  if ((await hashToken(refresh)) !== rec.refreshHash) return false;
-  if (readRevoked().includes(rec.refreshHash)) return false;
-
+/** Single-flight renewal lock (localStorage, best-effort across tabs). */
+function acquireRenewLock(): string | null {
+  if (!isBrowser()) return null;
+  const token = newToken();
   const now = Date.now();
+  try {
+    const raw = window.localStorage.getItem(RENEW_LOCK_KEY);
+    if (raw) {
+      const lock = JSON.parse(raw) as { token: string; expiresAt: number };
+      if (lock.expiresAt > now) return null; // another tab is renewing
+    }
+    window.localStorage.setItem(RENEW_LOCK_KEY, JSON.stringify({ token, expiresAt: now + RENEW_LOCK_TTL_MS }));
+    return token;
+  } catch {
+    return token; // storage unavailable — proceed without the lock
+  }
+}
+
+function releaseRenewLock(token: string | null): void {
+  if (!isBrowser() || !token) return;
+  try {
+    const raw = window.localStorage.getItem(RENEW_LOCK_KEY);
+    if (raw && (JSON.parse(raw) as { token: string }).token === token) {
+      window.localStorage.removeItem(RENEW_LOCK_KEY);
+    }
+  } catch { /* ignore */ }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Is the stored session currently fresh (access token alive)? */
+async function sessionIsFresh(): Promise<boolean> {
+  const rec = readRecord();
+  if (!rec) return false;
+  const now = Date.now();
+  if (now >= rec.refreshExpiresAt) return false;
+  const access = readCookie('bizkhata.at');
+  if (access && (await hashToken(access)) === rec.accessHash && now < rec.accessExpiresAt) return true;
+  // No usable access cookie, but the refresh token in shared storage is
+  // the CURRENT one — another tab just renewed, so the session is alive.
+  const refresh = readRefreshToken();
+  if (refresh && (await hashToken(refresh)) === rec.refreshHash) return true;
+  return false;
+}
+
+/**
+ * One rotation attempt against the FRESH record + FRESH refresh token.
+ * Accepts the current refresh hash, or the previous hash inside its 60s
+ * grace window (a tab that started renewing before another tab rotated).
+ * Presenting a previous-grace hash means another tab already rotated, so
+ * the session is already fresh — return true without rotating again.
+ */
+async function tryRotateOnce(): Promise<boolean> {
+  const rec = readRecord();
+  const refresh = readRefreshToken();
+  if (!rec || !refresh) return false;
+  const now = Date.now();
+  if (now >= rec.refreshExpiresAt) return false;
+  const presented = await hashToken(refresh);
+  const isCurrent = presented === rec.refreshHash;
+  const isPrevious =
+    !!rec.previousRefreshHash &&
+    presented === rec.previousRefreshHash &&
+    now < (rec.previousRefreshExpiresAt ?? 0);
+  if (!isCurrent && !isPrevious) return false;
+  if (isPrevious) return true; // already rotated by another tab
+  if (readRevoked().includes(presented)) return false;
+
   const access = newToken();
   const nextRefresh = newToken();
-  addRevoked([rec.refreshHash]); // old refresh token is single-use
+  addRevoked([rec.refreshHash]); // old refresh token is single-use (+60s grace)
   const next: SessionRecord = {
     ...rec,
     accessHash: await hashToken(access),
     refreshHash: await hashToken(nextRefresh),
+    previousRefreshHash: rec.refreshHash,
+    previousRefreshExpiresAt: now + REFRESH_GRACE_MS,
     accessExpiresAt: now + ACCESS_TTL_MS,
     refreshExpiresAt: now + REFRESH_TTL_MS,
     issuedAt: now,
   };
   writeRecord(next);
   writeCookie('bizkhata.at', access, Math.floor(ACCESS_TTL_MS / 1000));
-  writeCookie('bizkhata.rt', nextRefresh, Math.floor(REFRESH_TTL_MS / 1000));
+  writeRefreshToken(nextRefresh);
   broadcast('renewed');
   return true;
+}
+
+/**
+ * Rotate the access token using the refresh token. Tab-safe: only one tab
+ * rotates at a time (lock); a tab that finds the lock held waits briefly
+ * for the other tab's rotation and then re-reads shared storage instead
+ * of failing. Returns false only if the refresh session is really gone.
+ */
+export async function renewSession(): Promise<boolean> {
+  const lock = acquireRenewLock();
+  if (!lock) {
+    // Another tab is renewing — wait for it, then trust shared storage.
+    for (let i = 0; i < 10; i++) {
+      await sleep(200);
+      if (await sessionIsFresh()) return true;
+    }
+    // Lock holder seems stuck (or its lock expired): try ourselves.
+    return tryRotateOnce();
+  }
+  try {
+    return await tryRotateOnce();
+  } finally {
+    releaseRenewLock(lock);
+  }
 }
 
 /**
@@ -214,30 +360,48 @@ export async function verifySession(): Promise<VerifyResult> {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return { status: 'offline' };
   const rec = readRecord();
   const access = readCookie('bizkhata.at');
-  const refresh = readCookie('bizkhata.rt');
+  // UPDATE 24: refresh token comes from localStorage first, cookie fallback.
+  const refresh = readRefreshToken();
   if (!rec || (!access && !refresh)) return { status: 'none' };
   const now = Date.now();
-  if (readRevoked().includes(rec.refreshHash) || readRevoked().includes(rec.accessHash)) {
+  if (now >= rec.refreshExpiresAt) return { status: 'expired' };
+  const refreshHash = refresh ? await hashToken(refresh) : null;
+  // A previous-grace refresh hash is in the revocation list by design;
+  // it is NOT a revoked session. Only a hash that is neither current nor
+  // grace-previous counts as revoked.
+  const isPreviousGrace =
+    !!refreshHash &&
+    !!rec.previousRefreshHash &&
+    refreshHash === rec.previousRefreshHash &&
+    now < (rec.previousRefreshExpiresAt ?? 0);
+  if (refreshHash && refreshHash !== rec.refreshHash && !isPreviousGrace && readRevoked().includes(refreshHash)) {
     return { status: 'revoked' };
   }
-  if (now >= rec.refreshExpiresAt) return { status: 'expired' };
-  if (access && (await hashToken(access)) === rec.accessHash && now < rec.accessExpiresAt) {
-    return { status: 'valid' };
+  if (access) {
+    const accessHash = await hashToken(access);
+    if (accessHash === rec.accessHash && now < rec.accessExpiresAt) {
+      return { status: 'valid' };
+    }
+    if (accessHash !== rec.accessHash && readRevoked().includes(accessHash)) {
+      return { status: 'revoked' };
+    }
   }
   // Access token expired/missing but refresh is alive -> rotate silently.
-  if (refresh && (await hashToken(refresh)) === rec.refreshHash) {
+  if (refreshHash === rec.refreshHash || isPreviousGrace) {
     return (await renewSession()) ? { status: 'renewed' } : { status: 'expired' };
   }
   return { status: 'expired' };
 }
 
-/** Revoke the session: cookies + record deleted, hashes blocklisted. */
+/** Revoke the session: cookies + localStorage refresh token + record deleted, hashes blocklisted. */
 export function revokeSession(): void {
   const rec = readRecord();
-  if (rec) addRevoked([rec.accessHash, rec.refreshHash]);
+  if (rec) {
+    addRevoked([rec.accessHash, rec.refreshHash, ...(rec.previousRefreshHash ? [rec.previousRefreshHash] : [])]);
+  }
   if (isBrowser()) window.localStorage.removeItem(RECORD_KEY);
   deleteCookie('bizkhata.at');
-  deleteCookie('bizkhata.rt');
+  clearRefreshToken();
   broadcast('logout');
 }
 

@@ -1,0 +1,80 @@
+{
+  "generatedAt": "2026-11-27T10:47:56.363Z",
+  "total": 12,
+  "passed": 12,
+  "rate": 100,
+  "cases": [
+    {
+      "id": "a-exact-sequence",
+      "title": "16:02 add Aadhaar ₹600 UPI → confirm → 16:03 \"Isko remove kardo\" → delete preview ₹600 → \"Ha\" → verified deleted, UPI ₹0, Recycle Bin + audit",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "a2-double-isko",
+      "title": "A second \"Isko remove kardo\" after the delete is an honest \"already gone\" — never a second fake success",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "b-bare-delete",
+      "title": "\"Hatana hai\" (no amount, no isko) → clarification listing recent candidates, never a cloud-style success claim",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "c-amount-form",
+      "title": "\"Aadhaar 600 wali entry delete kar do\" (amount form) still works",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "d-same-amount",
+      "title": "Delete with 2 same-amount entries → disambiguation list, then the picked one only is deleted",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "e-nonexistent",
+      "title": "Delete a non-existent amount → honest \"koi entry nahi mili\", nothing deleted",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "f-correction",
+      "title": "\"Galat tha\" correction still works (Xerox 300 → 250)",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "g-no-contradiction",
+      "title": "A general question right after a verified save must not contradict it",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "h-cloud-guard",
+      "title": "Cloud-guard: fabricated success/contradiction claims are blocked and replaced; benign replies pass through",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "r1-khata-not-delete",
+      "title": "Regression: \"Customer Khata kholo\" is navigation, NOT a delete",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "r2-how-to-delete",
+      "title": "Regression: \"Entry kaise delete karu?\" is help, not a delete action",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "r3-keep-what-works",
+      "title": "Regression: add flow, checklist offer + \"Ha\", and service-only delete keep working",
+      "pass": true,
+      "detail": ""
+    }
+  ]
+}

@@ -20,8 +20,8 @@ import { formatINR } from './money';
 import { todayISO, addDaysISO } from './types';
 import type { AppState, BusinessProfile, Method } from './types';
 import type { AssistantAction, FoundRecord } from './assistant';
-import { findAssistantTargets } from './assistant';
-import type { ChatContext } from './knowledge';
+import { findAssistantTargetById, findAssistantTargets, recentAssistantTargets } from './assistant';
+import type { ChatContext, LastSavedEntry } from './knowledge';
 import { detectLanguage, normalizeDigitsMultilingual, normalizeMultilingual, replyIn, resolveReplyLang, type AiLangCode, type ReplyKey } from './languages';
 import { SERVICE_ALIASES, findNameIn, findServiceIn, normalizeDevanagariWords, parseDateRange } from './knowledge';
 import { isPlanOrStatement } from './intent';
@@ -431,6 +431,109 @@ function draftFor(missing: string, question: string, partial: Record<string, unk
   return { kind: 'draft', draft: { missing, question, partial, original } };
 }
 
+/* ================= UPDATE 23 — delete routing =================
+ *
+ * The 2026-11-27 16:03 bug: "Isko remove kardo" / "Hatana hai" carry
+ * no amount, so the old delete branch (amount-gated) never fired and
+ * the message fell through to the cloud model, which fabricated the
+ * deletion and then invented a false history. Delete routing is now:
+ *   amount form → existing behaviour (unchanged);
+ *   service-only form → resolve by service (1 = delete, >1 = list);
+ *   "isko / ye / is entry" + delete → the conversation's last
+ *     verified save (ctx.lastSavedEntry), re-read from the store;
+ *     with no saved-entry context, the single most recent entry
+ *     (preview still shows its label — the user confirms or cancels);
+ *   bare delete ("Hatana hai") → NEVER falls through to the cloud:
+ *     a clarification listing the recent candidates (draft 'target').
+ * Every path still goes through preview → confirm → backend delete
+ * → verify; nothing is ever silently deleted.
+ */
+
+/** Word-boundary delete words. Deliberately NOT a bare substring
+ *  regex: /hata/ would also match "Khata" ("Customer Khata kholo"
+ *  is navigation, not a delete). Padded-space matching works for
+ *  Devanagari too, where \b fails. */
+function paddedWords(text: string): string {
+  return ` ${normalizeMultilingual(text.toLowerCase()).replace(/[^\p{L}\p{N}\s]+/gu, ' ').replace(/\s+/g, ' ')} `;
+}
+const DELETE_WORDS = [' delete ', ' hata ', ' hatao ', ' hatana ', ' hatado ', ' hatade ', ' remove ', ' mita ', ' mitado ', ' हटा ', ' हटाना ', ' मिटा ', ' डिलीट '];
+const DELETE_PRONOUNS = [' isko ', ' is ko ', ' ye ', ' yeh ', ' is entry ', ' ye wali ', ' is wali ', ' usko ', ' us entry ', ' last ', ' pichli ', ' pehle wali ', ' इसको ', ' ये ', ' इस '];
+
+/** True when the message contains a delete word as its own word. */
+export function hasDeleteWord(text: string): boolean {
+  const s = paddedWords(text);
+  return DELETE_WORDS.some((w) => s.includes(w));
+}
+
+/** True when the message points at a specific entry ("isko", "ye wali"). */
+export function hasDeletePronoun(text: string): boolean {
+  const s = paddedWords(text);
+  return DELETE_PRONOUNS.some((w) => s.includes(w));
+}
+
+/** True when the message asks to delete/remove an entry (any form). */
+export function isDeleteRequest(raw: string): boolean {
+  const s = `${normalizeMultilingual(raw.toLowerCase())} ${raw.toLowerCase()}`;
+  // A how-to question ("entry kaise delete karu?") is app help, not
+  // a delete action — it must reach the help engine, never a draft.
+  if (/kaise|how/.test(s)) return false;
+  return hasDeleteWord(raw);
+}
+
+function deleteActionFor(t: FoundRecord): ParsedMessage {
+  const action: AssistantAction = { kind: 'delete_entry', targetKind: t.kind, targetId: t.id, label: t.label };
+  return { kind: 'action', action, previewLines: [`Delete: ${t.label} (${t.date})`, 'Ye entry Recycle Bin mein jayegi — wahan se restore bhi ho sakti hai.'], totalPaise: 0 };
+}
+
+function deleteCandidatesDraft(targets: FoundRecord[], rawText: string): ParsedMessage {
+  return draftFor(
+    'target',
+    `Kaunsi entry delete karni hai? Number likho (1, 2, 3…) — confirm karne par hi delete hogi:\n${targets.map((t, i) => `${i + 1}. ${t.label} (${t.date})`).join('\n')}`,
+    { targets },
+    rawText,
+  );
+}
+
+/**
+ * UPDATE 23 — the conversation-context record for a just-confirmed
+ * save: the chat UI calls this with the backend's appliedIds after a
+ * verified save and stores the result as ctx.lastSavedEntry. Single
+ * source of truth (the UI and the tests use the same function).
+ * Multi-entry saves resolve "isko" to the FIRST entry of the save —
+ * the preview always shows its label, so the user can cancel if they
+ * meant a different one. Returns null for actions with no record
+ * (e.g. internal transfer creates only a txn — still resolvable as
+ * 'txn' via appliedIds[0]).
+ */
+export function savedEntryFor(action: AssistantAction, appliedIds: string[]): LastSavedEntry | null {
+  if (!appliedIds || appliedIds.length === 0) return null;
+  if (action.kind === 'daily_income') {
+    const e = action.entries[0];
+    if (!e) return null;
+    return {
+      kind: e.customerName ? 'job' : 'daily',
+      id: appliedIds[0],
+      label: `${e.service} ${formatINR(e.amountPaise)} (${e.method})`,
+      amountPaise: e.amountPaise,
+      date: action.date,
+      service: e.service,
+    };
+  }
+  if (action.kind === 'expense') {
+    return { kind: 'expense', id: appliedIds[0], label: `${action.category} ${formatINR(action.amountPaise)}`, amountPaise: action.amountPaise, date: action.date, service: action.service };
+  }
+  if (action.kind === 'mt_transfer') {
+    return { kind: 'mt', id: appliedIds[0], label: `Money Transfer to ${action.receiverName} ${formatINR(action.amountPaise)}`, amountPaise: action.amountPaise, date: action.date, service: 'Money Transfer' };
+  }
+  if (action.kind === 'customer_payment') {
+    return { kind: 'job', id: appliedIds[0], label: `Payment from ${action.customerName} ${formatINR(action.amountPaise)}`, amountPaise: action.amountPaise, date: action.date };
+  }
+  if (action.kind === 'agent_payment') {
+    return { kind: 'txn', id: appliedIds[0], label: `Agent Payment — ${action.agentName} ${formatINR(action.amountPaise)}`, amountPaise: action.amountPaise, date: action.date, service: 'Agent Payment' };
+  }
+  return null;
+}
+
 const EXPENSE_CATEGORY_MAP: { re: RegExp; category: string }[] = [
   { re: /machine\s*repair|printer\s*repair|machine.*repair|repair.*machine/, category: 'Machine Repair' },
   { re: /printer.*(repair|kharab)|epson|kyocera/, category: 'Printer Repair' },
@@ -563,20 +666,64 @@ export function parseAssistantMessage(
     return { kind: 'action', action, previewLines: [`Correct: ${t0.label}`, `Naya amount: ${money(newAmt)} (pehle ${money(t0.amountPaise)})`], totalPaise: newAmt };
   }
 
-  // --- Delete: "Xerox 300 wali entry delete kar do". ---
-  if (/delete|hata|remove|delete\s*kar|mita/.test(q) && amounts.length >= 1) {
-    const amt = amounts[0].paise;
+  // --- Delete (UPDATE 23): amount form, service-only form, "isko"
+  //     form (last verified save / most recent entry), and bare
+  //     delete ("Hatana hai") → clarification listing candidates.
+  //     NEVER falls through to the cloud — every form is handled here.
+  if (hasDeleteWord(rawText)) {
     const svc = findServiceIn(q, profile.services);
-    const targets = findAssistantTargets(state, profile.id, { amountPaise: amt, text: svc || expenseCategoryHint(q) || undefined });
-    if (targets.length === 0) {
-      return { kind: 'error', text: `Mujhe ${money(amt)} ki koi entry nahi mili jo delete kar sakun. Service aur date batao.` };
+    // 1. Amount form (unchanged behaviour): "Aadhaar 600 wali entry
+    //    delete kar do".
+    if (amounts.length >= 1) {
+      const amt = amounts[0].paise;
+      const targets = findAssistantTargets(state, profile.id, { amountPaise: amt, text: svc || expenseCategoryHint(q) || undefined });
+      if (targets.length === 0) {
+        return { kind: 'error', text: `Mujhe ${money(amt)} ki koi entry nahi mili jo delete kar sakun. Service aur date batao.` };
+      }
+      if (targets.length > 1) {
+        return deleteCandidatesDraft(targets, rawText);
+      }
+      return deleteActionFor(targets[0]);
     }
-    if (targets.length > 1) {
-      return draftFor('target', `${targets.length} entries mili — kaunsi delete karni hai?\n${targets.map((t, i) => `${i + 1}. ${t.label} (${t.date})`).join('\n')}`, { targets }, rawText);
+    // 2. Service-only form: "Xerox wali entry delete kar do".
+    if (svc) {
+      const targets = findAssistantTargets(state, profile.id, { text: svc });
+      if (targets.length === 0) {
+        return { kind: 'error', text: `Mujhe ${svc} ki koi entry nahi mili jo delete kar sakun.` };
+      }
+      if (targets.length > 1) {
+        return deleteCandidatesDraft(targets, rawText);
+      }
+      return deleteActionFor(targets[0]);
     }
-    const t0 = targets[0];
-    const action: AssistantAction = { kind: 'delete_entry', targetKind: t0.kind, targetId: t0.id, label: t0.label };
-    return { kind: 'action', action, previewLines: [`Delete: ${t0.label} (${t0.date})`, 'Ye entry Recycle Bin mein jayegi — wahan se restore bhi ho sakti hai.'], totalPaise: 0 };
+    // 3. "Isko / ye / is entry" + delete → the last verified save
+    //    in this conversation, re-read from the store (never trusted
+    //    blindly: if it is already gone, say so honestly).
+    if (hasDeletePronoun(rawText)) {
+      if (ctx.lastSavedEntry) {
+        const t = findAssistantTargetById(state, profile.id, ctx.lastSavedEntry.kind, ctx.lastSavedEntry.id);
+        if (!t) {
+          return { kind: 'error', text: `Ye entry (${ctx.lastSavedEntry.label}) ab records mein nahi hai — pehle hi delete ho chuki hogi. Recycle Bin mein check karo, wahan se restore ho sakti hai.` };
+        }
+        return deleteActionFor(t);
+      }
+      const recent = recentAssistantTargets(state, profile.id, 1);
+      if (recent.length === 0) {
+        return { kind: 'error', text: 'Abhi koi entry nahi hai jo delete kar sakun.' };
+      }
+      return deleteActionFor(recent[0]);
+    }
+    // 4. Bare delete ("Hatana hai", "delete kar do") → ask WHICH
+    //    entry, listing the recent candidates. Never a cloud reply,
+    //    never a success claim, never a silent delete.
+    const recent = recentAssistantTargets(state, profile.id, 3);
+    if (recent.length === 0) {
+      return { kind: 'error', text: 'Abhi koi entry nahi hai jo delete kar sakun — pehle koi entry save karo.' };
+    }
+    if (recent.length === 1) {
+      return deleteActionFor(recent[0]);
+    }
+    return deleteCandidatesDraft(recent, rawText);
   }
 
   // --- Refund: "Rahul ko 200 refund karna hai". ---
@@ -978,8 +1125,21 @@ export function applyDraftAnswer(
   }
   if (draft.missing === 'target' && p.targets) {
     const n = parseInt(q, 10);
-    const targets = p.targets as { kind: 'daily' | 'job' | 'expense' | 'mt'; id: string; label: string; amountPaise: number }[];
-    const picked = Number.isInteger(n) && n >= 1 && n <= targets.length ? targets[n - 1] : targets.find((t) => q.includes(t.label.toLowerCase().slice(0, 12)));
+    const targets = p.targets as { kind: 'daily' | 'job' | 'expense' | 'mt'; id: string; label: string; amountPaise: number; service?: string; date: string }[];
+    let picked = Number.isInteger(n) && n >= 1 && n <= targets.length ? targets[n - 1] : targets.find((t) => q.includes(t.label.toLowerCase().slice(0, 12)));
+    if (!picked) {
+      // UPDATE 23 — the user answers with the amount/service instead
+      // of the list number ("Aadhaar 600 wali", "600 wali"): match on
+      // those instead of asking for the number again.
+      const replyAmounts = extractAmounts(replyText);
+      const replySvc = findServiceIn(q, profile.services);
+      const byAmount = replyAmounts.length > 0 ? targets.filter((t) => t.amountPaise === replyAmounts[0].paise) : [];
+      const byService = replySvc ? targets.filter((t) => (t.service || '').toLowerCase() === replySvc.toLowerCase() || t.label.toLowerCase().includes(replySvc.toLowerCase())) : [];
+      const both = byAmount.filter((t) => byService.length === 0 || byService.includes(t));
+      if (both.length === 1) picked = both[0];
+      else if (byAmount.length === 1 && byService.length === 0) picked = byAmount[0];
+      else if (byService.length === 1 && byAmount.length === 0) picked = byService[0];
+    }
     if (!picked) return draftFor('target', 'Number likho — kaunsi entry? (1, 2, 3…)', p, draft.original);
     if (p.newAmountPaise) {
       const action: AssistantAction = { kind: 'correct_entry', targetKind: picked.kind, targetId: picked.id, label: picked.label, oldAmountPaise: picked.amountPaise, newAmountPaise: p.newAmountPaise as number };

@@ -33,6 +33,26 @@ export function saveState(state: AppState): void {
   }
 }
 
+/**
+ * Normalize an Indian mobile number to its 10-digit form.
+ * Accepts "+91 98765 43210", "09876543210", "98765 43210", "91-9876543210",
+ * spaces/dashes/brackets — returns the last 10 digits, or null when the
+ * input does not resolve to exactly 10 digits.
+ * MUST be applied BEFORE hashing (hashPin uses the mobile as the salt) and
+ * identically at register / login / PIN-reset, or the hash never matches.
+ */
+export function normalizeMobile(input: string): string | null {
+  if (typeof input !== 'string') return null;
+  const digits = input.replace(/\D/g, '');
+  if (digits.length < 10) return null;
+  const last10 = digits.slice(-10);
+  // A leading 0 or 91/​+91 is stripped by taking the last 10 digits; reject
+  // anything longer than 12 digits (e.g. a foreign code) rather than guessing.
+  if (digits.length > 12) return null;
+  if (!/^\d{10}$/.test(last10)) return null;
+  return last10;
+}
+
 /** Simple local-only PIN hash (NOT a server secret — the data is local). */
 export function hashPin(pin: string, salt: string): string {
   let h = 2166136261;

@@ -58,17 +58,23 @@ function LoginInner() {
   async function doForgot() {
     const err = await app.resetPin(mobile, recoveryWord, pin);
     if (err) { setError(err); return; }
-    setMode('login');
+    // UPDATE 24: resetPin now logs the user in immediately with the new
+    // PIN (authStatus flips to 'authed' and the effect below redirects).
     setError('');
     setPin('');
-    alert('PIN reset. Now log in with the new PIN.');
+    router.replace(dest);
   }
+
+  // UPDATE 24: registration was blocked because an account already exists
+  // on this device — offer a one-tap switch to login instead of a dead end.
+  const blockedAsExisting = error.includes('pehle se hai');
 
   return (
     <div className="auth-wrap">
       <div className="auth-card">
         <h1><span className="brand-mark">B</span> BizKhata</h1>
         <p style={{ color: 'var(--muted)' }}>Business Accounting &amp; Management — free, local-first. Your data stays on this device.</p>
+        <p style={{ color: 'var(--muted)', fontSize: '0.9em' }}>Note: your account lives only in the browser/app where you created it — the website and the in-app web app keep separate accounts.</p>
         {mode === 'register' && (
           <>
             <h2>Create your account</h2>
@@ -80,6 +86,9 @@ function LoginInner() {
             </Field>
             {error && <p className="error">{error}</p>}
             <div className="btn-row"><Btn onClick={doRegister}>Create Account</Btn></div>
+            {blockedAsExisting && (
+              <p><button className="btn btn-ghost" onClick={() => { setMode('login'); setError(''); }}>Account already hai — Log in par jao</button></p>
+            )}
             <p><button className="btn btn-ghost" onClick={() => { setMode('login'); setError(''); }}>Already have an account? Log in</button></p>
           </>
         )}

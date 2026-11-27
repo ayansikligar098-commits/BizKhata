@@ -2,9 +2,10 @@
 import React from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { CATEGORIES, CSC_SERVICES_V2 } from '@/lib/categories';
-import { auditEntry, hashPin, loadState, recycleEntry, saveState } from '@/lib/store';
+import { auditEntry, loadState, recycleEntry, saveState } from '@/lib/store';
 import {
   accessMsLeft,
+  hasSessionRecord,
   issueSession,
   onSessionEvent,
   readLastPath,
@@ -15,6 +16,13 @@ import {
   RENEW_BEFORE_MS,
   type VerifyResult,
 } from '@/lib/session';
+import {
+  decideLogin,
+  decideRegister,
+  decideResetPin,
+  NO_ACCOUNT_ON_DEVICE_ERROR,
+  OWNER_LOST_ERROR,
+} from '@/lib/auth-core';
 import { routeForKey, serviceSlug } from '@/lib/routes';
 import type { AppState, AuditEntry, BusinessProfile, Lang } from '@/lib/types';
 import { EMPTY_STATE, uid } from '@/lib/types';
@@ -219,38 +227,47 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }
 
   // ---------- auth (mobile + PIN, verified against the local PIN hash) ----------
+  // Decisions live in lib/auth-core.ts (pure, tested); here we only apply
+  // the state change and issue the session. UPDATE 24: mobiles are
+  // normalized before any compare/hash; register never overwrites an
+  // existing owner; reset PIN logs the user in immediately.
   async function loginWithPin(mobile: string, pin: string): Promise<string | null> {
-    if (!state.owner) return 'No account yet — register first.';
-    if (mobile !== state.owner.mobile || hashPin(pin, mobile) !== state.owner.pinHash) {
-      return 'Wrong mobile or PIN. Try again, or use Forgot PIN.';
+    if (!state.owner) {
+      // Honest "no account": distinguish "never registered on this
+      // browser/app" from "a session exists but the owner record is gone".
+      return hasSessionRecord() ? OWNER_LOST_ERROR : NO_ACCOUNT_ON_DEVICE_ERROR;
     }
-    await issueSession(mobile);
+    const decision = decideLogin(state.owner, mobile, pin);
+    if (!decision.ok) return decision.error;
+    await issueSession(decision.mobile);
     setAuthStatus('authed');
     if (!state.profiles.length) setShowLang(false);
     return null;
   }
 
   async function registerAccount(mobile: string, pin: string, pin2: string, recoveryWord: string): Promise<string | null> {
-    if (!/^\d{10}$/.test(mobile)) return 'Enter a 10-digit mobile number.';
-    if (!/^\d{4,6}$/.test(pin)) return 'PIN must be 4 to 6 digits.';
-    if (pin !== pin2) return 'PINs do not match.';
-    if (!recoveryWord.trim()) return 'Enter a recovery word (needed if you forget the PIN).';
-    setState((prev) => ({
-      ...prev,
-      owner: { mobile, pinHash: hashPin(pin, mobile), recoveryWord: recoveryWord.trim().toLowerCase(), createdAt: new Date().toISOString() },
-    }));
-    await issueSession(mobile);
+    const decision = decideRegister(state.owner, mobile, pin, pin2, recoveryWord);
+    if (!decision.ok) return decision.error;
+    // {...prev} spread: profiles, transactions, customers — all business
+    // data survives registration; only the owner record is set.
+    setState((prev) => ({ ...prev, owner: decision.owner }));
+    await issueSession(decision.mobile);
     setAuthStatus('authed');
     return null;
   }
 
   async function resetPin(mobile: string, recoveryWord: string, pin: string): Promise<string | null> {
-    if (!state.owner) return 'No account yet — register first.';
-    if (mobile !== state.owner.mobile || recoveryWord.trim().toLowerCase() !== state.owner.recoveryWord) {
-      return 'Mobile or recovery word does not match.';
+    if (!state.owner) {
+      return hasSessionRecord() ? OWNER_LOST_ERROR : NO_ACCOUNT_ON_DEVICE_ERROR;
     }
-    if (!/^\d{4,6}$/.test(pin)) return 'New PIN must be 4 to 6 digits.';
-    setState((prev) => prev.owner ? { ...prev, owner: { ...prev.owner, pinHash: hashPin(pin, mobile) } } : prev);
+    const decision = decideResetPin(state.owner, mobile, recoveryWord, pin);
+    if (!decision.ok) return decision.error;
+    const newPinHash = decision.pinHash;
+    setState((prev) => (prev.owner ? { ...prev, owner: { ...prev.owner, pinHash: newPinHash } } : prev));
+    // UPDATE 24: a successful PIN reset logs the user in immediately
+    // with the new PIN instead of leaving them at the login screen.
+    await issueSession(decision.mobile);
+    setAuthStatus('authed');
     return null;
   }
 

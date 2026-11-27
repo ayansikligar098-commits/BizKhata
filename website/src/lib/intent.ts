@@ -306,6 +306,16 @@ const STATEMENT_FACTS: { re: RegExp; fact: string; replyHi: string; replyEn: str
 ];
 
 /**
+ * UPDATE 23 — delete words as whole words (padded-space match, so
+ * "Khata" never matches "hata"). A how-to question ("entry kaise
+ * delete karu?") is app help, not a delete action.
+ */
+function hasDeleteWord(raw: string): boolean {
+  const s = ` ${norm(raw).replace(/[^\p{L}\p{N}\s]+/gu, ' ').replace(/\s+/g, ' ')} `;
+  return [' delete ', ' hata ', ' hatao ', ' hatana ', ' hatado ', ' hatade ', ' remove ', ' mita ', ' mitado ', ' हटा ', ' हटाना ', ' मिटा ', ' डिलीट '].some((w) => s.includes(w));
+}
+
+/**
  * Plan / statement guard (UPDATE 15). True when the message states
  * a plan or a fact — future work, a wish, a statement about the day —
  * with NO amount and NO money question. Such a message must never be
@@ -313,6 +323,9 @@ const STATEMENT_FACTS: { re: RegExp; fact: string; replyHi: string; replyEn: str
  */
 export function isPlanOrStatement(raw: string): boolean {
   const s = norm(raw);
+  // UPDATE 23: a delete request is NEVER a plan ("Kal wali entry
+  // delete karni hai" is a delete, not tomorrow's work).
+  if (hasDeleteWord(raw)) return false;
   if (hasMoneyAmount(raw)) return false;
   if (/kitne (rupaye|paise)|how much (money|rupees)|rupaye hue|paise hue/.test(s)) return false;
   // A how-to question ("website banana hai, kaise banau?") asks for
@@ -473,6 +486,13 @@ export function classifyIntent(raw: string, ctx: ChatContext, services: string[]
   if (ctx.activeChecklist && isChecklistEdit(raw)) return 'checklist_edit';
   if (ctx.activeChecklist && isChecklistShow(raw)) return 'checklist_show';
   if (isTopicFollowup(raw, ctx)) return 'topic_followup';
+  // UPDATE 23 — delete requests (any form: amount, "isko", bare
+  // "Hatana hai") are financial actions handled by the structured
+  // parser — they must NEVER fall through to the cloud model, which
+  // fabricated deletions on 2026-11-27. Checked before casual/plan
+  // and before navigation, so "Isko remove kardo" routes here even
+  // with no amount and no service word.
+  if (hasDeleteWord(raw) && !/(kaise|how)/.test(s)) return 'business_action';
   if (navigationRequest(raw)) return 'navigation';
   // 3. Casual conversation — before everything business.
   if (casualKindFor(raw)) return 'casual';

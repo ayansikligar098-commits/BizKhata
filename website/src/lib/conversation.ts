@@ -32,7 +32,7 @@
  * service actually answers.
  */
 import { answerLocally, computeFacts, parseAssistantMessage, type ParsedMessage } from './chatbot';
-import { applyAssistantAction, type AssistantAction } from './assistant';
+import { applyAssistantAction, findAssistantTargetById, type AssistantAction } from './assistant';
 import {
   answerGeneral, buildChecklist, checklistDocItems, checklistItemsFor, checklistText,
   checklistTopicFor, listChecklists, saveChecklist, serviceDocuments, updateChecklist, type Checklist,
@@ -522,6 +522,53 @@ export function respondToMessage(opts: {
 
   // --- General knowledge / everyday help (local engine only). ---
   if (intent === 'general' || intent === 'unknown') {
+    // UPDATE 23 — contradiction guard (local): a question about what
+    // was just saved is answered from the verified save + the REAL
+    // store, never from the general engine (which knows nothing about
+    // saves and would invent "no records"). Only questions about a
+    // PAST save ("Maine kya save kiya tha?", "Entry save hui thi?")
+    // trigger this — "How to save money?" is general advice and
+    // must NOT land here.
+    if (/save\s+(hua|hui|ki|kiya|tha|thi|kari|kar\s*di)|kya.*save|maine.*save|tumne.*save|सेव\s*(हुई|हुआ|की)/i.test(message)) {
+      const saved = ctx.lastSavedEntry;
+      if (saved) {
+        const stillThere = findAssistantTargetById(state, profile.id, saved.kind, saved.id);
+        const inRecycle = state.recycle.some((r) => {
+          try {
+            const d = JSON.parse(r.data) as { id?: string };
+            return !!d && d.id === saved.id;
+          } catch { return false; }
+        });
+        if (stillThere) {
+          return done({
+            text: lang === 'en'
+              ? `Yes — it was saved and verified: ${saved.label} (${saved.date}). You can see it in Daily Business.`
+              : `Haan — ${saved.label} save hui thi aur verify bhi ho gayi thi (${saved.date}). Daily Business mein dikh rahi hai.`,
+            newCtx: { ...baseCtx, lastTopic: 'action' },
+          });
+        }
+        if (inRecycle) {
+          return done({
+            text: lang === 'en'
+              ? `${saved.label} was saved, but it has since been deleted and moved to the Recycle Bin — you can restore it from there.`
+              : `${saved.label} save hui thi, lekin ab use delete karke Recycle Bin mein bhej diya gaya hai — wahan se restore ho sakti hai.`,
+            newCtx: { ...baseCtx, lastTopic: 'action' },
+          });
+        }
+        return done({
+          text: lang === 'en'
+            ? `${saved.label} was saved and verified, but it is not in the records now — please check the Recycle Bin.`
+            : `${saved.label} save hui thi aur verify bhi ho gayi thi, lekin ab records mein nahi dikh rahi — Recycle Bin mein check karo.`,
+          newCtx: { ...baseCtx, lastTopic: 'action' },
+        });
+      }
+      return done({
+        text: lang === 'en'
+          ? 'No entry has been saved in this chat yet — nothing was saved, so there is nothing to delete.'
+          : 'Is chat mein abhi koi entry save nahi hui hai — kuch save nahi hua, isliye delete karne ko kuch nahi hai.',
+        newCtx: { ...baseCtx, lastTopic: 'action' },
+      });
+    }
     const g = answerGeneral(message, lang, message);
     if (g) {
       // Live info: local honesty stands; cloud may do better if configured.

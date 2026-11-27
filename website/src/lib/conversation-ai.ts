@@ -200,6 +200,8 @@ export function buildSystemPrompt(opts: {
     `Reply in the user's own language and style. Detected language code: ${opts.lang} (${opts.langName}). If the user writes in Hinglish (Roman Hindi), reply in Hinglish. If they write in Gujarati (native or Roman), reply in Gujarati. Match their language exactly — never mix languages randomly.`,
     'Understand the user actual intention first: casual chat, a statement, a plan, a question, a request, or a financial action. A plan or statement (for example "I have to make PAN cards tomorrow") is NOT a financial action — acknowledge it, discuss it, offer relevant help such as a checklist. NEVER ask "how much money?" for a message that contains no amount and no money question.',
     'You do NOT perform financial actions. If the user wants to record income, an expense, a payment or a correction, say what you understood and that the app will show a preview for confirmation — do not claim anything is saved.',
+    'UPDATE 23 — you NEVER save, delete, correct or refund any record yourself, and you NEVER claim one was saved, deleted, corrected or refunded. If the user asks to delete an entry, say plainly that the app will show a preview and only delete it after they confirm — do NOT say it is already deleted, removed or gone. Never say "hata diya", "delete kar diya", "save kar diya" or any equivalent about a record.',
+    'UPDATE 23 — VERIFIED SAVES: if the conversation context below says an entry was saved and verified, NEVER say it was never saved, that it existed before, or that its figures were already there. Ground every statement about a past entry in the ledger facts and the conversation context below — never invent a different history.',
     'Figures: use ONLY the ledger facts below. If a figure is not in the facts, say you do not have that record — never invent numbers, customers, or transactions.',
     'If you do not know something (especially live/current information such as news, rates or scores), say so plainly instead of guessing.',
     'Keep replies natural, short and useful. Ask a follow-up question only when it is genuinely needed. Never repeat an introduction or greeting in the middle of a conversation — continue from what was already discussed.',
@@ -217,6 +219,99 @@ export interface AiCallResult {
   text?: string;
   /** Short, non-technical failure reason (never shown raw to the user). */
   reason?: string;
+}
+
+/* ================= UPDATE 23 — cloud reply guard =================
+ *
+ * Deterministic (not a prompt tweak): a cloud reply is text the app
+ * did not generate from its own ledgers, so it must be checked before
+ * the user ever sees it as final. The 2026-11-27 16:03 failure was
+ * exactly this: the cloud said "hata diya" for a deletion that never
+ * happened, then invented "koi entry save hi nahi ki thi... pehle se
+ * tha" about a save the app had verified minutes earlier.
+ *
+ * Two claim families are blocked when NO local action matched
+ * (the cloud never performs financial actions, by construction):
+ *   1. financial-success claims — past-tense save/delete/correct/
+ *      refund/payment claims about a record;
+ *   2. contradiction claims — only when a verified save is known
+ *      (verifiedSaveLabel): "never saved" / "already existed".
+ * A blocked reply is REPLACED with an honest limitation + the exact
+ * manual path (Daily Business / the right book), never silently
+ * dropped and never reworded into another claim. Benign replies
+ * pass through untouched. The chat UI applies this in displayText
+ * (onDone) for cloud-streamed replies; the tests drive it directly.
+ */
+
+/** Past-tense claims that a financial action already happened. */
+const FINANCIAL_SUCCESS_RES: RegExp[] = [
+  // delete / remove (Hinglish + English + Devanagari)
+  /hata\s*diya|delete\s*kar\s*diya|remove\s*kar\s*diya|mita\s*diya|delete\s*ho\s*gay[ai]|remove\s*ho\s*gay[ai]|hata\s*diya\s*gaya|entry\s*(delete|remove|hata)\s*(kar\s*)?di|deleted|removed|entry\s+has\s+been\s+deleted/i,
+  /हटा\s*दिया|मिटा\s*दिया|डिलीट\s*कर\s*दिया/i,
+  // save (past tense only — "will be saved after you confirm" is fine)
+  /save\s*kar\s*diya|save\s*ho\s*gay[ai]|saved\s*(successfully)?|entry\s+has\s+been\s+saved/i,
+  /सेव\s*हो\s*गया|सेव\s*कर\s*दिया/i,
+  // correct / refund / payment (past tense)
+  /correct\s*kar\s*diya|correct\s*ho\s*gay[ai]|corrected/i,
+  /refund\s*kar\s*diya|refund\s*ho\s*gay[ai]|refunded/i,
+  /payment\s*kar\s*diya|payment\s*ho\s*gay[ai]/i,
+];
+
+/** Claims that contradict a known verified save — only applied when
+ *  a verified save is supplied (otherwise "pehle se tha" may be a
+ *  benign statement about something else). */
+const CONTRADICTION_RES: RegExp[] = [
+  /koi entry save (hi )?nahi ki|save (hi )?nahi ki thi|maine koi entry save nahi|never saved|koi entry save nahi hui/i,
+  /pehle se (hi )?(tha|thi|the)|already (there|existed|saved)/i,
+  /पहले से (ही )?(था|थी|थे)/i,
+];
+
+/** True when the text claims a financial action already happened. */
+export function claimsFinancialAction(text: string): boolean {
+  const t = String(text || '');
+  return FINANCIAL_SUCCESS_RES.some((re) => re.test(t));
+}
+
+/** True when the text contradicts a known verified save. */
+export function contradictsVerifiedSave(text: string): boolean {
+  const t = String(text || '');
+  return CONTRADICTION_RES.some((re) => re.test(t));
+}
+
+export interface GuardedCloudReply {
+  text: string;
+  /** True when the original text was replaced. */
+  blocked: boolean;
+  /** 'financial_claim' | 'contradiction' | null. */
+  reason: 'financial_claim' | 'contradiction' | null;
+}
+
+const HONEST_DELETE_LIMIT =
+  'Maine yahan se koi entry save ya delete nahi ki hai — chat se financial kaam sirf preview dikhakar aur aapke Confirm ke baad hota hai. Entry delete karni ho to mujhe batao kaunsi entry hai (jaise "Aadhaar 600 wali entry delete kar do"), main preview dikhaunga — ya Daily Business / UPI Book kholo aur wahan se delete karo (entry Recycle Bin mein jayegi, wahan se restore bhi ho sakti hai).';
+
+/**
+ * Check a cloud reply before it is shown as final. When no local
+ * action matched, any financial-success claim or (with a verified
+ * save known) any contradiction of that save is replaced with the
+ * honest limitation above. Benign text is returned unchanged.
+ */
+export function guardCloudReply(
+  text: string,
+  opts?: { verifiedSaveLabel?: string | null },
+): GuardedCloudReply {
+  const t = String(text || '');
+  const label = (opts?.verifiedSaveLabel || '').trim();
+  if (label && contradictsVerifiedSave(t)) {
+    return {
+      text: `Ye sahi nahi hai — aapki entry save hui thi aur verify bhi ho gayi thi: ${label}. Maine use delete nahi kiya hai; agar use hatana hai to batao, main preview dikhakar confirm karwaunga — ya Daily Business kholo aur wahan se delete karo (Recycle Bin mein jayegi).`,
+      blocked: true,
+      reason: 'contradiction',
+    };
+  }
+  if (claimsFinancialAction(t)) {
+    return { text: HONEST_DELETE_LIMIT, blocked: true, reason: 'financial_claim' };
+  }
+  return { text: t, blocked: false, reason: null };
 }
 
 /**

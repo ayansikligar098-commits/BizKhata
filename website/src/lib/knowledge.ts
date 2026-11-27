@@ -120,12 +120,33 @@ export interface ActiveChecklist {
   customItems: string[];
 }
 
+/** UPDATE 23 — the entry this conversation most recently saved AND
+ *  verified (set by the chat UI in confirmPreview, only after the
+ *  backend confirmed + the store verified it). "Isko remove kardo"
+ *  resolves to this entry. Cleared when the entry is deleted.
+ *  `kind`/`id` are the real record identity — the parser re-reads
+ *  the record from the store before deleting, so a stale context
+ *  can never delete the wrong entry or claim a deletion twice. */
+export interface LastSavedEntry {
+  kind: 'daily' | 'job' | 'expense' | 'mt' | 'txn';
+  id: string;
+  label: string;
+  amountPaise: number;
+  date: string;
+  service?: string;
+}
+
 export interface ChatContext {
   lastService?: string;
   lastPeriodKey?: string;
   lastCustomer?: string;
   lastAgent?: string;
   lastTopic?: string;
+  /** UPDATE 23 — most recently verified save in this conversation. */
+  lastSavedEntry?: LastSavedEntry;
+  /** UPDATE 23 — human-readable verified-save fact, passed to the
+   *  cloud engine so it cannot invent a different history. */
+  lastVerifiedSave?: string;
   /** Pending offer from the assistant (see PendingOffer). */
   pendingOffer?: PendingOffer;
   /** Question the assistant asked and is waiting on (see PendingQuestion). */

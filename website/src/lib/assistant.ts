@@ -172,6 +172,72 @@ export function findAssistantTargets(
 }
 
 /**
+ * UPDATE 23 — find one record by kind + id (the "isko" target: the
+ * entry the conversation just saved). Returns null when it is gone
+ * (already deleted / never existed) — the caller must then say so
+ * honestly instead of claiming a deletion.
+ */
+export function findAssistantTargetById(
+  state: AppState,
+  profileId: string,
+  kind: FoundRecord['kind'],
+  id: string,
+): FoundRecord | null {
+  if (kind === 'daily') {
+    const e = state.dailyEntries.find((x) => x.id === id && x.profileId === profileId);
+    if (e) return { kind: 'daily', id: e.id, label: `${e.service} ${formatINR(e.totalPaise)} (${e.method})`, amountPaise: e.totalPaise, date: e.date, service: e.service };
+  }
+  if (kind === 'job') {
+    const j = state.jobs.find((x) => x.id === id && x.profileId === profileId);
+    if (j) return { kind: 'job', id: j.id, label: `${j.service} — ${j.customerName}, received ${formatINR(j.receivedPaise)} of ${formatINR(j.totalPaise)}`, amountPaise: j.receivedPaise, date: j.date, service: j.service };
+  }
+  if (kind === 'expense') {
+    const e = state.expenses.find((x) => x.id === id && x.profileId === profileId);
+    if (e) return { kind: 'expense', id: e.id, label: `${e.category} — ${e.description} ${formatINR(e.amountPaise)}`, amountPaise: e.amountPaise, date: e.date, service: e.service };
+  }
+  if (kind === 'mt') {
+    const m = state.mtTransfers.find((x) => x.id === id && x.profileId === profileId);
+    if (m) return { kind: 'mt', id: m.id, label: `Money Transfer to ${m.receiverName} ${formatINR(m.amountPaise)}, commission ${formatINR(m.commissionPaise)}`, amountPaise: m.amountPaise, date: m.date, service: 'Money Transfer' };
+  }
+  if (kind === 'txn') {
+    const x = state.cashTxns.find((t) => t.id === id && t.profileId === profileId);
+    if (x) return { kind: 'txn', id: x.id, label: `${x.category} ${formatINR(x.amountPaise)}`, amountPaise: x.amountPaise, date: x.date, service: x.category };
+  }
+  return null;
+}
+
+/**
+ * UPDATE 23 — the most recent records in this profile, newest first
+ * (date desc, then most recently added first within a date). Used by
+ * the bare-delete clarification ("Hatana hai" → list the candidates)
+ * and by the "isko" fallback when the conversation has no saved-entry
+ * context. Never invents a record: an empty store returns [].
+ */
+export function recentAssistantTargets(
+  state: AppState,
+  profileId: string,
+  limit = 3,
+): FoundRecord[] {
+  const out: FoundRecord[] = [];
+  for (const e of state.dailyEntries.filter((x) => x.profileId === profileId)) {
+    out.push({ kind: 'daily', id: e.id, label: `${e.service} ${formatINR(e.totalPaise)} (${e.method})`, amountPaise: e.totalPaise, date: e.date, service: e.service });
+  }
+  for (const j of state.jobs.filter((x) => x.profileId === profileId)) {
+    out.push({ kind: 'job', id: j.id, label: `${j.service} — ${j.customerName}, received ${formatINR(j.receivedPaise)} of ${formatINR(j.totalPaise)}`, amountPaise: j.receivedPaise, date: j.date, service: j.service });
+  }
+  for (const e of state.expenses.filter((x) => x.profileId === profileId)) {
+    out.push({ kind: 'expense', id: e.id, label: `${e.category} — ${e.description} ${formatINR(e.amountPaise)}`, amountPaise: e.amountPaise, date: e.date, service: e.service });
+  }
+  for (const m of state.mtTransfers.filter((x) => x.profileId === profileId)) {
+    out.push({ kind: 'mt', id: m.id, label: `Money Transfer to ${m.receiverName} ${formatINR(m.amountPaise)}, commission ${formatINR(m.commissionPaise)}`, amountPaise: m.amountPaise, date: m.date, service: 'Money Transfer' });
+  }
+  // Stable recency: later array positions are more recently added.
+  const idx = new Map(out.map((r, i) => [r.id + r.kind, i]));
+  out.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (idx.get(b.id + b.kind) || 0) - (idx.get(a.id + a.kind) || 0)));
+  return out.slice(0, Math.max(0, limit));
+}
+
+/**
  * Execute one confirmed assistant action against the store (mutates the
  * passed state draft in place — call inside ctx.mutate). Returns the
  * actual result; ok=false means NOTHING was written.

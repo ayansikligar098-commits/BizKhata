@@ -8,10 +8,11 @@ import {
   factsSummary,
   findDuplicateWarning,
   parseAssistantMessage,
+  savedEntryFor,
   type ActionDraft,
 } from '@/lib/chatbot';
 import { applyAssistantAction, type AssistantAction, type ExecResult } from '@/lib/assistant';
-import { buildSystemPrompt, callConversationAIStream, hasAiServiceKey, type AiChatMessage } from '@/lib/conversation-ai';
+import { buildSystemPrompt, callConversationAIStream, guardCloudReply, hasAiServiceKey, type AiChatMessage } from '@/lib/conversation-ai';
 import { langName, respondToMessage } from '@/lib/conversation';
 import { STREAM_UNREACHABLE_MSG, Typewriter } from '@/lib/streaming';
 import { markdownToHtml } from '@/lib/markdown';
@@ -104,7 +105,7 @@ interface ChatMsg {
    *  owner's configured service via real SSE ('cloud'). */
   source?: 'local' | 'cloud';
   preview?: PreviewData;
-  result?: { ok: boolean; lines: string[]; verified?: boolean; link?: { label: string; path: string } };
+  result?: { ok: boolean; lines: string[]; verified?: boolean; link?: { label: string; path: string }; title?: string; verifyNote?: string };
   table?: KnowledgeTable;
   links?: { label: string; path: string }[];
 }
@@ -139,6 +140,11 @@ function cloudContextNote(ctx: ChatContext): string {
   if (ctx.pendingOffer?.kind === 'app_change' && ctx.pendingOffer.spec) parts.push(`You already showed a proposed plan for "${ctx.pendingOffer.spec.name}"; if the user says yes, confirm it will be saved to the development queue (it is NOT built yet).`);
   if (ctx.pendingQuestion) parts.push(`You asked: how many ${ctx.pendingQuestion.label} (${ctx.pendingQuestion.topic})? The user may answer with just a number${ctx.pendingQuestion.answeredValue !== undefined ? ` (current value: ${ctx.pendingQuestion.answeredValue})` : ''}.`);
   if (ctx.activeChecklist) parts.push(`There is an active checklist (${ctx.activeChecklist.topic}, ${ctx.activeChecklist.when}); the user may ask to edit it, translate it, or see it again.`);
+  // UPDATE 23 — the last VERIFIED save, so the cloud can never invent
+  // a different history ("koi entry save hi nahi ki thi... pehle se
+  // tha" was the 2026-11-27 16:03 fabrication).
+  if (ctx.lastVerifiedSave) parts.push(`VERIFIED SAVE (never contradict): ${ctx.lastVerifiedSave} — never say it was never saved or that it existed before.`);
+  else if (ctx.lastSavedEntry) parts.push(`VERIFIED SAVE (never contradict): "${ctx.lastSavedEntry.label}" (${ctx.lastSavedEntry.date}) was saved and verified in the records — never say it was never saved or that it existed before.`);
   return parts.join(' ');
 }
 
@@ -727,6 +733,7 @@ function useChat(onNavigateAway?: () => void) {
     }
     if (res.ok) {
       const verified = await verifySaved(res.appliedIds);
+      const isDelete = preview.action.kind === 'delete_entry';
       updateMsg(msgId, (m) => ({
         ...m,
         preview: undefined,
@@ -735,13 +742,32 @@ function useChat(onNavigateAway?: () => void) {
           lines: res.lines,
           verified,
           link: res.link || undefined,
+          title: isDelete ? '✓ Deleted' : '✓ Saved',
+          verifyNote: isDelete
+            ? verified
+              ? '✓ Delete verify ho gaya — entry Recycle Bin mein hai, wahan se restore ho sakti hai.'
+              : 'Delete ho gaya — verification abhi pending hai, Recycle Bin mein check kar lo.'
+            : undefined,
         },
       }));
+      // UPDATE 23 — record the verified save in the conversation
+      // context (only after backend + store verification), so "isko
+      // remove kardo" resolves to THIS entry. A verified delete
+      // clears it, so a second "isko remove" can never claim the
+      // same entry twice.
+      if (isDelete) {
+        updateActive((c) => ({ ...c, ctx: { ...c.ctx, lastSavedEntry: undefined, lastVerifiedSave: undefined, lastTopic: 'delete' } }));
+      } else if (verified) {
+        const saved = savedEntryFor(preview.action, res.appliedIds);
+        if (saved) {
+          updateActive((c) => ({ ...c, ctx: { ...c.ctx, lastSavedEntry: saved, lastVerifiedSave: `Saved and verified: ${saved.label} (${saved.date})` } }));
+        }
+      }
       // Conversation context: remember the service just saved.
       if (preview.action.kind === 'daily_income' && preview.action.entries.length > 0) {
         updateActive((c) => ({ ...c, ctx: { ...c.ctx, lastService: preview.action.kind === 'daily_income' ? preview.action.entries[0].service : c.ctx.lastService, lastTopic: 'daily_income' } }));
       }
-      speak(`${res.summary} ${verified ? 'Save verify ho gaya.' : ''}`);
+      speak(isDelete ? `${res.summary} ${verified ? 'Delete verify ho gaya.' : ''}` : `${res.summary} ${verified ? 'Save verify ho gaya.' : ''}`);
     } else if (res.duplicate) {
       updateMsg(msgId, (m) => ({ ...m, preview: undefined, result: { ok: false, lines: [res.summary] } }));
     } else {
@@ -868,8 +894,25 @@ function useChat(onNavigateAway?: () => void) {
         abortRef.current = null;
         typewriterRef.current = null;
         streamMsgIdRef.current = null;
-        updateMsg(msgId, (m) => (m.streaming ? { ...m, text: displayed, streaming: false, ts: new Date().toISOString() } : m));
-        speak(displayed, msgId);
+        // UPDATE 23 — deterministic cloud guard: a streamed cloud
+        // reply is checked BEFORE it is final. The cloud never
+        // performs financial actions, so any past-tense save/delete/
+        // correct/refund claim — or any contradiction of the verified
+        // save in this conversation — is replaced with the honest
+        // limitation (guardCloudReply). Local replies are never
+        // guarded (they come from the real ledgers). Note: the claim
+        // may have been typed progressively while streaming and is
+        // then replaced at completion — the routing fix (delete
+        // messages never reach the cloud at all) is the primary
+        // prevention; this is the second layer.
+        let finalText = displayed;
+        if (opts.source === 'cloud') {
+          const ctxNow = (convRef.current.conversations.find((c) => c.id === convRef.current.activeId)?.ctx) || {};
+          const guarded = guardCloudReply(displayed, { verifiedSaveLabel: ctxNow.lastVerifiedSave || ctxNow.lastSavedEntry?.label || null });
+          if (guarded.blocked) finalText = guarded.text;
+        }
+        updateMsg(msgId, (m) => (m.streaming ? { ...m, text: finalText, streaming: false, ts: new Date().toISOString() } : m));
+        speak(finalText, msgId);
       },
     });
     typewriterRef.current = tw;
@@ -1309,11 +1352,11 @@ function ResultCard({ msg }: { msg: ChatMsg }) {
   if (!r) return null;
   return (
     <div className={`chat-result ${r.ok ? 'ok' : 'error'}`} data-testid={r.ok ? 'ai-saved' : 'ai-error'}>
-      <div style={{ fontWeight: 700 }}>{r.ok ? '✓ Saved' : '✕ Not saved'}</div>
+      <div style={{ fontWeight: 700 }}>{r.title || (r.ok ? '✓ Saved' : '✕ Not saved')}</div>
       <ul className="chat-preview-list">
         {r.lines.map((l, i) => <li key={i}>{l}</li>)}
       </ul>
-      {r.ok && <div className="chat-preview-note">{r.verified ? '✓ Save verify ho gaya — records mein dikh raha hai.' : 'Save ho gaya — verification abhi pending hai, Daily Business mein check kar lo.'}</div>}
+      {r.ok && <div className="chat-preview-note">{r.verifyNote || (r.verified ? '✓ Save verify ho gaya — records mein dikh raha hai.' : 'Save ho gaya — verification abhi pending hai, Daily Business mein check kar lo.')}</div>}
     </div>
   );
 }
