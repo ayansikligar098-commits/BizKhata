@@ -19,6 +19,7 @@
  * All money is integer paise. All actions are restricted to one profile.
  */
 import { agentPayablePaise, mtClosingPaise } from './accounting';
+import { DHANDA_SERVICE } from './categories';
 import { formatINR } from './money';
 import { auditEntry, recycleEntry } from './store';
 import type {
@@ -314,7 +315,11 @@ export function applyAssistantAction(
       if (action.entries.length === 0) return fail('No entries to save.');
       for (const e of action.entries) {
         if (!isIntPaise(e.amountPaise)) return fail(`Amount must be more than ₹0 (got ${e.amountPaise} paise). Nothing was saved.`);
-        if (!profile.services.includes(e.service) && e.service !== 'Other Services') {
+        // UPDATE 26: 'Dhanda' is the general Daily Business category
+        // for the day's mixed business (owner's definition) — it is
+        // allow-listed exactly like 'Other Services', but it is NOT
+        // added to profile.services and gets no Services-page tile.
+        if (!profile.services.includes(e.service) && e.service !== 'Other Services' && e.service !== DHANDA_SERVICE) {
           return fail(`"${e.service}" is not a service in this business profile. Nothing was saved.`);
         }
       }

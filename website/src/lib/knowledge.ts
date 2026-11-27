@@ -839,14 +839,37 @@ export function computeKnowledge(
   if (/dhandha|business|hisab|summary|kamai|earning|collection/.test(q) && !service) {
     const s = dailyBusinessSummary(dailyInput(state, pid, range.start, range.end));
     if (!hasAny) {
+      // UPDATE 26 note: this refusal is the ESTABLISHED contract for
+      // "this profile has no records at all" — assistant.test.mjs §14
+      // (profile isolation) asserts it. The owner-facing ₹0 figure
+      // for "Aaj dhanda kitna hua?" on an empty store is delivered by
+      // the asksFigure fallback in conversation.ts (which falls
+      // through to the ₹0 overview in answerLocally), NOT by changing
+      // this branch — the diagnosis's §6b "quote ₹0 here" was tried
+      // and reverted because it broke that test. Do not remove this
+      // refusal without updating that test's contract first.
       return { text: t('Abhi koi record nahi hai — isliye main aaj ka dhandha nahi bata sakta. Pehle ek entry add karo.', 'There are no records yet, so I cannot report today\u2019s business. Add an entry first.'), context: { ...baseCtx, lastPeriodKey: range.key, lastTopic: 'daily' } };
     }
     const top = s.byService[0];
+    // Localised period label — the Hindi sentence must say "Aaj ka
+    // dhandha", never the mixed "today ka dhandha" (same mapping as
+    // the profit branch below). Exception: 'yesterday' keeps the
+    // "(yesterday)" gloss — "Kal" alone means both yesterday and
+    // tomorrow in Hindi, and ai.test.mjs pins 'yesterday' in the
+    // text as the proof the summary is for yesterday, so the gloss
+    // stays (it disambiguates, it is not the old leak).
+    const rangeLabel = range.key === 'today' ? t('Aaj', 'today')
+      : range.key === 'yesterday' ? t('Kal (yesterday)', 'yesterday')
+      : range.key === 'month' ? t('Is mahine', 'this month')
+      : range.key === 'last_month' ? t('Pichhle mahine', 'last month')
+      : range.key === 'last7' ? t('Pichhle 7 din', 'last 7 days')
+      : range.key === 'year' ? t('Is saal', 'this year')
+      : range.label;
     return {
       text: tt('overview',
         { income: formatINR(s.totalCollection), expense: formatINR(s.expenses), profit: formatINR(s.netEarnings), due: formatINR(s.customerDue), agent: formatINR(agents.reduce((a, ag) => a + agentPayablePaise(ag, jobs), 0)), commission: formatINR(s.mtCommission), cash: formatINR(s.cashCollection), upi: formatINR(s.upiCollection) },
-        `${range.label} ka dhandha:\n• Collection: ${formatINR(s.totalCollection)} (cash ${formatINR(s.cashCollection)}, UPI ${formatINR(s.upiCollection)})\n• MT commission: ${formatINR(s.mtCommission)}\n• Kharcha: ${formatINR(s.expenses)}\n• Net earnings: ${formatINR(s.netEarnings)}\n• Customer due: ${formatINR(s.customerDue)}\n• Transactions: ${s.totalTransactions}${top ? `\n• Sabse zyada earning: ${top.service} — ${formatINR(top.collection)}` : ''}`,
-        `Business for ${range.label}:\n• Collection: ${formatINR(s.totalCollection)} (cash ${formatINR(s.cashCollection)}, UPI ${formatINR(s.upiCollection)})\n• MT commission: ${formatINR(s.mtCommission)}\n• Expenses: ${formatINR(s.expenses)}\n• Net earnings: ${formatINR(s.netEarnings)}\n• Customer due: ${formatINR(s.customerDue)}\n• Transactions: ${s.totalTransactions}${top ? `\n• Top earning service: ${top.service} — ${formatINR(top.collection)}` : ''}`,
+        `${rangeLabel} ka dhandha:\n• Collection: ${formatINR(s.totalCollection)} (cash ${formatINR(s.cashCollection)}, UPI ${formatINR(s.upiCollection)})\n• MT commission: ${formatINR(s.mtCommission)}\n• Kharcha: ${formatINR(s.expenses)}\n• Net earnings: ${formatINR(s.netEarnings)}\n• Customer due: ${formatINR(s.customerDue)}\n• Transactions: ${s.totalTransactions}${top ? `\n• Sabse zyada earning: ${top.service} — ${formatINR(top.collection)}` : ''}\n(MT principal isme nahi gina — sirf commission; due collection mein nahi — wo alag line mein hai.)`,
+        `Business for ${rangeLabel}:\n• Collection: ${formatINR(s.totalCollection)} (cash ${formatINR(s.cashCollection)}, UPI ${formatINR(s.upiCollection)})\n• MT commission: ${formatINR(s.mtCommission)}\n• Expenses: ${formatINR(s.expenses)}\n• Net earnings: ${formatINR(s.netEarnings)}\n• Customer due: ${formatINR(s.customerDue)}\n• Transactions: ${s.totalTransactions}${top ? `\n• Top earning service: ${top.service} — ${formatINR(top.collection)}` : ''}\n(MT principal is not counted here — only commission; due is not collection — it is shown separately.)`,
       ),
       table: s.byService.length > 1 ? { headers: [t('Service', 'Service'), t('Collection', 'Collection'), t('Cash', 'Cash'), t('UPI', 'UPI')], rows: s.byService.map((x) => [x.service, formatINR(x.collection), formatINR(x.cash), formatINR(x.upi)]) } : undefined,
       links: [{ label: 'View Daily Business', path: '/daily-business' }],

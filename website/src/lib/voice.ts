@@ -269,7 +269,12 @@ export function isRepeatTranscript(
 /** A transcript is "financial" (and therefore dangerous to guess at)
  *  when it carries a number or a money/service word. */
 export function looksFinancial(text: string): boolean {
-  return /\d/.test(text) || /(cash|upi|rupaye|rupees?|paise|₹|kharcha|expense|transfer|commission|diye|diya|mila|mile|hue|hua|xerox|printing|pan|aadhaar|voter|ayushman|agent|customer|jama|payment|due|udhaar)/i.test(text);
+  // UPDATE 26: 'dhandha' (any spelling) is a financial word — a
+  // spoken "dhanda add kar do" is a financial instruction even with
+  // no amount yet. Spoken transcripts go through the same
+  // respondToMessage() pipeline as typed chat (voice input is only a
+  // modality), so the parser/router fix covers voice end to end.
+  return /\d/.test(text) || /(cash|upi|rupaye|rupees?|paise|₹|kharcha|expense|transfer|commission|diye|diya|mila|mile|hue|hua|xerox|printing|pan|aadhaar|voter|ayushman|agent|customer|jama|payment|due|udhaar|dhandha|dhanda|dhandho|dhande|dhadhe|धंधा|धन्दा|ધંધો|kaam|business|hisab)/i.test(text);
 }
 
 /** Short "say it again" clarification in the user's own style — never

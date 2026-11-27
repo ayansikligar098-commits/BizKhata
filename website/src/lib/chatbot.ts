@@ -24,6 +24,7 @@ import { findAssistantTargetById, findAssistantTargets, recentAssistantTargets }
 import type { ChatContext, LastSavedEntry } from './knowledge';
 import { detectLanguage, normalizeDigitsMultilingual, normalizeMultilingual, replyIn, resolveReplyLang, type AiLangCode, type ReplyKey } from './languages';
 import { SERVICE_ALIASES, findNameIn, findServiceIn, normalizeDevanagariWords, parseDateRange } from './knowledge';
+import { DHANDA_SERVICE } from './categories';
 import { isPlanOrStatement } from './intent';
 
 export interface DueEntry {
@@ -605,7 +606,10 @@ function splitServiceSegments(text: string, services: string[]): { service: stri
   const lower = text.toLowerCase();
   const hits: { service: string; index: number }[] = [];
   for (const svc of services) {
-    const aliases = [svc.toLowerCase(), ...(SERVICE_ALIASES[svc] || [])];
+    // UPDATE 26: the normalised text carries the canonical token
+    // 'dhandha' (all spellings/scripts normalise to it), while the
+    // label is 'Dhanda' — 'dhanda' alone never matches it.
+    const aliases = [svc.toLowerCase(), ...(SERVICE_ALIASES[svc] || []), ...(svc === DHANDA_SERVICE ? ['dhandha'] : [])];
     for (const a of aliases) {
       if (!a) continue;
       let i = lower.indexOf(a);
@@ -657,6 +661,156 @@ export function findDuplicateWarning(state: AppState, profileId: string, action:
   return null;
 }
 
+/* ================= UPDATE 26 — "Dhanda" (the day's mixed business) =================
+ *
+ * The owner's definition (2026-11-27 21:01 IST): "Dhanda Matlab
+ * Passport Size Photo Smart Card Xerox Documents Ka Profit Money
+ * Transfer Profit Sab Mix Ko Dhanda Kehta Hu Me" — dhanda is ALL of
+ * it mixed together. The word was already known (languages.ts maps
+ * dhanda/dhandha/dhandho/dhande/dhandhe/dhadhe + Devanagari धंधा/धन्दा
+ * + Gujarati ધંધો, and also 'business'/'hisab', to the canonical
+ * token 'dhandha') but the parser never mapped it to anything, so
+ * "Aaj dhanda 500 ka hua" fell into the askService draft and every
+ * reply of "dhanda" hit the identical dead-end
+ * "Service samajh nahi aaya. Services: ..." in a loop (screenshot
+ * 2026-11-27 20:59 IST).
+ *
+ * Rules now:
+ *  - "Dhanda" (any spelling/script, plus 'kaam' when no specific
+ *    service is named, plus 'business'/'hisab' which normalise to
+ *    the same token) is a GENERAL Daily Business category: an add
+ *    saves ONE entry under the label 'Dhanda' (DHANDA_SERVICE) —
+ *    never an invented split across services, never a Services-page
+ *    tile. The backend allow-lists it (assistant.ts).
+ *  - A question ("Aaj dhanda kitna hua?") is answered from the hub
+ *    total (knowledge.ts daily-summary branch): sum across services,
+ *    MT commission only, dues never counted as collection.
+ *  - A service that still cannot be resolved gets ONE short
+ *    clarifying question with a Dhanda escape hatch, and a repeat of
+ *    the same unknown word escalates the help instead of repeating
+ *    the identical dead-end text.
+ */
+
+/** True when the text means the day's mixed business ("dhanda" in any
+ *  spelling/script, or 'kaam' / 'business' / 'hisab' with no specific
+ *  service named). The input is normalised first, so Devanagari and
+ *  Gujarati forms arrive here as the canonical 'dhandha' token. */
+export function isDhandaWord(raw: string, hasSpecificService = false): boolean {
+  const n = normalizeMultilingual(raw.toLowerCase());
+  if (/\bdhandha\b/.test(n)) return true;
+  // 'kaam' is generic work — only a Dhanda synonym when no specific
+  // service is in the message ("PAN Card ka kaam" is PAN Card, not
+  // Dhanda). 'business' and 'hisab' already normalise to 'dhandha'.
+  if (!hasSpecificService && /\bkaam\b/.test(n)) return true;
+  return false;
+}
+
+/** Resolve a service-answer reply: a named service first, else the
+ *  general Dhanda category when the reply says dhanda/kaam. Returns
+ *  null only for a genuinely unknown word. */
+export function resolveServiceReply(replyText: string, services: string[]): string | null {
+  return findServiceIn(replyText, services)
+    || (isDhandaWord(replyText) ? DHANDA_SERVICE : null);
+}
+
+export interface DhandaToday {
+  totalPaise: number;
+  count: number;
+  cashPaise: number;
+  upiPaise: number;
+}
+
+/** Today's already-saved Dhanda-category entries (quick daily entries
+ *  + any Dhanda job received money), for the safe-default warning.
+ *  Only collected money (cash/UPI) counts — 'other' (due) never does. */
+export function dhandaTodayTotal(state: AppState, profileId: string, date: string = todayISO()): DhandaToday {
+  let total = 0;
+  let count = 0;
+  let cash = 0;
+  let upi = 0;
+  for (const e of state.dailyEntries.filter((x) => x.profileId === profileId && x.date === date && x.service === DHANDA_SERVICE && x.method !== 'other')) {
+    total += e.totalPaise;
+    count += 1;
+    if (e.method === 'cash') cash += e.totalPaise;
+    else upi += e.totalPaise;
+  }
+  for (const j of state.jobs.filter((x) => x.profileId === profileId && x.date === date && x.service === DHANDA_SERVICE)) {
+    total += j.receivedPaise;
+    count += 1;
+  }
+  return { totalPaise: total, count, cashPaise: cash, upiPaise: upi };
+}
+
+/**
+ * Safe default (UPDATE 26): if a Dhanda entry already exists today,
+ * the preview warns with today's Dhanda total so far and asks before
+ * adding — the same day's mix must never be double-counted by
+ * accident. The user can still Confirm (a second, separate Dhanda
+ * total is legitimate) — this only warns, it never blocks.
+ */
+export function dhandaExistingWarning(state: AppState, profileId: string, date: string = todayISO()): string | null {
+  const t = dhandaTodayTotal(state, profileId, date);
+  if (t.totalPaise <= 0) return null;
+  const split = `${t.cashPaise > 0 ? `, cash ${formatINR(t.cashPaise)}` : ''}${t.upiPaise > 0 ? `, UPI ${formatINR(t.upiPaise)}` : ''}`;
+  return `⚠ Aaj Dhanda ${formatINR(t.totalPaise)} pehle se saved hai (${t.count} ${t.count === 1 ? 'entry' : 'entries'}${split}). Ye naya amount usme AUR add hoga — agar ye alag dhandha hai to Confirm dabao, warna Cancel karo.`;
+}
+
+/** Dhanda warning for a set of entries being previewed (null when
+ *  none of them is Dhanda, or nothing is saved today yet). */
+export function dhandaWarningForEntries(
+  state: AppState,
+  profileId: string,
+  entries: { service: string }[],
+  date: string = todayISO(),
+): string | null {
+  if (!entries.some((e) => e.service === DHANDA_SERVICE)) return null;
+  return dhandaExistingWarning(state, profileId, date);
+}
+
+/**
+ * UPDATE 26 safe default (diagnosis §6b): a "Dhanda" total is a
+ * RUNNING total for the day, not a series of independent
+ * transactions — so a second Dhanda add on the same day is never
+ * silently added on top. When pure Dhanda quick entries (no
+ * customer, no baaki split) for TODAY are about to be previewed and
+ * a Dhanda entry already exists today, return a DRAFT asking
+ * "upar add karun ya total badal dun?" instead of the action. The
+ * draft carries the pending entries + today's Dhanda total so far +
+ * today's overall collection, so the reply can build either
+ * outcome. Returns null when there is nothing to ask about (no
+ * existing Dhanda entry, mixed entries, a baaki split, entries
+ * spanning more than one date, or a non-today date — those keep the
+ * preview warning instead).
+ */
+export function dhandaAddModeDraft(
+  state: AppState,
+  profile: BusinessProfile,
+  entries: { service: string; amountPaise: number; method: PayMethod | null; customerName?: string; date?: string }[],
+  date: string,
+  original: string,
+): ParsedMessage | null {
+  if (entries.length === 0) return null;
+  if (!entries.every((e) => e.service === DHANDA_SERVICE && !e.customerName)) return null;
+  const entryDate = entries[0].date || date;
+  if (entryDate !== todayISO()) return null;
+  if (!entries.every((e) => (e.date || date) === entryDate)) return null;
+  const existing = dhandaTodayTotal(state, profile.id, entryDate);
+  if (existing.totalPaise <= 0) return null;
+  const newTotal = entries.reduce((a, e) => a + e.amountPaise, 0);
+  const todayTotal = computeFacts(state, profile).todayCollectionPaise;
+  const isEn = detectLanguage(original).code === 'en';
+  const question = isEn
+    ? `Dhanda of ${formatINR(existing.totalPaise)} is already saved today (${existing.count} ${existing.count === 1 ? 'entry' : 'entries'}; total collection today ${formatINR(todayTotal)}). Should I add this ${formatINR(newTotal)} ON TOP (Dhanda total becomes ${formatINR(existing.totalPaise + newTotal)}), or is this ${formatINR(newTotal)} today's TOTAL Dhanda (replacing ${formatINR(existing.totalPaise)})? Reply "Add on top" or "Replace total".`
+    : `Aaj Dhanda ${formatINR(existing.totalPaise)} pehle se saved hai (${existing.count} ${existing.count === 1 ? 'entry' : 'entries'}; aaj ki kul collection ${formatINR(todayTotal)} hai). Ye ${formatINR(newTotal)} uske UPAR add karun (Dhanda total ${formatINR(existing.totalPaise + newTotal)} ho jayega), ya yehi ${formatINR(newTotal)} aaj ka TOTAL Dhanda hai (${formatINR(existing.totalPaise)} ki jagah ${formatINR(newTotal)} ho jayega)? "Upar add karo" ya "Total badal do" — batao.`;
+  return draftFor('dhanda_add_mode', question, {
+    pendingEntries: entries.map((e) => ({ ...e })),
+    date: entryDate,
+    existingDhandaPaise: existing.totalPaise,
+    existingDhandaCount: existing.count,
+    todayTotalPaise: todayTotal,
+  }, original);
+}
+
 /** Parse one user message into an action, a clarification draft, or a question. */
 export function parseAssistantMessage(
   rawText: string,
@@ -682,7 +836,7 @@ export function parseAssistantMessage(
     const rest = q.replace(CONFIRM_START_RE, '').replace(/^[,!.\s]+/, '').trim();
     const restAmounts = extractAmounts(rest);
     const restHasAction = restAmounts.length > 0
-      && /(xerox|printing|pan|aadhaar|aadhar|voter|ayushman|smart|scan|kharcha|expense|agent|transfer|commission|cash|upi|nagad|hue|hua|mile|mila|diye|diya|jama|payment|refund|wapas)/.test(rest);
+      && /(xerox|printing|pan|aadhaar|aadhar|voter|ayushman|smart|scan|kharcha|expense|agent|transfer|commission|cash|upi|nagad|hue|hua|mile|mila|diye|diya|jama|payment|refund|wapas|dhandha)/.test(rest);
     if (!restHasAction) return { kind: 'confirm' };
     text = rest;
     q = rest;
@@ -709,7 +863,9 @@ export function parseAssistantMessage(
   if (/galat|wrong|correct|sahi|badal|theek\s*karo|galti/.test(q) && amounts.length >= 1) {
     const oldAmt = amounts[0].paise;
     const newAmt = amounts.length >= 2 ? amounts[1].paise : undefined;
-    const svc = findServiceIn(q, profile.services);
+    // UPDATE 26: "Dhanda 300 galat tha, 250 hona chahiye" narrows the
+    // correction search to Dhanda entries, like a named service.
+    const svc = findServiceIn(q, profile.services) || (isDhandaWord(rawText) ? DHANDA_SERVICE : null);
     const targets = findAssistantTargets(state, profile.id, { amountPaise: oldAmt, text: svc || expenseCategoryHint(q) || undefined, date: /aaj|kal/.test(q) ? date : undefined }).filter((t): t is FoundRecord & { kind: 'daily' | 'job' | 'expense' | 'mt' } => t.kind !== 'txn');
     if (targets.length === 0) {
       return { kind: 'error', text: `Mujhe ${money(oldAmt)} ki koi entry nahi mili jo correct kar sakun. Entry ka service aur date batao (jaise: "Aaj Xerox 300 galat tha").` };
@@ -730,7 +886,9 @@ export function parseAssistantMessage(
   //     delete ("Hatana hai") → clarification listing candidates.
   //     NEVER falls through to the cloud — every form is handled here.
   if (hasDeleteWord(rawText)) {
-    const svc = findServiceIn(q, profile.services);
+    // UPDATE 26: "Dhanda wali entry delete kar do" resolves to the
+    // general Dhanda category, not to a service-list dead-end.
+    const svc = findServiceIn(q, profile.services) || (isDhandaWord(rawText) ? DHANDA_SERVICE : null);
     // 1. Amount form (unchanged behaviour): "Aadhaar 600 wali entry
     //    delete kar do".
     if (amounts.length >= 1) {
@@ -807,7 +965,8 @@ export function parseAssistantMessage(
   // --- Refund: "Rahul ko 200 refund karna hai". ---
   if (/refund|wapas|return/.test(q) && amounts.length >= 1) {
     const amt = amounts[0].paise;
-    const svc = findServiceIn(q, profile.services);
+    // UPDATE 26: a "Dhanda" refund is labelled Dhanda, not 'General'.
+    const svc = findServiceIn(q, profile.services) || (isDhandaWord(rawText) ? DHANDA_SERVICE : null);
     const custName = findNameIn(q, [...state.customers.filter((c) => c.profileId === profile.id).map((c) => c.name), ...state.jobs.filter((j) => j.profileId === profile.id).map((j) => j.customerName)]);
     const job = custName
       ? state.jobs.filter((j) => j.profileId === profile.id && j.customerName.toLowerCase() === custName.toLowerCase() && j.receivedPaise >= amt).sort((a, b) => (a.date < b.date ? 1 : -1))[0]
@@ -981,7 +1140,8 @@ export function parseAssistantMessage(
     const expIdx = expMatch?.index ?? 0;
     const amt = amounts.reduce((best, a) => (Math.abs(a.index - expIdx) < Math.abs(best.index - expIdx) ? a : best), amounts[0]).paise;
     const category = expenseCategoryFor(q, profile);
-    const svc = findServiceIn(q, profile.services) || 'General';
+    // UPDATE 26: an expense "for dhanda" is labelled Dhanda, not 'General'.
+    const svc = findServiceIn(q, profile.services) || (isDhandaWord(rawText) ? DHANDA_SERVICE : null) || 'General';
     const method = cashUpiMethod(extractMethod(q), 'cash');
     const desc = rawText.trim();
     const action: AssistantAction = { kind: 'expense', date, category, description: desc.length > 80 ? desc.slice(0, 80) : desc, amountPaise: amt, method, service: svc, vendor: '' };
@@ -1012,7 +1172,11 @@ export function parseAssistantMessage(
       if (dueAmt && recvAmt && dueAmt.paise !== recvAmt.paise) {
         const custName = findNameIn(q, [...state.customers.filter((c) => c.profileId === profile.id).map((c) => c.name), ...state.jobs.filter((j) => j.profileId === profile.id).map((j) => j.customerName)]);
         const method = cashUpiMethod(extractMethod(q), 'cash');
+        // UPDATE 26: a "dhanda" baaki split is the general category —
+        // it must be resolved BEFORE the customer's latest job service
+        // fallback, which would wrongly pin the mix to one service.
         const svc = findServiceIn(q, profile.services)
+          || (isDhandaWord(rawText) ? DHANDA_SERVICE : null)
           || (() => {
             if (!custName) return null;
             const custJobs = state.jobs
@@ -1057,9 +1221,16 @@ export function parseAssistantMessage(
 
   // --- Daily income (the main flow): service + amount (+ method). ---
   {
-    const segments = splitServiceSegments(text, profile.services);
+    // UPDATE 26: 'Dhanda' rides along as a segment service (NOT a
+    // profile service) so "Dhanda 500, Xerox 300" splits correctly
+    // instead of attributing the ₹500 to Xerox via the prefix rule.
+    const segments = splitServiceSegments(text, [...profile.services, DHANDA_SERVICE]);
     const hasServiceWord = segments.some((s) => s.service !== null);
     const hasMoneyWord = /cash|upi|nagad|rupaye|rupees?|rs\.?|₹|hue|hua|hoga|mila|mile|collection|kamai|earning|dhandha/.test(q);
+    // UPDATE 26: the whole message is about the day's mixed business
+    // ("Aaj dhanda 500 ka hua", "Aaj kaam 500 ka hua", "business 500")
+    // — 'business'/'hisab' already normalised to 'dhandha' above.
+    const dhandaWord = isDhandaWord(rawText, hasServiceWord);
     // Follow-up = the message STARTS with aur/bhi/add ("Aur 200 UPI bhi
     // add kar do"), or it carries aur/bhi AND a service is already in
     // context. A mid-sentence "aur" joining two amounts ("300 cash aur
@@ -1067,7 +1238,7 @@ export function parseAssistantMessage(
     // that message must ask which service, not guess one.
     const followUp = /^(aur|or|also|bhi|add|aur\s+ek|phir)\b/.test(q)
       || (/\b(aur|bhi)\b/.test(q) && !!ctx.lastService);
-    if ((hasServiceWord && amounts.length >= 1) || (followUp && amounts.length >= 1 && ctx.lastService) || (hasServiceWord && amounts.length >= 1 && hasMoneyWord)) {
+    if ((hasServiceWord && amounts.length >= 1) || (followUp && amounts.length >= 1 && ctx.lastService) || (hasServiceWord && amounts.length >= 1 && hasMoneyWord) || (dhandaWord && amounts.length >= 1)) {
       const entries: { service: string; amountPaise: number; method: PayMethod | null; customerName?: string; date?: string }[] = [];
       const globalMethods = (text.match(/\b(cash|upi|nagad|online|gpay|phonepe|paytm)\b/g) || []).map((w) => extractMethod(w));
       const uniqueGlobal = [...new Set(globalMethods)];
@@ -1083,7 +1254,18 @@ export function parseAssistantMessage(
       for (const seg of segments) {
         const segAmounts = extractAmounts(seg.text);
         if (segAmounts.length === 0) continue;
-        const service = seg.service || lastService;
+        // UPDATE 26: a segment carrying the dhanda word IS the general
+        // Dhanda category — it beats a stale lastService ("Xerox" from
+        // an earlier turn must not swallow "dhanda 500"). A named
+        // service in the same segment still wins ("dhanda: Xerox 300"
+        // is a service split, not a Dhanda entry). A bare 'kaam'
+        // segment only becomes Dhanda when there is no service in
+        // context — in a follow-up ("Aur kaam 200") the pending
+        // service wins, as before.
+        const segDhandhaToken = /\bdhandha\b/.test(normalizeMultilingual(seg.text.toLowerCase()));
+        const service = seg.service
+          || (segDhandhaToken ? DHANDA_SERVICE : lastService)
+          || (isDhandaWord(seg.text, false) ? DHANDA_SERVICE : null);
         if (!service) {
           missingService = true;
           for (let ai = 0; ai < segAmounts.length; ai++) {
@@ -1129,23 +1311,75 @@ export function parseAssistantMessage(
       const total = entries.reduce((a, e) => a + e.amountPaise, 0);
       const previewLines = entries.map((e) => entryPreviewLine(e, date, today));
       const dup = findDuplicateWarning(state, profile.id, action);
-      return { kind: 'action', action, previewLines, totalPaise: total, duplicateWarning: dup || undefined };
+      // UPDATE 26 safe default: a Dhanda add warns with today's
+      // Dhanda total so far (any earlier Dhanda entry today, not just
+      // an exact same-amount duplicate) before it is added again.
+      // For a pure Dhanda add the draft below asks first ("upar add
+      // karun ya total badal dun?" — diagnosis §6b); the warning
+      // here is only the fallback for mixed or baaki entries.
+      const dhWarn = dhandaWarningForEntries(state, profile.id, entries, date);
+      const dhDraft = dhandaAddModeDraft(state, profile, entries, date, rawText);
+      if (dhDraft) return dhDraft;
+      return { kind: 'action', action, previewLines, totalPaise: total, duplicateWarning: dhWarn || dup || undefined };
     }
     // Service mentioned but no amount → ask for amount.
     if (hasServiceWord && amounts.length === 0 && !/kitna|kitne|kitni|kya|batao|dikhao|compare|kab|kaise|kahan|kaun|kab/.test(q)) {
       const svc = segments.find((s) => s.service)?.service || null;
       return draftFor('amount', askIn(rawText, 'askAmount', { service: svc || 'Service' }), { pendingService: svc, date }, rawText);
     }
+    // UPDATE 26: "Dhanda add kar do" (no amount, no question word) →
+    // ask for the amount ONCE, with Dhanda as the pending service.
+    // A question ("Aaj dhanda kitna hua?") carries kitna/kya and
+    // falls through to the knowledge answer instead — never a draft.
+    if (dhandaWord && amounts.length === 0 && !/kitna|kitne|kitni|kya|batao|dikhao|compare|kab|kaise|kahan|kaun|kab/.test(q)) {
+      return draftFor('amount', askIn(rawText, 'askAmount', { service: DHANDA_SERVICE }), { pendingService: DHANDA_SERVICE, date }, rawText);
+    }
     // Amount + money words but no service → ask for service (unless follow-up with context).
     // Carry the per-amount methods along, so answering the service
     // later keeps "300 cash, 200 UPI" as cash + UPI.
-    if (amounts.length >= 1 && !hasServiceWord && hasMoneyWord && !followUp && !/kharcha|expense/.test(q)) {
+    // UPDATE 26: a dhanda amount never reaches this branch — it is
+    // the general Dhanda category, not a missing service.
+    if (amounts.length >= 1 && !hasServiceWord && hasMoneyWord && !followUp && !dhandaWord && !/kharcha|expense/.test(q)) {
       const pendingMethods = amounts.map((a, i) => methodNear(text, a.index, String(a.paise / 100).length, i + 1 < amounts.length ? amounts[i + 1].index : undefined));
       return draftFor('service', askIn(rawText, 'askService', { amount: money(amounts[0].paise), services: profile.services.join(', ') }), { pendingAmounts: amounts.map((a) => a.paise), pendingMethods, date }, rawText);
     }
   }
 
   return { kind: 'question' };
+}
+
+/**
+ * UPDATE 26 — the service dead-end, with an escape hatch and an
+ * escalation instead of a loop. First failure: the short "Service
+ * samajh nahi aaya" text PLUS the Dhanda escape hatch (it is a LAST
+ * resort for a genuinely unknown service word, and it must never
+ * fire for dhanda/kaam/business/hisaab — resolveServiceReply handles
+ * those first). Second failure on the SAME draft: a different,
+ * escalated question that offers Dhanda (whole day's mix) or one
+ * named service, with examples — the identical text is never
+ * repeated twice. The attempt count rides in partial.serviceAskCount.
+ */
+function serviceDeadEnd(
+  profile: BusinessProfile,
+  p: Record<string, unknown>,
+  original: string,
+): ParsedMessage {
+  const count = ((p.serviceAskCount as number | undefined) || 0) + 1;
+  const partial = { ...p, serviceAskCount: count };
+  if (count >= 2) {
+    return draftFor(
+      'service',
+      `Samajh nahi aaya — ye poora din ka mix (Dhanda) tha, ya kisi ek service ka? 'Dhanda' likho, ya service ka naam likho — jaise Xerox, Printing, PAN Card. Amount aur Cash/UPI main pehle se jaanta hoon, bas service bata do.`,
+      partial,
+      original,
+    );
+  }
+  return draftFor(
+    'service',
+    `Service samajh nahi aaya. Services: ${profile.services.join(', ')}. Ya 'Dhanda' likho — agar poora din ka mix tha.`,
+    partial,
+    original,
+  );
 }
 
 /** Complete a clarification draft with the user's reply. */
@@ -1171,13 +1405,19 @@ export function applyDraftAnswer(
     const action: AssistantAction = { kind: 'daily_income', date, entries: entries.map((e) => ({ service: e.service, amountPaise: e.amountPaise, method: e.method || 'cash', date: (e as { date?: string }).date })) };
     const total = entries.reduce((a, e) => a + e.amountPaise, 0);
     const dup = findDuplicateWarning(state, profile.id, action);
-    return { kind: 'action', action, previewLines: entries.map((e) => entryPreviewLine(e, date, todayISO())), totalPaise: total, duplicateWarning: dup || undefined };
+    const dhWarn = dhandaWarningForEntries(state, profile.id, entries, date);
+    // UPDATE 26 safe default (diagnosis §6b): a second Dhanda add on
+    // the same day asks "upar add karun ya total badal dun?" first.
+    const dhDraft = dhandaAddModeDraft(state, profile, entries, date, draft.original);
+    if (dhDraft) return dhDraft;
+    return { kind: 'action', action, previewLines: entries.map((e) => entryPreviewLine(e, date, todayISO())), totalPaise: total, duplicateWarning: dhWarn || dup || undefined };
   }
   // UPDATE 25 (C-12): baaki split waiting on the service — the reply
   // names the service; the received + due split is built as one action.
   if (draft.missing === 'service' && p.baakiReceived !== undefined) {
-    const svc = findServiceIn(q, profile.services);
-    if (!svc) return draftFor('service', `Service samajh nahi aaya. Services: ${profile.services.join(', ')}.`, p, draft.original);
+    // UPDATE 26: 'dhanda' here is the general category, never a dead-end.
+    const svc = resolveServiceReply(replyText, profile.services);
+    if (!svc) return serviceDeadEnd(profile, p, draft.original);
     const custName = p.baakiCustomer as string;
     const method = (p.baakiMethod as Method) || cashUpiMethod(extractMethod(q), 'cash');
     const date = (p.date as string) || todayISO();
@@ -1195,11 +1435,16 @@ export function applyDraftAnswer(
         `${svc} ${formatINR(p.baakiDue as number)} (due — abhi mile nahi) — ${custName} ka udhaar`,
       ],
       totalPaise: p.baakiReceived as number,
+      duplicateWarning: dhandaWarningForEntries(state, profile.id, action.entries, date) || undefined,
     };
   }
   if (draft.missing === 'service' && p.pendingAmounts) {
-    const svc = findServiceIn(q, profile.services);
-    if (!svc) return draftFor('service', `Service samajh nahi aaya. Services: ${profile.services.join(', ')}.`, p, draft.original);
+    // UPDATE 26: this is the exact screenshot loop — the user answers
+    // the service question with "dhanda" and the old code returned the
+    // identical dead-end again. 'dhanda' now resolves to the general
+    // Dhanda category; a genuinely unknown word escalates instead.
+    const svc = resolveServiceReply(replyText, profile.services);
+    if (!svc) return serviceDeadEnd(profile, p, draft.original);
     const method = extractMethod(q);
     // Per-amount modes from the original message ("300 cash, 200 UPI")
     // survive: the reply's mode fills only the amounts whose mode is
@@ -1215,7 +1460,66 @@ export function applyDraftAnswer(
     const action: AssistantAction = { kind: 'daily_income', date, entries: entries.map((e) => ({ service: e.service, amountPaise: e.amountPaise, method: e.method || 'cash', date: e.date })) };
     const total = entries.reduce((a, e) => a + e.amountPaise, 0);
     const dup = findDuplicateWarning(state, profile.id, action);
-    return { kind: 'action', action, previewLines: entries.map((e) => entryPreviewLine(e, date, todayISO())), totalPaise: total, duplicateWarning: dup || undefined };
+    const dhWarn = dhandaWarningForEntries(state, profile.id, entries, date);
+    // UPDATE 26 safe default (diagnosis §6b): a second Dhanda add on
+    // the same day asks "upar add karun ya total badal dun?" first.
+    const dhDraft = dhandaAddModeDraft(state, profile, entries, date, draft.original);
+    if (dhDraft) return dhDraft;
+    return { kind: 'action', action, previewLines: entries.map((e) => entryPreviewLine(e, date, todayISO())), totalPaise: total, duplicateWarning: dhWarn || dup || undefined };
+  }
+  // UPDATE 26 safe default (diagnosis §6b): a second Dhanda add on
+  // the same day — the user chooses "add on top" or "replace the
+  // total". Bare "haan" means add on top (Confirm semantics); a bare
+  // "nahi" cancels and nothing is saved. A correction with an amount
+  // ("Nahi, 250 the") rebuilds the pending amount and re-asks the
+  // choice instead of cancelling (UPDATE 25 correction guard).
+  if (draft.missing === 'dhanda_add_mode' && p.pendingEntries) {
+    const reply = replyText.trim().toLowerCase();
+    const replyAmounts = extractAmounts(replyText);
+    const entries = p.pendingEntries as { service: string; amountPaise: number; method: PayMethod | null; date?: string }[];
+    const date = (p.date as string) || todayISO();
+    const newTotal = entries.reduce((a, e) => a + e.amountPaise, 0);
+    // Correction of the pending amount: rebuild + re-ask the choice.
+    if (replyAmounts.length >= 1 && /nahi|nahin|galat|wrong|sahi|badal|theek\s*karo/.test(reply) && replyAmounts[0].paise !== newTotal) {
+      const corrected = entries.map((e, i) => (i === 0 ? { ...e, amountPaise: replyAmounts[0].paise } : e));
+      const redraft = dhandaAddModeDraft(state, profile, corrected, date, draft.original);
+      if (redraft) return redraft;
+    }
+    // "Total badal do": correct the MOST RECENT Dhanda entry of the
+    // day to the new amount (the existing tested correct_entry path
+    // — it updates the entry AND its linked CashTxn). The preview
+    // says so, with the day total that results.
+    if (/total\s*badal|badal\s*do|yehi\s*total|ye\s*total|replace|sahi\s*total|badlo|correct\s*kar/.test(reply)) {
+      const existing = state.dailyEntries
+        .filter((x) => x.profileId === profile.id && x.service === DHANDA_SERVICE && x.date === date && x.method !== 'other')
+        .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+      const target = existing[existing.length - 1];
+      if (!target) {
+        return { kind: 'error', text: 'Aaj ki Dhanda entry ab records mein nahi mili — dobara batao kitna add karna hai.' };
+      }
+      const totalAfter = (p.existingDhandaPaise as number) - target.totalPaise + newTotal;
+      const action: AssistantAction = { kind: 'correct_entry', targetKind: 'daily', targetId: target.id, label: `Dhanda ${formatINR(target.totalPaise)} (${target.method.toUpperCase()})`, oldAmountPaise: target.totalPaise, newAmountPaise: newTotal };
+      return {
+        kind: 'action', action,
+        previewLines: [
+          `Correct: Dhanda ${formatINR(target.totalPaise)} (${target.method.toUpperCase()}) — sabse recent Dhanda entry`,
+          `Naya amount: ${formatINR(newTotal)} (pehle ${formatINR(target.totalPaise)}) — aaj ka Dhanda total ${formatINR(totalAfter)} ho jayega.`,
+        ],
+        totalPaise: newTotal,
+      };
+    }
+    // Add on top (bare "haan" counts — Confirm semantics).
+    if (/upar|aur\s*add|add\s*kar|add\s*on|jod\s*do|jod|haan|ha\b|yes|ok|kar\s*do|theek\s*hai|bilkul/.test(reply)) {
+      const action: AssistantAction = { kind: 'daily_income', date, entries: entries.map((e) => ({ service: e.service, amountPaise: e.amountPaise, method: e.method || 'cash', date: e.date })) };
+      const dup = findDuplicateWarning(state, profile.id, action);
+      return { kind: 'action', action, previewLines: entries.map((e) => entryPreviewLine(e, date, todayISO())), totalPaise: newTotal, duplicateWarning: dup || undefined };
+    }
+    // Bare "nahi" (no amount) cancels — nothing is saved.
+    if (replyAmounts.length === 0 && /^(nahi|nahin|no|cancel|mat\s*karo|rehne\s*do|chhodo|ruk[o]?)\b/.test(reply)) {
+      return { kind: 'error', text: `Theek hai — ye Dhanda entry add nahi ki. Aaj ka Dhanda total wahi rahega jo pehle se saved hai (${formatINR(p.existingDhandaPaise as number)}).` };
+    }
+    // Anything else — ask the same question again (same draft).
+    return draftFor('dhanda_add_mode', draft.question, p, draft.original);
   }
   if (draft.missing === 'amount' && p.pendingService) {
     if (amounts.length === 0) return draftFor('amount', 'Amount kitna tha? Sirf number likho (jaise: 300).', p, draft.original);
@@ -1227,7 +1531,14 @@ export function applyDraftAnswer(
     const date = (p.date as string) || todayISO();
     const action: AssistantAction = { kind: 'daily_income', date, entries };
     const total = entries.reduce((a, e) => a + e.amountPaise, 0);
-    return { kind: 'action', action, previewLines: entries.map((e) => `${e.service} ${formatINR(e.amountPaise)} (${e.method.toUpperCase()})`), totalPaise: total };
+    // UPDATE 26 safe default (diagnosis §6b): a second Dhanda add on
+    // the same day asks "upar add karun ya total badal dun?" first;
+    // the preview warning below is only the fallback for mixed or
+    // baaki entries (the draft returns null for those).
+    const dhDraft = dhandaAddModeDraft(state, profile, entries, date, draft.original);
+    if (dhDraft) return dhDraft;
+    const dhWarn = dhandaWarningForEntries(state, profile.id, entries, date);
+    return { kind: 'action', action, previewLines: entries.map((e) => `${e.service} ${formatINR(e.amountPaise)} (${e.method.toUpperCase()})`), totalPaise: total, duplicateWarning: dhWarn || undefined };
   }
   if (draft.missing === 'amount' && p.target) {
     if (amounts.length === 0) return draftFor('amount', 'Sahi amount kitna hona chahiye?', p, draft.original);
@@ -1349,7 +1660,7 @@ export function applyDraftAnswer(
       // of the list number ("Aadhaar 600 wali", "600 wali"): match on
       // those instead of asking for the number again.
       const replyAmounts = extractAmounts(replyText);
-      const replySvc = findServiceIn(q, profile.services);
+      const replySvc = findServiceIn(q, profile.services) || (isDhandaWord(replyText) ? DHANDA_SERVICE : null);
       const byAmount = replyAmounts.length > 0 ? targets.filter((t) => t.amountPaise === replyAmounts[0].paise) : [];
       const byService = replySvc ? targets.filter((t) => (t.service || '').toLowerCase() === replySvc.toLowerCase() || t.label.toLowerCase().includes(replySvc.toLowerCase())) : [];
       const both = byAmount.filter((t) => byService.length === 0 || byService.includes(t));

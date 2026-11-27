@@ -126,6 +126,21 @@ export const CSC_SERVICES_V2 = ['Passport Size Photo', 'Scanning'];
  *  Only commission ever appears here — never the transfer principal. */
 export const MT_COMMISSION_SERVICE = 'Money Transfer Commission';
 
+/**
+ * UPDATE 26 — "Dhanda": the owner's word for the whole day's mixed
+ * business (his definition, 2026-11-27 21:01 IST): Passport Size
+ * Photo + Smart Card + Xerox + Documents profit + Money Transfer
+ * profit, all together. It is a GENERAL Daily Business category for
+ * a mixed total, NOT one of the shop's services — so it is deliberately
+ * NOT added to any profile's `services` list and gets NO tile on the
+ * Services page. The chat parser maps the word to this label, and the
+ * backend allow-lists it (assistant.ts) exactly like 'Other Services'.
+ * The Daily Business hub already attributes any service string, so a
+ * Dhanda entry shows up there, in Cash/UPI Books and in Reports
+ * without ever being split across services.
+ */
+export const DHANDA_SERVICE = 'Dhanda';
+
 /** Fallback service for manual Cash/UPI Book income with no job or entry. */
 export const OTHER_SERVICES = 'Other Services';
 

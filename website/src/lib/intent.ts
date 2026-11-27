@@ -248,7 +248,7 @@ export function hasMoneyAmount(raw: string): boolean {
   // UPDATE 25 (C-4): test norm(raw) — number words become digits.
   if (!/\d/.test(norm(raw))) return false;
   const s = norm(raw);
-  return /(₹|\brs\b|rupees?|rupaye|rupay|paise|paisa|cash|upi|nagad|kharcha|kharach|commission|transfer|diye|diya|mila|mile|hue|hua|jama|payment|bill|due|udhaar|udhar|bheja|bheje|add\s*kar)/.test(s);
+  return /(₹|\brs\b|rupees?|rupaye|rupay|paise|paisa|cash|upi|nagad|kharcha|kharach|commission|transfer|diye|diya|mila|mile|hue|hua|jama|payment|bill|due|udhaar|udhar|bheja|bheje|add\s*kar|dhandha)/.test(s);
 }
 const MONEY_WORDS = /\b(cash|upi|nagad|rupaye|rupees?|rs\.?|₹|hue|hua|mile|mila|diye|diya|kharcha|expense|commission|transfer|jama|add kar|payment)\b/;
 
@@ -361,6 +361,10 @@ export function isPlanOrStatement(raw: string): boolean {
   // UPDATE 23: a delete request is NEVER a plan ("Kal wali entry
   // delete karni hai" is a delete, not tomorrow's work).
   if (hasDeleteWord(raw)) return false;
+  // UPDATE 26: "Dhanda add karna hai" is an instruction to add the
+  // day's business NOW, not a future plan — the parser asks for the
+  // amount. A future plan ("Kal dhanda karna hai") stays a plan.
+  if (/dhandha/.test(s) && /(add|likh|daal|note|record|save|jod)/.test(s) && !/(kal|parso|tomorrow)/.test(s)) return false;
   if (hasMoneyAmount(raw)) return false;
   if (/kitne (rupaye|paise)|how much (money|rupees)|rupaye hue|paise hue/.test(s)) return false;
   // A how-to question ("website banana hai, kaise banau?") asks for
@@ -573,12 +577,21 @@ export function classifyIntent(raw: string, ctx: ChatContext, services: string[]
   // norm() converts number words ("do sau" → 200), so "do sau Xerox
   // cash hue" reaches the router instead of falling to unknown.
   if (HAS_AMOUNT.test(norm(raw)) && !isConversion) {
-    if (/(xerox|printing|pan|aadhaar|aadhar|voter|ayushman|smart|scan|kharcha|expense|agent|transfer|commission|cash|upi|hue|hua|mile|mila|diye|diya|add kar|jama|payment|repair|bijli|electricity|internet|kagaz|paper|ink|kiraya|rent|refund|wapas|return)/.test(s)) return 'business_action';
+    // UPDATE 26: 'dhandha' is itself a money signal — "Dhanda 500"
+    // (no hua/cash word) is a financial add, not a general question.
+    if (/(xerox|printing|pan|aadhaar|aadhar|voter|ayushman|smart|scan|kharcha|expense|agent|transfer|commission|cash|upi|hue|hua|mile|mila|diye|diya|add kar|jama|payment|repair|bijli|electricity|internet|kagaz|paper|ink|kiraya|rent|refund|wapas|return|dhandha)/.test(s)) return 'business_action';
     if ((/^(aur|or|also|bhi|add)\b/.test(s) || /\b(aur|bhi)\b/.test(s)) && ctx.lastService) return 'business_action';
     if (/kharcha|expense/.test(s)) return 'business_action';
   }
   // "Add customer" / "naya customer" without an amount is still an action.
   if (/naya customer|new customer|add.*customer|customer.*add/.test(s)) return 'business_action';
+  // UPDATE 26: "Dhanda add kar do" / "Aaj dhanda add karna hai" with
+  // NO amount is still a financial add — the parser asks for the
+  // amount once (draft 'amount', pendingService 'Dhanda'). A how-to
+  // question ("Kaise add karu dhadhe ka") and a where question
+  // ("Dhanda kahan likhu?") are NOT this — they stay app_help below.
+  if (/dhandha/.test(s) && /(add|likh|daal|note|record|save|kar\s*do|karo|karna|jod)/.test(s)
+    && !/(kaise|how|kahan|kha\b|kidhar|where)/.test(s)) return 'business_action';
   // 5b. Advice questions — "kaise badhaye / kaise karu" about growth,
   //     marketing, budget, commission, dues, UPI failure — are general
   //     advice, NOT data questions. Without this, "Mera profit kaise

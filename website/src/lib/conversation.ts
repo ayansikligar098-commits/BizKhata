@@ -601,7 +601,7 @@ export function respondToMessage(opts: {
     // A "no records" knowledge answer is NOT a figure answer: a total /
     // profit question on an empty store must quote the real figure
     // (₹0.00), so fall through to the factual responder instead.
-    const asksFigure = /(profit|hisab|total|summary|dhandha|kitna|kitne|balance|kamai)/.test(message.toLowerCase());
+    const asksFigure = /(profit|hisab|hisaab|total|summary|dhandha|dhanda|dhandho|dhande|dhadhe|kitna|kitne|balance|kamai)/.test(message.toLowerCase());
     if (know && !(asksFigure && /koi record nahi|no record/i.test(know.text))) {
       return done({ text: know.text, links: know.links, table: know.table, navigateTo: know.navigateTo, newCtx: { ...baseCtx, ...know.context } });
     }
