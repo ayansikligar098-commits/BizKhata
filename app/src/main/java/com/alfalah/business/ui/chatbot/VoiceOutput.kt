@@ -1,29 +1,37 @@
 package com.alfalah.business.ui.chatbot
 
 import android.content.Context
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
-import java.util.Locale
+import android.media.MediaPlayer
+import java.io.File
 
 /**
- * Spoken replies for the BizKhata AI Assistant (UPDATE 18).
- * Native android.speech.tts.TextToSpeech — free, no key, no account.
- * The voice is the phone's own speech service: the language is set
- * from the reply language (AiLanguage.bcp47 — all 22 languages +
- * Hinglish/Roman forms), and where the device offers an Indian voice
- * for that language it is preferred. Speech rate / pitch come from
- * the Voice settings in Settings (persisted in SettingsStore).
+ * Spoken replies for the BizKhata AI Assistant (UPDATE 18, rewritten
+ * UPDATE 25).
  *
- * This is the OUTPUT half of voice only. The intelligence behind
- * what is spoken is the same conversational client as text chat
- * (CloudAiClient.converse() via ChatbotViewModel, cloud when the
- * owner added his AI key, local engine otherwise) — this
- * class never talks to any AI service and never sees a key.
+ * UPDATE 25 (owner order 2026-11-27 19:01 IST, exact words): "Phone
+ * Ki Awaz Mat Do Proper Ai Ki Voice Chahiye Muje" — NO phone/device
+ * voice. The old phone-voice path is GONE from this file
+ * and from the whole app: nothing here initialises, configures or
+ * calls it, and no code path can fall back to it. Spoken replies are
+ * real AI-voice audio (WAV bytes from AiVoiceClient, fetched by the
+ * ViewModel under the daily quota) played through [MediaPlayer].
+ * No new dependency: MediaPlayer is platform API (ExoPlayer is not
+ * a project dependency and none was added for this).
+ *
+ * This class only MOVES audio bytes to the speaker: it never talks
+ * to any AI service, never sees a key, never decides what to speak
+ * (the ViewModel shortens the reply, checks the key + the daily
+ * counter, fetches the audio, and only then hands bytes here).
+ * The reply text is already in chat, so a spoken reply is never the
+ * only copy of an answer.
  *
  * Lifecycle: the chat screen creates one instance, calls shutdown()
  * when the screen leaves (DisposableEffect), and stop() on every
  * interruption (mic tap, Stop button, a new spoken instruction such
- * as "Bas, short mein batao"). No audio is recorded or stored here.
+ * as "Bas, short mein batao"). Stop is immediate: the player stops
+ * and resets, and nothing queued plays after it. No audio is
+ * recorded or stored here beyond the single short clip file in the
+ * app-private cache, overwritten by the next reply.
  */
 class VoiceSpeaker(
     context: Context,
@@ -31,104 +39,48 @@ class VoiceSpeaker(
     private val onSpeechEnded: () -> Unit = {},
     private val onSpeechError: (String) -> Unit = {}
 ) {
-    private var tts: TextToSpeech? = null
-    private var ready = false
-    private var languageTag = "hi-IN"
-    private var utteranceCounter = 0L
+    private val appContext = context.applicationContext
+    private var player: MediaPlayer? = null
 
-    /** Speech rate 0.5–2.0 (1.0 = normal). Applied live. */
-    var speechRate: Float = 1.0f
-        set(value) {
-            field = value.coerceIn(0.5f, 2.0f)
-            tts?.setSpeechRate(field)
-        }
-
-    /** Pitch 0.5–2.0 (1.0 = device default). Applied live. */
-    var speechPitch: Float = 1.0f
-        set(value) {
-            field = value.coerceIn(0.5f, 2.0f)
-            tts?.setPitch(field)
-        }
-
-    init {
-        tts = TextToSpeech(context.applicationContext) { status ->
-            ready = status == TextToSpeech.SUCCESS
-            if (ready) {
-                applyLanguage()
-                tts?.setSpeechRate(speechRate)
-                tts?.setPitch(speechPitch)
-            }
-        }
-        tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) = onSpeechStarted()
-            override fun onDone(utteranceId: String?) = onSpeechEnded()
-            @Deprecated("Deprecated in Java")
-            override fun onError(utteranceId: String?) =
-                onSpeechError("Bol kar sunana nahi ho paya — jawab chat mein padh sakte hain.")
-
-            override fun onError(utteranceId: String?, errorCode: Int) =
-                onSpeechError("Bol kar sunana nahi ho paya — jawab chat mein padh sakte hain.")
-        })
-    }
-
-    /** Reply language, as a BCP-47 tag (e.g. "gu-IN", "hi-IN", "en-IN").
-     *  Falls back to "hi-IN" when the device has no voice data for
-     *  the requested language — the text reply is still shown in
-     *  chat, so nothing is lost. */
-    fun setLanguage(tag: String) {
-        languageTag = tag.ifBlank { "hi-IN" }
-        if (ready) applyLanguage()
-    }
-
-    private fun applyLanguage() {
-        val engine = tts ?: return
-        val locale = Locale.forLanguageTag(languageTag)
-        val result = try {
-            engine.setLanguage(locale)
-        } catch (_: Exception) {
-            TextToSpeech.LANG_NOT_SUPPORTED
-        }
-        if (result == TextToSpeech.LANG_MISSING_DATA ||
-            result == TextToSpeech.LANG_NOT_SUPPORTED
-        ) {
-            // Fall back to Hindi (India) voice data, which most
-            // Indian devices ship; the chat text stays in the reply
-            // language either way.
-            try {
-                engine.setLanguage(Locale.forLanguageTag("hi-IN"))
-            } catch (_: Exception) {
-                // No usable voice at all — speak() will report it.
-            }
-            return
-        }
-        // Prefer an Indian voice for this language where the device
-        // offers one (e.g. an en-IN / hi-IN / gu-IN voice); keep the
-        // default otherwise. Never crashes on devices with no voices.
-        try {
-            val indianVoice = engine.voices?.firstOrNull { voice ->
-                voice.locale.language == locale.language &&
-                    voice.locale.country.equals("IN", ignoreCase = true)
-            }
-            if (indianVoice != null) engine.voice = indianVoice
-        } catch (_: Exception) {
-            // Voice listing failed — the language setting above stands.
-        }
-    }
-
-    /** Speak [text] aloud (previous speech is stopped first — a new
-     *  reply never queues behind an old one). Returns false when
-     *  there is nothing to speak or the engine is not ready; the
-     *  caller then relies on the text already shown in chat. */
-    fun speak(text: String): Boolean {
-        if (text.isBlank()) return false
-        val engine = tts ?: return false
-        if (!ready) return false
-        utteranceCounter += 1
-        val utteranceId = "bizkhata-voice-$utteranceCounter"
+    /** Play one AI-voice clip (complete WAV bytes, 24 kHz mono
+     *  16-bit PCM). Any clip already playing is stopped first — a new
+     *  reply never queues behind an old one. Returns false when
+     *  there is nothing to play or playback fails; the caller then
+     *  relies on the text already shown in chat. */
+    fun playAudio(bytes: ByteArray): Boolean {
+        if (bytes.isEmpty()) return false
         return try {
-            engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId) ==
-                TextToSpeech.SUCCESS
+            stop()
+            val file = File(appContext.cacheDir, "ai-voice-reply.wav")
+            file.writeBytes(bytes)
+            val mp = MediaPlayer().apply {
+                setDataSource(file.absolutePath)
+                setOnCompletionListener {
+                    try {
+                        reset()
+                    } catch (_: Exception) {
+                        // Already released — nothing to do.
+                    }
+                    onSpeechEnded()
+                }
+                setOnErrorListener { _, _, _ ->
+                    onSpeechError("Bol kar sunana nahi ho paya — jawab chat mein padh sakte hain.")
+                    true
+                }
+                prepare()
+            }
+            player = mp
+            mp.start()
+            onSpeechStarted()
+            true
         } catch (_: Exception) {
+            try {
+                player?.release()
+            } catch (_: Exception) {
+                // Already released — nothing to do.
+            }
+            player = null
+            onSpeechError("Bol kar sunana nahi ho paya — jawab chat mein padh sakte hain.")
             false
         }
     }
@@ -137,28 +89,114 @@ class VoiceSpeaker(
      *  nothing is playing. */
     fun stop() {
         try {
-            tts?.stop()
+            val mp = player ?: return
+            if (mp.isPlaying) mp.stop()
+            mp.reset()
         } catch (_: Exception) {
             // Already stopped — nothing to do.
         }
     }
 
     fun isSpeaking(): Boolean = try {
-        tts?.isSpeaking == true
+        player?.isPlaying == true
     } catch (_: Exception) {
         false
     }
 
-    /** Release the engine (call when the chat screen leaves). */
+    /** Release the player (call when the chat screen leaves). */
     fun shutdown() {
         try {
-            tts?.stop()
-            tts?.shutdown()
+            player?.stop()
         } catch (_: Exception) {
-            // Already shut down — nothing to do.
+            // Already stopped — nothing to do.
+        }
+        try {
+            player?.release()
+        } catch (_: Exception) {
+            // Already released — nothing to do.
         } finally {
-            tts = null
-            ready = false
+            player = null
+        }
+    }
+}
+
+/**
+ * Tiny one-shot player for the voice picker in Settings → Voice
+ * (UPDATE 25): the owner taps "Suno" next to a voice, the ViewModel
+ * fetches a short test clip for that voice (one daily voice reply),
+ * and this plays it. Kept separate from [VoiceSpeaker] so Settings
+ * never has to own the chat speaker's lifecycle. Same rules: real
+ * AI-voice audio only, never the device voice.
+ */
+class VoiceTestPlayer(context: Context) {
+    private val appContext = context.applicationContext
+    private var player: MediaPlayer? = null
+    var isPlaying: Boolean = false
+        private set
+
+    fun play(bytes: ByteArray): Boolean {
+        if (bytes.isEmpty()) return false
+        return try {
+            stop()
+            val file = File(appContext.cacheDir, "ai-voice-test.wav")
+            file.writeBytes(bytes)
+            val mp = MediaPlayer().apply {
+                setDataSource(file.absolutePath)
+                setOnCompletionListener {
+                    isPlaying = false
+                    try {
+                        reset()
+                    } catch (_: Exception) {
+                        // Already released — nothing to do.
+                    }
+                }
+                setOnErrorListener { _, _, _ ->
+                    isPlaying = false
+                    true
+                }
+                prepare()
+            }
+            player = mp
+            mp.start()
+            isPlaying = true
+            true
+        } catch (_: Exception) {
+            isPlaying = false
+            try {
+                player?.release()
+            } catch (_: Exception) {
+                // Already released — nothing to do.
+            }
+            player = null
+            false
+        }
+    }
+
+    fun stop() {
+        try {
+            val mp = player ?: return
+            if (mp.isPlaying) mp.stop()
+            mp.reset()
+        } catch (_: Exception) {
+            // Already stopped — nothing to do.
+        } finally {
+            isPlaying = false
+        }
+    }
+
+    fun release() {
+        try {
+            player?.stop()
+        } catch (_: Exception) {
+            // Already stopped — nothing to do.
+        }
+        try {
+            player?.release()
+        } catch (_: Exception) {
+            // Already released — nothing to do.
+        } finally {
+            player = null
+            isPlaying = false
         }
     }
 }

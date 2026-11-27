@@ -231,7 +231,10 @@ object Multilingual {
         "divas" to "din", "athavadiya" to "hafta", "athvadiyu" to "hafta",
         "hafte" to "hafta", "mahina" to "mahine",
         // Business words.
-        "dhandho" to "dhandha", "byabsha" to "dhandha",
+        // UPDATE 25 (C-8): "dhadhe" / "dhande" — the owner's spelling
+        // of "dhandhe" (day's business).
+        "dhandho" to "dhandha", "dhadhe" to "dhandha", "dhande" to "dhandha",
+        "byabsha" to "dhandha",
         "vyaparam" to "dhandha", "vyapaar" to "dhandha",
         "hisab" to "hisab",
         // Refund / correction.
@@ -445,6 +448,13 @@ object Multilingual {
             "aaj", "kal", "kitna", "kitne", "batao", "hue", "hua", "mila",
             "kharcha", "baki", "dhandha", "hisab", "rupaye", "paise",
             "kaise", "kya", "nahi", "haan", "dena", "lena", "jama",
+            // UPDATE 25 (C-14): "aur" and "bhi" are Hinglish glue —
+            // "Aur 200 UPI" must not fall through to English, and a
+            // two-word Hinglish fragment ("Aur batao") must count as
+            // Hinglish, not UNKNOWN. "samjhao"/"samjha"/"kiya"/"bare"/
+            // "mein" are the same kind of marker ("Mujhe samjhao"
+            // is Hinglish, not English).
+            "aur", "bhi", "samjhao", "samjha", "kiya", "bare", "mein",
             // UPDATE 14/15 — Hinglish markers (UPDATE 14 screenshot bug):
             // "kaise", "bhai", "ho", "hoon", "hai", "kar", "rahe" must
             // outweigh a lone "ho", which must NEVER flip Roman
@@ -658,7 +668,12 @@ object Multilingual {
         // can conflict with this branch.)
         val hinglishMarkers = setOf(
             "kaise", "bhai", "ho", "hoon", "hai", "kya", "kar", "rahe",
-            "raha", "tum", "batao", "acha", "mood", "bore"
+            "raha", "tum", "batao", "acha", "mood", "bore",
+            // UPDATE 25 (C-14): more Hinglish markers so a short Roman
+            // message ("Mujhe samjhao", "yeh kiya kya", "kitna mila",
+            // "mere bare mein") holds Hinglish instead of flipping to
+            // English on a stray "upi"/"cash" token.
+            "samjhao", "samjha", "kiya", "mila", "bare", "mein"
         )
         val hinglishMarkerCount = tokens.count { it in hinglishMarkers }
 

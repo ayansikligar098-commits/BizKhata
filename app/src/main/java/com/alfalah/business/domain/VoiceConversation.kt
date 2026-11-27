@@ -18,12 +18,15 @@ package com.alfalah.business.domain
  *    conversation pipeline, so a spoken "Haan" confirms a preview, a
  *    spoken "Cash Book kholo" navigates, and a spoken entry gets the
  *    same preview -> confirm -> backend-verified save as typed text.
- *  - Speech-to-text and text-to-speech themselves are NOT that cloud
- *    AI: they are the native Android speech services
- *    (SpeechRecognizer in VoiceInputHelper, TextToSpeech in
- *    VoiceSpeaker) — free, no key, on-device where the phone offers
- *    it. That distinction is user-visible nowhere as a provider name:
- *    per UPDATE 12 the UI only ever says "BizKhata AI Assistant".
+ *  - Speech-to-text stays the native Android service
+ *    (SpeechRecognizer in VoiceInputHelper). Text-to-speech is NOT
+ *    a device service anymore (UPDATE 25 — the owner rejected the
+ *    phone's voice): spoken replies come from the real AI voice
+ *    (AiVoiceClient → VoiceSpeaker/MediaPlayer), rationed to 10
+ *    short replies/day with a visible counter and a hard stop, and
+ *    never fall back to the device voice. That distinction is
+ *    user-visible nowhere as a provider name: per UPDATE 12 the UI
+ *    only ever says "BizKhata AI Assistant" / "AI voice".
  *
  *  - THIS FILE IS PURE LOGIC (no Android APIs) so it is unit-testable
  *    on the JVM and mirrored in docs/ai_assistant_mirror.py. The
@@ -61,14 +64,18 @@ package com.alfalah.business.domain
 enum class VoiceState { IDLE, LISTENING, THINKING, SPEAKING }
 
 /** Voice preferences (persisted in SettingsStore; app-wide in v1, like
- *  the AI-language preference — see SettingsStore). */
+ *  the AI-language preference — see SettingsStore).
+ *  UPDATE 25: the device voice is GONE (owner order 2026-11-27 —
+ *  "Phone Ki Awaz Mat Do, Proper AI Ki Voice Chahiye Muje"). There is
+ *  no speech rate / pitch anymore — those were device-voice settings.
+ *  [voiceName] is the picked AI voice (a plain prebuilt-voice name,
+ *  default "Kore"); the voice-replies toggle now controls the AI
+ *  voice, off = text only. */
 data class VoiceSettings(
     /** Speak replies aloud. Off = mute: chat stays text-only. */
     val responsesEnabled: Boolean = true,
-    /** TextToSpeech speech rate: 0.8 slow, 1.0 normal, 1.25 fast. */
-    val speechRate: Float = 1.0f,
-    /** TextToSpeech pitch: 1.0 is the device default. */
-    val speechPitch: Float = 1.0f,
+    /** The picked AI voice (plain name, e.g. "Kore"). */
+    val voiceName: String = AiVoiceConfig.DEFAULT_VOICE,
     /** Keep listening across turns without re-tapping the mic. */
     val continuousMode: Boolean = false
 )
@@ -151,13 +158,16 @@ object VoiceInterrupt {
 object VoicePipeline {
     /** Below this STT confidence the transcript is not trusted for
      *  a financial action (or any action): ask to repeat instead.
-     *  A confidence of exactly -1f means "the recogniser gave no
-     *  score" — treat that as unknown, not as low. */
-    const val MIN_CONFIDENCE = 0.45f
+     *  UPDATE 25: unified with the website (0.5) — the same mumble
+     *  is not "repeat please" on one surface and "send" on the
+     *  other. A confidence of exactly -1f means "the recogniser gave
+     *  no score" — treat that as unknown, not as low. */
+    const val MIN_CONFIDENCE = 0.5f
 
     /** Same normalised transcript inside this window is a repeat
-     *  firing, not a second instruction. */
-    const val DUPLICATE_WINDOW_MS = 4000L
+     *  firing, not a second instruction. UPDATE 25: unified with
+     *  the website (5 s). */
+    const val DUPLICATE_WINDOW_MS = 5000L
 
     fun decide(
         transcript: String,
@@ -226,30 +236,21 @@ object ContinuousMode {
  * Text prepared for speaking: the assistant's reply as TEXT stays
  * exactly as shown in chat; what is SPOKEN is a cleaned version —
  * markdown, bullets, tables and symbols are stripped so the voice
- * does not read formatting aloud, and ₹ becomes "rupaye". Long
- * replies are spoken only up to a cap (the full text stays on
- * screen to read); the cap notice is itself spoken so the user is
- * never misled into thinking the reply ended.
+ * does not read formatting aloud, and ₹ becomes "rupaye". UPDATE 25:
+ * long replies are spoken only up to the AI-voice cap (first 2
+ * sentences / 400 characters — the full text stays on screen to
+ * read); the cap notice is itself spoken so the user is never
+ * misled into thinking the reply ended. One speech call per reply,
+ * never more. Delegates to [AiVoiceText.shortenForVoice] (the single
+ * spoken-text rule for the AI voice).
  */
 object VoiceText {
-    /** Spoken cap: ~1200 characters is about a minute of speech. */
-    const val SPOKEN_CAP_CHARS = 1200
+    /** Spoken cap: first 2 sentences / ~400 characters (UPDATE 25 —
+     *  the AI voice is rationed to 10 short replies/day, so a long
+     *  reply must never spend a whole call on itself). */
+    const val SPOKEN_CAP_CHARS = AiVoiceConfig.SPOKEN_CAP_CHARS
 
-    fun speakable(text: String): String {
-        var s = text
-        s = s.replace(Regex("https?://\\S+"), " link ")
-        s = s.replace("₹", " rupaye ")
-        s = s.replace("✓", "")
-        s = s.replace(Regex("[#*_`>]+"), " ")
-        s = s.replace("•", ", ")
-        s = s.replace(Regex("\\n\\s*[-•]\\s*"), ", ")
-        s = s.replace(Regex("\\s+"), " ").trim()
-        if (s.length > SPOKEN_CAP_CHARS) {
-            s = s.take(SPOKEN_CAP_CHARS).trimEnd() +
-                " ... aage ka jawab aap chat mein padh sakte hain."
-        }
-        return s
-    }
+    fun speakable(text: String): String = AiVoiceText.shortenForVoice(text)
 
     /** One short "please repeat" prompt, in the user's language.
      *  Never a demand to rephrase in a fixed format — just "boliye,

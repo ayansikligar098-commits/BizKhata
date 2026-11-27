@@ -20,7 +20,8 @@ import json
 import os
 import re
 import unicodedata
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 TODAY = date.today().toordinal()  # epoch days, same basis as Kotlin LocalDate
 
@@ -103,7 +104,8 @@ ROMAN_VARIANTS = {
     "chhella": "pichhle", "gata": "pichhle", "pichhla": "pichhle",
     "divas": "din", "athavadiya": "hafta", "athvadiyu": "hafta",
     "hafte": "hafta", "mahina": "mahine",
-    "dhandho": "dhandha", "byabsha": "dhandha", "vyaparam": "dhandha",
+    "dhandho": "dhandha", "dhadhe": "dhandha", "dhande": "dhandha",
+    "byabsha": "dhandha", "vyaparam": "dhandha",
     "vyapaar": "dhandha",
     "vapas": "wapas", "kadho": "hatao",
     "taka": "rupaye", "toka": "rupaye", "tanka": "rupaye",
@@ -263,6 +265,12 @@ DETECTION_KEYWORDS = {
     "hinglish": {"aaj", "kal", "kitna", "kitne", "batao", "hue", "hua",
                  "mila", "kharcha", "baki", "dhandha", "hisab", "rupaye",
                  "paise", "kaise", "kya", "nahi", "haan", "dena", "lena", "jama",
+                 # UPDATE 25 (C-14): "aur" / "bhi" are Hinglish glue
+                 # ("Aur 200 UPI" must not fall through to English);
+                 # "samjhao" / "samjha" / "kiya" / "bare" / "mein"
+                 # are the same kind of marker ("Mujhe samjhao" is
+                 # Hinglish, not English).
+                 "aur", "bhi", "samjhao", "samjha", "kiya", "bare", "mein",
                  "bhai", "ho", "hoon", "hai", "kar", "rahe", "raha", "tum",
                  "kaisa", "kaisi", "acha", "theek", "shukriya", "sab", "mood", "bore"},
     "hi": {"आज", "कल", "कितना", "बताओ", "हुए", "मिला", "खर्च", "बाकी",
@@ -411,7 +419,13 @@ def detect_language(text):
     # in Hinglish (see ml-gu-detect-mixed below).
     hinglish_markers = {"kaise", "bhai", "ho", "hoon", "hai", "kya",
                         "kar", "rahe", "raha", "tum", "batao", "acha",
-                        "mood", "bore"}
+                        "mood", "bore",
+                        # UPDATE 25 (C-14): more Hinglish markers so a
+                        # short Roman message ("Mujhe samjhao", "yeh
+                        # kiya kya", "kitna mila", "mere bare mein")
+                        # holds Hinglish instead of flipping to English
+                        # on a stray "upi" / "cash" token.
+                        "samjhao", "samjha", "kiya", "mila", "bare", "mein"}
     if romanized and len(tokens & hinglish_markers) >= 2:
         return {"language": "hinglish", "confidence": 0.8, "script": dominant,
                 "romanized": romanized, "mixed": mixed, "scores": scores[:3]}
@@ -705,7 +719,11 @@ def idem_key(profile, day, canonical):
 
 
 def canonical_daily(entries):
-    return ";".join(f"{e['label']}:{e['amount']}:{e['mode']}" for e in entries)
+    # UPDATE 25 (C-11): the entry's own day is part of the key, so a
+    # multi-date save (today + yesterday) is never a duplicate of
+    # either half on its own.
+    return ";".join(f"{e['label']}:{e['amount']}:{e['mode']}:{e.get('day') or ''}"
+                    for e in entries)
 
 
 # ---------------------------------------------------------------------------
@@ -719,7 +737,13 @@ def parse(text, ctx=None, agents=None, customers=None):
     if not q:
         return ("Unknown", None)
     detected = detect_language(text)
-    lang = detected["language"] if detected["language"] != "unknown" else ctx.get("last_language", "hinglish")
+    # UPDATE 25 (C-14): a weak detection (confidence <= 0.5 — one
+    # stray token, or a number with "upi" / "cash") must NOT flip the
+    # reply language. Keep the conversation's last language; only a
+    # confident detection switches it.
+    lang = (detected["language"]
+            if detected["language"] != "unknown" and detected["confidence"] > 0.5
+            else ctx.get("last_language", "hinglish"))
     help_topic = detect_help(q)
     if help_topic:
         return ("Help", help_topic)
@@ -731,7 +755,15 @@ def parse(text, ctx=None, agents=None, customers=None):
         return ("Clarify", {"question": "correction", "missing": ["exact entry"]})
     if _is_delete_intent(q):
         return _parse_delete(q, ctx, lang)
-    if re.search(r"\bkal\b", q):
+    # UPDATE 25 (C-11): EXCEPT an explicit multi-date message —
+    # "Aaj printing ke 150 hue, aur kal ke 200 bhi add kar do" names
+    # both days with an amount each, so each entry is dated by its
+    # own words in parse_daily instead of the whole message becoming
+    # a date question (which used to drop BOTH entries). A lone "kal"
+    # still clarifies, as before.
+    multi_date = (re.search(r"\bkal\b", q) and "aaj" in q
+                  and len(find_money_hits(q)) >= 2)
+    if re.search(r"\bkal\b", q) and not multi_date:
         return ("Clarify", {"question": reply(lang, "kal"), "missing": ["date"]})
     if is_internal(q):
         amount = main_amount(q)
@@ -794,6 +826,10 @@ def detect_help(q):
     if "receipt" in q or "rasid" in q or "bill" in q:
         return "receipt"
     if "daily" in q or "report" in q:
+        return "daily_report"
+    # UPDATE 25 (C-8): "Kaise add karu dhadhe ka" — the day's
+    # business, spelled the owner's way.
+    if "dhandha" in q or "dhadhe" in q or "dhande" in q:
         return "daily_report"
     if "profile" in q:
         return "change_profile"
@@ -1032,12 +1068,21 @@ def parse_due(q, ctx, customers, lang="hinglish"):
     # 700 instead of a 500 bill with 200 received). If the split is
     # impossible, ask instead of guessing.
     amounts = find_amounts(q)
-    received_marker = re.search(r"\b(mile|mila|mil gaye|mil gaya)\b", q)
+    # UPDATE 25 (C-12): "Rahul ne 200 diye, baaki 300 udhaar" — the
+    # amount next to "diye/diya" is the RECEIVED part and the amount
+    # next to "baaki/udhaar" is the DUE (total = 200 + 300 = 500).
+    # The old code only recognised mile/mila as a received marker, so
+    # the 200 was silently dropped and the 300 recorded as the whole
+    # due.
+    due_word_here = any(w in q for w in ("baaki", "baki", "due", "pending"))
+    received_marker = (re.search(r"\b(mile|mila|mil gaye|mil gaya)\b", q)
+                       or (due_word_here
+                           and re.search(r"\b(diye|diya)\b", q)))
     total = amount
     received = 0
     if len(amounts) >= 2 and received_marker:
         recv = next((a for a in amounts
-                     if re.search(r"\b%d\s*(?:rs\.?|rupaye|rupee|rupay)?\s*(?:mile|mila|mil gaye|mil gaya)\b" % a, q)),
+                     if re.search(r"\b%d\s*(?:rs\.?|rupaye|rupee|rupay)?\s*(?:mile|mila|mil gaye|mil gaya|diye|diya)\b" % a, q)),
                     min(amounts))
         others = [a for a in amounts if a != recv]
         due_word = any(w in q for w in ("baaki", "baki", "due", "pending"))
@@ -1123,8 +1168,13 @@ def parse_daily(q, ctx, lang="hinglish"):
             continue
         if mode is None:
             missing_mode = True
+        # UPDATE 25 (C-11): this entry's own day, from the words
+        # around ITS amount — "kal ke 200" in a multi-date message is
+        # yesterday's entry. None = the action day.
+        entry_day = (ctx.get("day", TODAY) - 1
+                     if "kal" in (head + " " + tail) else None)
         entries.append({"service": svc[0], "label": label, "amount": rupees * 100,
-                        "mode": mode or "CASH"})
+                        "mode": mode or "CASH", "day": entry_day})
         cur_service, cur_label = svc, label
     if not entries:
         return ("Clarify", {"question": reply(lang, "askAmount"),
@@ -1141,12 +1191,17 @@ def parse_daily(q, ctx, lang="hinglish"):
             "missing": ["payment mode"]})
     return ("Action", {"kind": "DailyEntries", "entries": entries,
                        "total": sum(e["amount"] for e in entries),
-                       "preview": preview_daily(entries, lang)})
+                       "preview": preview_daily(entries, lang, ctx.get("day", TODAY))})
 
 
-def preview_daily(entries, lang="hinglish"):
+def preview_daily(entries, lang="hinglish", today=0):
     lines = [reply(lang, "previewHeader")]
-    lines += [f"• {e['label']} {fmt(e['amount'])} {e['mode']}" for e in entries]
+    # UPDATE 25 (C-11): an entry dated yesterday is marked "(kal)"
+    # so the preview shows which day each entry belongs to.
+    for e in entries:
+        day_note = " (kal)" if (today and e.get("day") is not None
+                                and e["day"] != today) else ""
+        lines.append(f"• {e['label']} {fmt(e['amount'])} {e['mode']}{day_note}")
     lines.append(reply(lang, "totalLine",
                        total=fmt(sum(e["amount"] for e in entries))))
     return "\n".join(lines)
@@ -1160,20 +1215,93 @@ def is_negative(text):
     return is_negative_ml(text)
 
 
+def correction_pair(text):
+    """UPDATE 25 (C-3) — the (old, new) amount pair of a correction
+    ("300 galat the, 250 hone chahiye" -> old 300, new 250;
+    "nahi, 500 nahi 600 tha" -> old 500, new 600). The number
+    attached to "galat" / "nahi" is the REJECTED (old) value; the
+    other number is the correction. Without a rejection marker
+    ("300 wali entry ko 350 karo") the first number is the old one,
+    the second the new one. A single number is the old one with no
+    new amount yet. Amounts are paise."""
+    n = normalise(text)
+    numbers = [int(float(m)) for m in re.findall(r"\d+(?:\.\d+)?", n)]
+    if not numbers:
+        return (None, None)
+    if len(numbers) == 1:
+        return (numbers[0] * 100, None)
+    rejected = {int(float(m.group(1)))
+                for m in re.finditer(r"(\d+(?:\.\d+)?)\s*(?:nahi|nahin|galat)\b", n)}
+    old = next((x for x in numbers if x in rejected), numbers[0])
+    new = next((x for x in numbers if x != old), numbers[-1])
+    return (old * 100, new * 100)
+
+
 def corrected_preview_amount(text):
-    """UPDATE 20 — 'Nahi, 500 the' corrects the pending preview's
-    amount, it does not cancel it. A number + a correction marker
-    (nahi/no/galat/the/tha/thi), and NOT a follow-up add ('aur' /
-    'bhi' / 'add' belongs to the merge path). Returns paise or None."""
+    """UPDATE 25 (C-3) — 'Nahi, 500 nahi 600 tha' corrects the
+    pending preview to 600, NOT 500: the number attached to the
+    rejection marker is the OLD value, the other number is the new
+    one. A number + a correction marker (nahi/no/galat/the/tha/thi),
+    and NOT a follow-up add ('aur' / 'bhi' / 'add' belongs to the
+    merge path). Returns paise or None."""
     n = normalise(text)
     if any(w in n for w in ("aur", "bhi", "add")):
         return None
     if not re.search(r"\b(no|nahi|galat|the|tha|thi|actually|matlab)\b", n):
         return None
+    _old, new = correction_pair(n)
+    if new is not None:
+        return new
     amount = main_amount(n)
     if amount is None:
         return None
     return amount * 100
+
+
+def strip_leading_yes(text):
+    """UPDATE 25 (C-2) — strip a leading yes ("haan, / ha / yes /
+    ok / theek hai") from a message that carries MORE content
+    ("Haan, aur Xerox 300 cash hue"). Returns the remainder, "" when
+    the whole message IS just a yes, or None when the message does
+    not start with a yes at all. A yes+content message must never be
+    treated as a bare confirm — the content is a real instruction."""
+    n = normalise(text).strip()
+    m = re.match(r"^(haan|ha+|yes|yep|ok|okay|theek hai|bilkul|ji haan)[\s,.!]*", n)
+    if not m:
+        return None
+    return n[m.end():].strip()
+
+
+def is_key_status_message(text):
+    """UPDATE 25 (C-7) — a key-status statement ("Mene Key Dal Di
+    Starting Me", "Key save hai?"): the user is STATING that the key
+    was entered, or ASKING whether it is saved. The caller answers
+    from the device's actual key state — never displays the key,
+    never tells the user to enter a key they just entered. A how-to
+    question ("key kahan dalu") is NOT this — it has no "dal di /
+    save hai" statement in it."""
+    n = normalise(text)
+    if "key" not in n:
+        return False
+    return any(p in n for p in (
+        "key dal di", "key daal di", "key dal diya", "key daal diya",
+        "key add kar di", "key add ki", "key save kar di",
+        "key dal gayi", "key daal gayi", "key dal di hai",
+        "key daal di hai", "key save hai", "api key dal di"))
+
+
+def ordinal_index(text):
+    """UPDATE 25 (C-18) — ordinal pick in a list the chat just
+    showed: pehli/pehla = 0, dusri/dusra/doosri/doosra = 1,
+    teesri/teesra = 2. None = no ordinal in the message."""
+    n = normalise(text)
+    if "pehli" in n or "pehla" in n:
+        return 0
+    if any(w in n for w in ("dusri", "dusra", "doosri", "doosra")):
+        return 1
+    if "teesri" in n or "teesra" in n:
+        return 2
+    return None
 
 
 def parse_follow_up(text, ctx):
@@ -1190,6 +1318,153 @@ def parse_follow_up(text, ctx):
     label = (detect_service(n) or (None,))[1] if detect_service(n) else ctx.get("last_label")
     return {"kind": "DailyEntries", "entries": [
         {"service": svc[0], "label": label or svc[1], "amount": amount * 100, "mode": mode}]}
+
+
+# ---------------------------------------------------------------------------
+# UPDATE 25 — real AI voice (mirror of domain/AiVoice.kt,
+# domain/AiVoiceClient.kt and the VoicePipeline thresholds in
+# domain/VoiceConversation.kt). Pure logic: caps, quota day, shortening,
+# request JSON, audio extraction, honest lines. No network here — the
+# client call itself cannot run on this VM (no key); the request shape
+# is verified below instead.
+# ---------------------------------------------------------------------------
+AI_VOICE_DAILY_LIMIT = 10
+AI_VOICE_SPOKEN_CAP_CHARS = 400
+AI_VOICE_MIN_GAP_MS = 21000
+AI_VOICE_INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
+AI_VOICE_DEFAULT_VOICE = "Kore"
+AI_VOICE_VOICES = ["Kore", "Puck", "Charon", "Fenrir"]
+AI_VOICE_SPEECH_STYLE = "warm, friendly, speaking clearly and slowly, natural"
+# STT (UPDATE 25): the confidence / duplicate windows, unified with
+# the website's chosen pair (0.5 / 5 s).
+VOICE_MIN_CONFIDENCE = 0.5
+VOICE_DUPLICATE_WINDOW_MS = 5000
+_PACIFIC = ZoneInfo("America/Los_Angeles")
+
+
+def pacific_day(epoch_ms):
+    """The Pacific calendar day (yyyy-MM-dd) a timestamp falls on —
+    the provider resets daily quotas at midnight Pacific."""
+    return datetime.fromtimestamp(epoch_ms / 1000, tz=_PACIFIC).strftime("%Y-%m-%d")
+
+
+def is_new_day(stored_day, now_ms):
+    """True when the stored counter day is not today (Pacific) — the
+    counter must reset to zero before the next spoken reply."""
+    return not stored_day or stored_day != pacific_day(now_ms)
+
+
+def quota_label(used_today):
+    return f"AI awaz: {used_today}/{AI_VOICE_DAILY_LIMIT}"
+
+
+def shorten_for_voice(text):
+    """First ~2 sentences / at most 400 chars of a reply, speakable:
+    links become "link", the rupee sign becomes "rupaye", markdown and
+    bullets are stripped. A cut reply says the rest is in the chat."""
+    s = re.sub(r"https?://\S+", " link ", text)
+    s = s.replace("₹", " rupaye ")
+    s = s.replace("✓", "")
+    s = re.sub(r"[#*_`>]+", " ", s)
+    s = s.replace("•", ", ")
+    s = re.sub(r"\n\s*[-•]\s*", ", ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    if not s:
+        return ""
+    sentences = re.split(r"(?<=[.!?])\s+", s)
+    short = " ".join(sentences[:2]).strip()
+    capped = short[:AI_VOICE_SPOKEN_CAP_CHARS].rstrip() if len(short) > AI_VOICE_SPOKEN_CAP_CHARS else short
+    if len(capped) < len(s):
+        return capped + " ... aage ka jawab aap chat mein padh sakte hain."
+    return capped
+
+
+def quota_finished_line(lang="hinglish"):
+    return {
+        "en": "Aaj ki AI awaz khatm ho gayi hai — kal subah phir milegi. Tab tak jawab chat mein padh lo.",
+        "gu": "Aaj ni AI awaz khatm thai gai chhe — kale savare phari malshe. Tya sudhi jawab chat ma vanchi lo.",
+        "hi": "आज की AI आवाज़ खत्म हो गई है — कल सुबह फिर मिलेगी। तब तक जवाब chat में पढ़ लो.",
+    }.get(lang, "Aaj ki AI awaz khatm ho gayi hai — kal subah phir milegi. Tab tak jawab chat mein padh lo.")
+
+
+def no_key_line(lang="hinglish"):
+    return {
+        "en": "AI awaz ke liye AI key chahiye — Settings → AI Chat mein key save karo, phir jawab bol kar sunaya jayega. Tab tak jawab chat mein padh lo.",
+        "gu": "AI awaz mate AI key joie chhe — Settings → AI Chat ma key save karo, pachhi jawab boline sambhlavvama avshe. Tya sudhi jawab chat ma vanchi lo.",
+        "hi": "AI आवाज़ के लिए AI key चाहिए — Settings → AI Chat में key save करो, फिर जवाब बोल कर सुनाया जाएगा। तब तक जवाब chat में पढ़ लो।",
+    }.get(lang, "AI awaz ke liye AI key chahiye — Settings → AI Chat mein key save karo, phir jawab bol kar sunaya jayega. Tab tak jawab chat mein padh lo.")
+
+
+def build_voice_json(text, voice):
+    """The Interactions-API request body for one short reply: voice
+    name + user_input text with speech_metadata style + audio
+    response format + speech_config voice. (The model id travels in
+    the same body in the Kotlin; it is deliberately not asserted
+    here — the verifier forbids the provider name in test files.)"""
+    body = {
+        "input": [{"type": "user_input",
+                   "content": [{"type": "text", "text": text,
+                                "annotations": [{"type": "speech_metadata",
+                                                 "style": AI_VOICE_SPEECH_STYLE}]}]}],
+        "response_format": {"type": "audio"},
+        "generation_config": {"speech_config": [{"voice": voice}]},
+    }
+    return json.dumps(body, ensure_ascii=False)
+
+
+def extract_audio_base64(payload):
+    """The base64 audio payload from an Interactions-API reply, or
+    None when the reply carries no audio (error / empty). Looks for
+    the first "data" value longer than 100 chars — a short "data"
+    value is some other field, not the clip."""
+    for m in re.finditer(r'"data"\s*:\s*"([^"]*)"', payload):
+        if len(m.group(1)) > 100:
+            return m.group(1)
+    return None
+
+
+def is_wrong_language(text, lang="hinglish"):
+    """Mirror of CloudAiClient.isWrongLanguage: a confident detection
+    (confidence >= 0.8) in a different language than the chat's.
+    Mixed / low-signal text is never flagged."""
+    detected = detect_language(text)
+    return (detected["confidence"] >= 0.8
+            and detected["language"] != "unknown"
+            and detected["language"] != lang)
+
+
+# Mirror of domain/VoiceConversation.kt VoiceInterrupt (UPDATE 25,
+# C-17): a typed "Bas, short mein batao" shortens the last reply;
+# "Bas, <question>" re-processes the question.
+_INTERRUPT_PHRASES = (
+    "bas short mein batao", "bas short me batao", "short mein batao",
+    "short me batao", "bas bas", "bas", "ruk", "ruko", "ruk jao",
+    "stop", "chup", "chup ho jao", "bas karo", "band karo")
+
+
+def strip_interrupt_prefix(text):
+    """The text after an interrupt phrase, "" when the whole message
+    IS the interrupt phrase, or None when it does not start with one."""
+    n = re.sub(r"\s+", " ", re.sub(r"[.,!?]+", " ", text.strip().lower())).strip()
+    for phrase in sorted(_INTERRUPT_PHRASES, key=len, reverse=True):
+        if n == phrase:
+            return ""
+        if n.startswith(phrase + " "):
+            return n[len(phrase):].strip()
+    return None
+
+
+def is_interrupt_only(text):
+    return strip_interrupt_prefix(text) == ""
+
+
+def shorten_to_two_sentences(text):
+    """First 2 sentences of a reply (typed "Bas, short mein batao").
+    Text only, no voice tail: the full reply is already on screen."""
+    s = re.sub(r"\s+", " ", text).strip()
+    if not s:
+        return ""
+    return " ".join(re.split(r"(?<=[.!?])\s+", s)[:2]).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -2268,9 +2543,19 @@ def _is_daily_write_help(q):
     website me kha likhu bataoge?' Where-to-write, not figures."""
     write = any(w in q for w in ("kha likhu", "kahan likhu", "kaha likhu",
                                  "kahan likh", "kha likh", "kahan likhun",
-                                 "kha likhun", "where do i write"))
+                                 "kha likhun", "where do i write",
+                                 # UPDATE 25 (C-8): "Kaise Add Karu" —
+                                 # how to add the day's business — is
+                                 # the same where-to-write question,
+                                 # even without "kahan likhu" in it.
+                                 "kaise add karu", "kaise add karun",
+                                 "kaise likhu", "kaise likhun",
+                                 "kaise add kar", "add karu"))
     business = any(w in q for w in ("dhandha", "business", "dukaan", "dukan",
-                                    "shop", "kamai", "collection"))
+                                    "shop", "kamai", "collection",
+                                    # "dhadhe" / "dhande" — the owner's
+                                    # spelling of "dhandhe".
+                                    "dhadhe", "dhande"))
     return write and business
 
 
@@ -2416,6 +2701,11 @@ _CONV_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(km|m|cm|inch|kg|g|litre|ml)\s*(me|mei
 
 
 def _general_topic(q, raw_lower):
+    # UPDATE 25 (C-9): basic general knowledge the local engine can
+    # genuinely answer without a key — India's capital. Anything else
+    # still needs the cloud (never invented).
+    if "rajdhani" in q or ("capital" in q and ("bharat" in q or "india" in q)):
+        return "gk_capital"
     if "pan card" in q or "pan ke baare" in q:
         return "pan_explainer"
     if "aadhaar" in q or "aadhar" in q:
@@ -2491,6 +2781,10 @@ def _statement_topic(q):
 
 
 def _language_request(raw, raw_lower):
+    """Returns (language code, translate_only) or None. UPDATE 25
+    (C-13): "… mein likho" is a one-off translation of the last reply
+    (translate_only=True) — it never switches the language. Only
+    "… mein baat karo / samjhao / bolo" is a real switch."""
     asks = any(w in raw_lower for w in ("samjhao", "samjhaao", "bolo",
                                         "baat karo", "vaat karo", "mein baat",
                                         "me baat", "speak", "talk")) \
@@ -2508,11 +2802,11 @@ def _language_request(raw, raw_lower):
                         or f"{name.lower()} me likho" in raw_lower
                         or f"{name} में लिखो" in raw
                         or f"{name} मे लिखो" in raw):
-                    return code
+                    return (code, True)
         return None
     for name, code in _LANGUAGE_NAMES:
         if name.lower() in raw_lower or name in raw:
-            return code
+            return (code, False)
     return None
 
 
@@ -2533,11 +2827,16 @@ def understand(text, ctx=None, lang="hinglish"):
     else:
         time_ref = None
     # 1. Language request.
+    # UPDATE 25 (C-13): "Aur English mein likho" is a TRANSLATE
+    # (one-off, last reply only) — it never switches the profile
+    # language. Only "… mein baat karo / samjhao" is a real switch.
     req = _language_request(text, raw_lower)
     if req:
-        return {"intent": "LANGUAGE_REQUEST", "topic": "language", "time": None,
+        code, translate_only = req
+        intent = "TRANSLATE_REPLY" if translate_only else "LANGUAGE_REQUEST"
+        return {"intent": intent, "topic": "language", "time": None,
                 "service": None, "amount": None, "raw": text, "canon": q,
-                "lang": lang, "requested": req}
+                "lang": lang, "requested": code}
     # 1b. App-change request (UPDATE 22) — BEFORE navigation (website
     #     classifyIntent step 1b beats 2d): "Modify the Cash Book to
     #     show weekly totals" is a change request, not "open Cash
@@ -2599,8 +2898,13 @@ def understand(text, ctx=None, lang="hinglish"):
                 "service": svc, "amount": None, "raw": text, "canon": q,
                 "lang": lang, "requested": None}
     # 7. Casual — strict patterns + no business signal.
+    # UPDATE 25 (C-5): a greeting must never hijack a question that
+    # also asks about the business ("Aaj su chale chhe, ketlo profit
+    # thayo?", "Kaise ho, aaj ka total kitna hai?"). A business
+    # question in the same message wins — the greeting is answered
+    # along with the figures, never instead of them.
     ct = _casual_topic(q, raw_lower)
-    if ct is not None and not _has_money_signal(q):
+    if ct is not None and not _has_money_signal(q) and not _is_business_question(q):
         return {"intent": "CASUAL", "topic": ct, "time": time_ref,
                 "service": None, "amount": None, "raw": text, "canon": q,
                 "lang": lang, "requested": None}
@@ -2873,6 +3177,14 @@ def _general_answer(meaning, ctx):
         return _TROUBLESHOOT.get("upi", {}).get(lang, _TROUBLESHOOT["upi"]["hinglish"])
     if topic == "calculation":
         return _calculate(meaning, lang)
+    # UPDATE 25 (C-9): a basic fact the local engine can genuinely
+    # answer — Bharat's capital — in the user's own language. No key
+    # needed, nothing invented.
+    if topic == "gk_capital":
+        return {"en": "Bharat ki rajdhani New Delhi hai.",
+                "hi": "भारत की राजधानी New Delhi है।",
+                "gu": "Bharat ni rajdhani New Delhi chhe."}.get(
+            lang, "Bharat ki rajdhani New Delhi hai.")
     # live_info / general_explain: no local answer — the caller must use
     # the cloud AI or answer honestly, never invent.
     return None
@@ -3016,7 +3328,7 @@ def _compose_language_request(meaning, ctx):
     text = _reply(req, "languageConfirm", 0).replace(
         "{language}", _LANG_NATIVE.get(req, "Hinglish"))
     return {"text": text, "intent": "language_request", "checklist": [],
-            "needs_cloud": False}
+            "needs_cloud": False, "requested": req}
 
 
 def _external_limit_text(meaning, lang):
@@ -3037,22 +3349,30 @@ def _external_limit_text(meaning, lang):
         action = {"en": "do this work on the portal",
                   "hi": "ये काम portal पर",
                   "gu": "aa kaam portal par"}.get(lang, "ye kaam portal par")
+    # UPDATE 25 (C-6): the old trailing offer — "ask me for the
+    # module and I will make a spec and save a development request
+    # for it" — is REMOVED. It proactively told the user to ask for
+    # the cancelled "Aadhaar Mobile Number Update" module. The
+    # replacement names what BizKhata CAN do (track the work in
+    # Aadhaar Services) and never suggests asking for a module. An
+    # EXPLICIT module request is still handled by the app-change
+    # spec path (UPDATE 20).
     if lang == "en":
         return (f"I cannot {action} — I have no access to UIDAI or any government portal, "
                 "and I cannot submit anything on your behalf. What I can do is track your "
-                "shop's work in BizKhata — ask me for the module and I will make a spec and "
-                "save a development request for it.")
+                "shop's work in BizKhata — you can track the work in Aadhaar Services, "
+                "with entries and dues recorded there.")
     if lang == "hi":
         return (f"मैं {action} नहीं कर सकता — मेरे पास UIDAI या किसी government portal का access नहीं है, "
                 "और मैं तुम्हारे behalf पर submit नहीं कर सकता। जो मैं कर सकता हूँ: तुम्हारे दुकान के काम को "
-                "BizKhata में track करना — उसके लिए module request करो तो मैं spec बना कर development request save कर दूँगा।")
+                "BizKhata में track करना — Aadhaar Services में entries और due track कर सकते हो।")
     if lang == "gu":
         return (f"Hu {action} nahi kari shaku — mara paase UIDAI ke kai government portal no access nathi, "
                 "ane hu tamara behalf par submit nahi kari shaku. Je hu kari shaku chhu: tamara dukaan nu kaam "
-                "BizKhata ma track karvu — tena mate module request karo to hu spec banavi ne development request save kari daish.")
+                "BizKhata ma track karvu — Aadhaar Services ma entries ane due track kari shako chho.")
     return (f"Main {action} nahi kar sakta — mere paas UIDAI ya kisi government portal ka access nahi hai, "
             "aur main tumhare behalf par submit nahi kar sakta. Jo main kar sakta hoon: tumhare dukaan ke kaam ko "
-            "BizKhata mein track karna — uske liye module request karo to main spec bana kar development request save kar dunga.")
+            "BizKhata mein track karna — Aadhaar Services mein entries aur due track kar sakte ho.")
 
 
 def _compose_app_change(meaning, ctx):
@@ -3111,6 +3431,17 @@ def compose_local(meaning, ctx):
         return _compose_plan(meaning, ctx, seed)
     if intent == "LANGUAGE_REQUEST":
         return _compose_language_request(meaning, ctx)
+    if intent == "TRANSLATE_REPLY":
+        # UPDATE 25 (C-13): "Aur English mein likho" is a one-off
+        # translation, never a profile switch. With an active checklist
+        # it translates the CHECKLIST (content preserved, same as a
+        # language request); otherwise the Session translates the last
+        # reply via the cloud — here the mirror has no key, so it is
+        # marked needs_cloud and the caller answers honestly.
+        if (ctx or {}).get("active_checklist"):
+            return _compose_language_request(meaning, ctx)
+        return {"text": "", "intent": "translate_reply", "checklist": [],
+                "needs_cloud": True, "requested": meaning.get("requested")}
     if intent == "CHECKLIST":
         return _compose_checklist(meaning, ctx)
     if intent == "ACCEPT_OFFER":
@@ -3280,7 +3611,7 @@ def update_context(ctx, text, meaning):
             ctx["pending_offer"] = None
             ctx["pending_question"] = None
             ctx["pending_app_change"] = None
-    elif intent == "LANGUAGE_REQUEST":
+    elif intent in ("LANGUAGE_REQUEST", "TRANSLATE_REPLY"):
         # A translate (active checklist) keeps the pending question
         # (website KEEP_QUESTION includes checklist_translate); the
         # offer itself expires. A real language switch clears all.
@@ -4178,6 +4509,19 @@ class Session:
         svc = detect_service(q)
         recent = [t for t in self.snap.get("txs", [])
                   if svc is None or t.get("category") == svc[1]][-3:]
+        # UPDATE 25 (C-18) — ordinal delete: "Dusra wala delete kar
+        # do" / "Pehli wali entry hata do" picks that entry straight
+        # from the list below, in the SAME order the list is shown
+        # (1 = pehli, 2 = dusri, 3 = teesri). Anything else lists the
+        # candidates to pick from, as before.
+        ordinal = ordinal_index(q)
+        if ordinal is not None and ordinal < len(recent):
+            tx = recent[ordinal]
+            label = f"{tx.get('category')} {fmt(tx.get('amount', 0))} ({tx.get('mode')})"
+            action = {"kind": "DeleteTransaction", "transaction_id": tx["id"],
+                      "label": label,
+                      "preview": f"Ye entry delete karu?\n• {label}"}
+            return self._show_preview(action, action["preview"])
         if not recent:
             text_out = (f"Aaj ki {svc[1] if svc else ''} koi entry nahi mili jo delete kar sakun. "
                         "Pehle entry add karein, ya amount/service batao — "
@@ -4269,13 +4613,44 @@ class Session:
         return self._out("Clarify", text_out, "clarify",
                          missing=["exact entry"], candidates=candidates)
 
+    def _merge_follow_up(self, pending, fu, lang):
+        """UPDATE 21/25 (C-1) — merge a follow-up amount into the
+        pending preview: both entries are saved on "Ha"."""
+        merged = dict(pending["action"])
+        merged["entries"] = list(pending["action"]["entries"]) + fu["entries"]
+        merged["total"] = sum(e["amount"] for e in merged["entries"])
+        merged["preview"] = preview_daily(merged["entries"], lang,
+                                          self.ctx.get("day", TODAY))
+        self.pending_action = {"action": merged,
+                               "key": idem_key(1, self.ctx.get("day", TODAY),
+                                               canonical_daily(merged["entries"])),
+                               "preview": merged["preview"]}
+        text_out = merged["preview"] + "\nConfirm karein to save karunga — abhi kuch save nahi hua hai."
+        self._append(text_out)
+        return self._out("Action", text_out, "action", action=merged)
+
     def send(self, text):
         """One user message through the whole pipeline. Returns the
         reply dict; the full transcript is in self.messages."""
         self._append(text, from_user=True)
+        # UPDATE 25 (C-17): a typed interrupt ("Bas, short mein
+        # batao") comes first — it shortens the last reply or
+        # re-processes the remainder, never a new financial action.
+        interrupt = strip_interrupt_prefix(text)
+        if interrupt is not None:
+            if interrupt == "":
+                last_bot = next((m["text"] for m in reversed(self.messages)
+                                 if not m.get("from_user")), "")
+                short = shorten_to_two_sentences(last_bot)
+                self._append(short)
+                return self._out("Conversational", short, "shortened")
+            text = interrupt
         detected = detect_language(text)
-        lang = detected["language"] if detected["language"] != "unknown" \
-            else self.ctx.get("last_language", "hinglish")
+        # UPDATE 25 (C-14): a weak detection (confidence <= 0.5) must
+        # NOT flip the reply language — keep the last language.
+        lang = (detected["language"]
+                if detected["language"] != "unknown" and detected["confidence"] > 0.5
+                else self.ctx.get("last_language", "hinglish"))
         self.ctx["last_language"] = lang
         meaning = understand(text, self.ctx, lang)
         self.ctx = update_context(self.ctx, text, meaning)
@@ -4283,59 +4658,69 @@ class Session:
         if self.pending_action is not None:
             pending = self.pending_action
             norm = normalise(text)
-            if is_affirmative(norm):
-                return self._execute_pending(pending)
-            fu = parse_follow_up(text, self.ctx)
-            if fu is not None and pending["action"].get("kind") == "DailyEntries":
-                merged = dict(pending["action"])
-                merged["entries"] = list(pending["action"]["entries"]) + fu["entries"]
-                merged["total"] = sum(e["amount"] for e in merged["entries"])
-                merged["preview"] = preview_daily(merged["entries"], lang)
-                self.pending_action = {"action": merged,
-                                       "key": idem_key(1, self.ctx.get("day", TODAY),
-                                                       canonical_daily(merged["entries"])),
-                                       "preview": merged["preview"]}
-                text_out = merged["preview"] + "\nConfirm karein to save karunga — abhi kuch save nahi hua hai."
-                self._append(text_out)
-                return self._out("Action", text_out, "action", action=merged)
-            # UPDATE 20 — "Nahi, 500 the" corrects the single pending
-            # amount (and mode/service if named), it does not cancel:
-            # a number + a correction marker, and NOT a follow-up add.
-            corr = corrected_preview_amount(text)
-            if (corr is not None
-                    and pending["action"].get("kind") == "DailyEntries"
-                    and len(pending["action"]["entries"]) == 1):
-                old = pending["action"]["entries"][0]
-                svc = detect_service(norm)
-                entry = dict(old)
-                entry["amount"] = corr
-                entry["mode"] = detect_mode(norm) or old["mode"]
-                if svc:
-                    entry["service"] = svc[0]
-                    entry["label"] = svc[1]
-                merged = dict(pending["action"])
-                merged["entries"] = [entry]
-                merged["total"] = corr
-                merged["preview"] = preview_daily(merged["entries"], lang)
-                self.pending_action = {"action": merged,
-                                       "key": idem_key(1, self.ctx.get("day", TODAY),
-                                                       canonical_daily(merged["entries"])),
-                                       "preview": merged["preview"]}
-                text_out = ("Theek hai — amount update kar diya hai:\n"
-                            + merged["preview"]
-                            + "\nConfirm karein to save karunga — abhi kuch save nahi hua hai.")
-                self._append(text_out)
-                return self._out("Action", text_out, "action", action=merged)
-            if is_negative(norm):
+            # UPDATE 25 (C-2): a leading yes with MORE content is not
+            # a bare confirm — "Ha aur 200 UPI bhi add kar do" carries
+            # a real instruction. Strip the yes; the remainder merges
+            # (follow-up) or drops the pending preview (fresh action),
+            # exactly like the Kotlin ViewModel's step 1.
+            remainder = strip_leading_yes(norm)
+            if remainder is not None and remainder != "":
+                fu = parse_follow_up(remainder, self.ctx)
+                if fu is not None and pending["action"].get("kind") == "DailyEntries":
+                    return self._merge_follow_up(pending, fu, lang)
+                # Fresh instruction, not a follow-up: drop the pending
+                # preview with an honest notice, then parse the new
+                # message below (the leading "Ha" is harmless to it).
                 self.pending_action = None
-                text_out = reply(lang, "cancelled")
-                self._append(text_out)
-                return self._out("Conversational", text_out, "cancelled")
-            # A different message — drop the old pending action
-            # explicitly, then continue with the new message.
-            self.pending_action = None
-            self._append("Pehli entry ko maine cancel kar diya hai (save nahi hui thi). "
-                         "Ab naye message par kaam karta hoon.")
+                self._append("Pehli entry ko maine cancel kar diya hai (save nahi hui thi). "
+                             "Ab naye message par kaam karta hoon.")
+            else:
+                if is_affirmative(norm):
+                    return self._execute_pending(pending)
+                fu = parse_follow_up(text, self.ctx)
+                if fu is not None and pending["action"].get("kind") == "DailyEntries":
+                    return self._merge_follow_up(pending, fu, lang)
+                # UPDATE 20 — "Nahi, 500 the" corrects the single pending
+                # amount (and mode/service if named), it does not cancel:
+                # a number + a correction marker, and NOT a follow-up add.
+                # UPDATE 25 (C-3): the correction number is the one
+                # NOT attached to the rejection marker (600, not 500).
+                corr = corrected_preview_amount(text)
+                if (corr is not None
+                        and pending["action"].get("kind") == "DailyEntries"
+                        and len(pending["action"]["entries"]) == 1):
+                    old = pending["action"]["entries"][0]
+                    svc = detect_service(norm)
+                    entry = dict(old)
+                    entry["amount"] = corr
+                    entry["mode"] = detect_mode(norm) or old["mode"]
+                    if svc:
+                        entry["service"] = svc[0]
+                        entry["label"] = svc[1]
+                    merged = dict(pending["action"])
+                    merged["entries"] = [entry]
+                    merged["total"] = corr
+                    merged["preview"] = preview_daily(merged["entries"], lang,
+                                                      self.ctx.get("day", TODAY))
+                    self.pending_action = {"action": merged,
+                                           "key": idem_key(1, self.ctx.get("day", TODAY),
+                                                           canonical_daily(merged["entries"])),
+                                           "preview": merged["preview"]}
+                    text_out = ("Theek hai — amount update kar diya hai:\n"
+                                + merged["preview"]
+                                + "\nConfirm karein to save karunga — abhi kuch save nahi hua hai.")
+                    self._append(text_out)
+                    return self._out("Action", text_out, "action", action=merged)
+                if is_negative(norm):
+                    self.pending_action = None
+                    text_out = reply(lang, "cancelled")
+                    self._append(text_out)
+                    return self._out("Conversational", text_out, "cancelled")
+                # A different message — drop the old pending action
+                # explicitly, then continue with the new message.
+                self.pending_action = None
+                self._append("Pehli entry ko maine cancel kar diya hai (save nahi hui thi). "
+                             "Ab naye message par kaam karta hoon.")
         # 2. Awaiting a clarification answer.
         if self.clarification is not None:
             done = self._try_complete_clarification(text, self.clarification, lang)
@@ -4377,7 +4762,7 @@ class Session:
                              label=h["label"])
         # 4. Parse the message.
         if meaning["intent"] in ("CASUAL", "STATEMENT", "PLAN",
-                                 "LANGUAGE_REQUEST", "CHECKLIST",
+                                 "LANGUAGE_REQUEST", "TRANSLATE_REPLY", "CHECKLIST",
                                  "QUESTION_GENERAL", "ACCEPT_OFFER",
                                  "OFFER_DECLINED", "APP_CHANGE",
                                  "DO_IT_SUMMARY"):
@@ -7278,10 +7663,11 @@ def main():
         r = respond("Gujarati mein bolo", {}, EMPTY_SNAP)
         eq(r["intent"], "language_request")
 
-    @t("u20-lang: 'Aur English mein likho' is a language request (likho-gate)")
+    @t("u20-lang: 'Aur English mein likho' is a translate, not a switch (UPDATE 25 C-13)")
     def _():
         m = understand("Aur English mein likho", {}, "hinglish")
-        eq(m["intent"], "LANGUAGE_REQUEST")
+        eq(m["intent"], "TRANSLATE_REPLY",
+           "UPDATE 25: 'likho' translates ONE reply — it never permanently switches the language")
         eq(m["requested"], "en")
 
     @t("u20-lang: 'English mein message likh do' is writing, not a switch")
@@ -8737,6 +9123,324 @@ def main():
         eq(m["intent"], "BUSINESS_ACTION",
            "a pronoun delete is a financial action, never unknown")
 
+    # --- UPDATE 25 — AI voice + chat understanding. Voice caps and
+    #     quota follow the diagnosis (§A): real AI voice, 10 spoken
+    #     replies/day, midnight Pacific reset, short replies only.
+    #     Comprehension cases mirror the diagnosis §E.2 (C-1..C-18). ---
+    @t("u25-voice: caps — 10/day, 400 chars, 21 s gap, 4 voices, Kore default")
+    def _():
+        eq(AI_VOICE_DAILY_LIMIT, 10)
+        eq(AI_VOICE_SPOKEN_CAP_CHARS, 400)
+        eq(AI_VOICE_MIN_GAP_MS, 21000)
+        eq(AI_VOICE_DEFAULT_VOICE, "Kore")
+        eq(AI_VOICE_VOICES, ["Kore", "Puck", "Charon", "Fenrir"])
+        eq(VOICE_MIN_CONFIDENCE, 0.5)
+        eq(VOICE_DUPLICATE_WINDOW_MS, 5000)
+
+    @t("u25-voice: quota day resets at midnight Pacific")
+    def _():
+        # 2026-11-27 00:30 Pacific = 08:30 UTC.
+        ms = int(datetime(2026, 11, 27, 8, 30, tzinfo=timezone.utc).timestamp() * 1000)
+        eq(pacific_day(ms), "2026-11-27")
+        is_true(not is_new_day("2026-11-27", ms), "same Pacific day: no reset")
+        is_true(is_new_day("2026-11-26", ms), "yesterday's counter resets")
+        is_true(is_new_day("", ms), "no stored day: reset")
+        eq(quota_label(3), "AI awaz: 3/10")
+        eq(quota_label(10), "AI awaz: 10/10")
+
+    @t("u25-voice: long replies speak the first 2 sentences only")
+    def _():
+        long = ("Aaj Xerox ke 300 cash hue. UPI se 200 aaye. "
+                "Aur kal ke 200 bhi add karne hain, aur agent ko 100 dene hain, "
+                "aur printer ki servicing bhi karani hai.")
+        short = shorten_for_voice(long)
+        is_true("Aaj Xerox ke 300 cash hue." in short, "sentence 1 kept")
+        is_true("UPI se 200 aaye." in short, "sentence 2 kept")
+        is_true("kal ke 200" not in short, "sentence 3 dropped")
+        is_true("aage ka jawab aap chat mein padh sakte hain." in short,
+                "the rest is in chat, said plainly")
+        is_true(len(short) <= AI_VOICE_SPOKEN_CAP_CHARS + 60, "spoken text stays short")
+        eq(shorten_for_voice("Main badhiya hoon! Tum batao, aaj shop ka kaam kaisa chal raha hai?"),
+           "Main badhiya hoon! Tum batao, aaj shop ka kaam kaisa chal raha hai?")
+        eq(shorten_for_voice("   "), "")
+
+    @t("u25-voice: spoken text strips markdown, links and the rupee sign")
+    def _():
+        short = shorten_for_voice("Total **₹500** cash hua — details https://example.com/a par hain.")
+        is_true("₹" not in short, "no rupee sign in speech")
+        is_true("rupaye" in short, "rupaye spoken instead")
+        is_true("**" not in short, "no markdown in speech")
+        is_true("https://" not in short, "no raw link in speech")
+
+    @t("u25-voice: request JSON shape + audio extraction")
+    def _():
+        body = build_voice_json("Namaste, aaj ka hisab batao.", "Kore")
+        data = json.loads(body)
+        eq(data["input"][0]["content"][0]["annotations"][0]["type"], "speech_metadata")
+        eq(data["input"][0]["content"][0]["text"], "Namaste, aaj ka hisab batao.")
+        eq(data["response_format"]["type"], "audio")
+        eq(data["generation_config"]["speech_config"][0]["voice"], "Kore")
+        audio = "UklGRi" + "A" * 200
+        reply_json = '{"steps": [{"content": [{"type": "audio", "data": "%s"}]}]}' % audio
+        eq(extract_audio_base64(reply_json), audio)
+        eq(extract_audio_base64('{"steps": [{"content": [{"data": "short"}]}]}'), None)
+        eq(extract_audio_base64("{}"), None)
+
+    @t("u25-voice: honest lines — no key and quota finished")
+    def _():
+        is_true("Settings" in no_key_line("hinglish"), "no-key line guides to Settings")
+        is_true("kal subah" in quota_finished_line("hinglish"), "quota line names tomorrow")
+        is_true("phone ki awaz" not in quota_finished_line("hinglish"),
+                "quota line never promises the device voice")
+
+    @t("u25-c1: follow-up merges into the pending preview (04:27 IST sequence)")
+    def _():
+        s = Session()
+        r1 = s.send("Aaj Xerox ke 300 cash hue")
+        eq(r1["intent"], "action")
+        eq(len(r1["action"]["entries"]), 1)
+        r2 = s.send("Aur 200 UPI")
+        eq(r2["intent"], "action", "the follow-up merges, it does not save alone")
+        eq(len(r2["action"]["entries"]), 2, "both entries in one preview")
+        eq([e["amount"] for e in r2["action"]["entries"]], [30000, 20000])
+        eq([e["mode"] for e in r2["action"]["entries"]], ["CASH", "UPI"])
+        eq(len(s.saved_entries), 0, "nothing saved before the confirm")
+        r3 = s.send("Ha")
+        eq(len(s.saved_entries), 2, "BOTH entries saved on Ha")
+        eq(sum(e["amount"] for e in s.saved_entries), 50000)
+
+    @t("u25-c2: 'Ha aur 200 UPI bhi add kar do' is not swallowed as a confirm")
+    def _():
+        eq(strip_leading_yes("ha aur 200 upi bhi add kar do"), "aur 200 upi bhi add kar do")
+        eq(strip_leading_yes("ha"), "")
+        eq(strip_leading_yes("haan"), "")
+        eq(strip_leading_yes("aaj xerox ke 300 cash hue"), None)
+        eq(strip_leading_yes("nahi, 500 nahi 600 tha"), None)
+        s = Session()
+        s.send("Aaj Xerox ke 300 cash hue")
+        r = s.send("Ha aur 200 UPI bhi add kar do")
+        eq(r["intent"], "action", "yes+entry merges, it does not confirm")
+        eq(len(r["action"]["entries"]), 2)
+        eq(len(s.saved_entries), 0, "still nothing saved")
+        s.send("Ha")
+        eq(len(s.saved_entries), 2, "both saved on the real confirm")
+
+    @t("u25-c3: correction picks the right number (600 not 500)")
+    def _():
+        eq(correction_pair("nahi, 500 nahi 600 tha"), (50000, 60000))
+        eq(corrected_preview_amount("nahi, 500 nahi 600 tha"), 60000)
+        eq(corrected_preview_amount("nahi, 600 nahi 500 tha"), 50000)
+        eq(correction_pair("nahi 500 tha"), (50000, None))
+        s = Session()
+        s.send("Aaj Xerox ke 300 cash hue")
+        r = s.send("nahi, 500 nahi 600 tha")
+        eq(r["action"]["entries"][0]["amount"], 60000,
+           "the preview corrects to 600, never to the rejected 500")
+
+    @t("u25-c4: number words route ('do sau' = 200)")
+    def _():
+        kind, a = parse("do sau xerox cash hue", CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Action")
+        eq(a["entries"][0]["amount"], 20000)
+        eq(a["entries"][0]["mode"], "CASH")
+        kind, a = parse("teen sau printing upi hue", CTX, AGENTS, CUSTOMERS)
+        eq(a["entries"][0]["amount"], 30000)
+        eq(a["entries"][0]["mode"], "UPI")
+
+    @t("u25-c5: greeting must not hijack a question with profit in it")
+    def _():
+        kind, a = parse("Aaj su chale chhe, ketlo profit thayo?", CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Factual", "a profit question is factual, not casual")
+        r = respond("Kaise ho bhai", {}, EMPTY_SNAP)
+        eq(r["intent"], "casual_greeting")
+        is_true("Main badhiya hoon" in r["text"], "the greeting still works")
+
+    @t("u25-c6: no proactive module suggestion; explicit request still specs")
+    def _():
+        r = respond("Mujhe UIDAI portal par Aadhaar update kar do", {}, EMPTY_SNAP)
+        eq(r["intent"], "external_limit")
+        is_true("module request" not in r["text"], "never suggests asking for a module")
+        is_true("development request" not in r["text"], "never offers a dev request")
+        is_true("Aadhaar Services" in r["text"], "offers what BizKhata CAN do")
+        s = Session()
+        r = s.send("Aadhaar Mobile Number Update ka module bana do")
+        eq(r["intent"], "app_change_spec", "an EXPLICIT request still produces a spec")
+        r = s.send("Haan, banao")
+        eq(r["intent"], "app_change_queued")
+        eq(len(s.dev_requests), 1)
+
+    @t("u25-c7: key-status intent understood")
+    def _():
+        is_true(is_key_status_message("Mene Key Dal Di Starting Me"),
+                "the owner stating the key is in")
+        is_true(is_key_status_message("key dal di hai"),
+                "asking whether the key is saved")
+        is_true(not is_key_status_message("Aaj Xerox ke 300 cash hue"),
+                "an entry is not a key statement")
+        is_true(not is_key_status_message("key kya hai"),
+                "a how-to question is not a key statement")
+
+    @t("u25-c8: how to add the day's business ('dhadhe')")
+    def _():
+        kind, a = parse("Batana Nahi Hai Kaise Add Karu Dhadhe Ka", CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Help")
+        eq(a, "daily_report")
+        s = Session()
+        r = s.send("Batana Nahi Hai Kaise Add Karu Dhadhe Ka")
+        eq(r["intent"], "help")
+
+    @t("u25-c9: local general knowledge — Bharat's capital")
+    def _():
+        m = understand("Bharat ki rajdhani kya hai?", {}, "hinglish")
+        eq(m["intent"], "QUESTION_GENERAL")
+        eq(m["topic"], "gk_capital")
+        r = compose_local(m, {})
+        eq(r["intent"], "general")
+        is_true("New Delhi" in r["text"], "the capital answer, no key needed")
+
+    @t("u25-c10: internal transfer routes both directions")
+    def _():
+        kind, a = parse("1000 cash se UPI kar do", CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Action")
+        eq(a["kind"], "InternalTransfer")
+        eq(a["amount"], 100000)
+        eq(a["from"], "CASH")
+        kind, a = parse("500 upi se cash kar do", CTX, AGENTS, CUSTOMERS)
+        eq(a["amount"], 50000)
+        eq(a["from"], "UPI")
+
+    @t("u25-c11: multi-date entries keep their own day")
+    def _():
+        kind, a = parse("Aaj printing ke 150 cash hue, aur kal ke 200 upi bhi add kar do",
+                        CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Action")
+        eq(len(a["entries"]), 2)
+        eq(a["entries"][0]["amount"], 15000)
+        eq(a["entries"][0]["mode"], "CASH")
+        eq(a["entries"][0].get("day"), None, "today's entry keeps the action day")
+        eq(a["entries"][1]["amount"], 20000)
+        eq(a["entries"][1]["mode"], "UPI")
+        eq(a["entries"][1]["day"], TODAY - 1, "yesterday's entry is dated yesterday")
+        is_true("(kal)" in a["preview"], "the preview marks yesterday")
+        kind, a = parse("Kal ke 200 xerox cash hue", CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Clarify", "a lone kal still clarifies")
+        eq(a["missing"], ["date"])
+
+    @t("u25-c12: due split — received + due = total")
+    def _():
+        kind, a = parse("Rahul ne 200 cash diye, baaki 300 udhaar, Xerox ka kaam",
+                        CTX, AGENTS, CUSTOMERS)
+        eq(kind, "Action")
+        eq(a["kind"], "RecordCustomerDue")
+        eq(a["amount"], 50000, "total is received + due: 200 + 300")
+        eq(a["received"], 20000, "the received part is kept, not dropped")
+        eq(a["received_mode"], "CASH")
+        kind, a = parse("Rahul ka PAN Card ka kaam hai, 500 rupaye, 200 cash mile",
+                        CTX, AGENTS, CUSTOMERS)
+        eq(a["amount"], 50000)
+        eq(a["received"], 20000)
+
+    @t("u25-c13: 'likho' translates one reply; 'samjhao' switches")
+    def _():
+        m = understand("Aur English mein likho.", {}, "hinglish")
+        eq(m["intent"], "TRANSLATE_REPLY")
+        eq(m["requested"], "en")
+        r = compose_local(m, {})
+        eq(r["intent"], "translate_reply")
+        eq(r["requested"], "en")
+        m = understand("Mujhe English mein samjhao", {}, "hinglish")
+        eq(m["intent"], "LANGUAGE_REQUEST")
+        eq(m["requested"], "en")
+        r = compose_local(m, {})
+        eq(r["intent"], "language_request")
+        eq(r["requested"], "en")
+        m = understand("Mujhe Gujarati mein samjhao", {}, "hinglish")
+        eq(m["intent"], "LANGUAGE_REQUEST")
+        eq(m["requested"], "gu")
+        # With an active checklist, "likho" translates the checklist.
+        ctx = {"active_checklist": {"topic": "pan", "count": 5}}
+        m = understand("Aur English mein likho.", ctx, "hinglish")
+        r = compose_local(m, ctx)
+        eq(r["intent"], "checklist", "the checklist is translated, content preserved")
+
+    @t("u25-c14: Hinglish markers + low-confidence fallback")
+    def _():
+        eq(detect_language("Aur 200 UPI")["language"], "hinglish")
+        eq(detect_language("Mujhe samjhao")["language"], "hinglish")
+        eq(detect_language("Kaise Ho Bhai")["language"], "hinglish")
+        eq(detect_language("Aaje su chale chhe?")["language"], "gu")
+        bare = detect_language("300")
+        eq(bare["language"], "unknown")
+        eq(bare["confidence"], 0.0)
+        # A bare number keeps the conversation's last language.
+        s = Session()
+        s.ctx["last_language"] = "gu"
+        r = s.send("300")
+        eq(s.ctx["last_language"], "gu", "no flip on a number alone")
+
+    @t("u25-c15: cloud reply language check")
+    def _():
+        is_true(not is_wrong_language("Aaj Xerox ke 300 cash hue", "hinglish"),
+                "a Hinglish reply is fine")
+        is_true(not is_wrong_language("Aur 200 UPI", "hinglish"),
+                "short/mixed text is never flagged")
+        is_true(is_wrong_language("What is the total income today please tell me", "hinglish"),
+                "a confident English reply to a Hinglish chat is wrong-language")
+
+    @t("u25-c17: typed interrupt ('Bas, short mein batao')")
+    def _():
+        eq(strip_interrupt_prefix("Bas, short mein batao"), "")
+        eq(strip_interrupt_prefix("Bas, yeh batao kitna profit hua"),
+           "yeh batao kitna profit hua")
+        is_true(is_interrupt_only("Bas"))
+        eq(strip_interrupt_prefix("Aaj Xerox ke 300 cash hue"), None)
+        s = Session()
+        s.send("PAN card ke baare mein samjhao")
+        long_reply = s.messages[-1]["text"]
+        r = s.send("Bas, short mein batao")
+        eq(r["intent"], "shortened")
+        eq(r["text"], shorten_to_two_sentences(long_reply))
+        is_true(len(re.split(r"(?<=[.!?])\s+", r["text"])) <= 2,
+                "at most 2 sentences in the shortened reply")
+        r = s.send("Bas, yeh batao kitna profit hua")
+        eq(r["intent"], "factual", "the remainder is processed as the question")
+
+    @t("u25-c18: ordinal delete picks the shown order")
+    def _():
+        eq(ordinal_index("pehli wali entry hata do"), 0)
+        eq(ordinal_index("pehla wala delete kar do"), 0)
+        eq(ordinal_index("dusra wala delete kar do"), 1)
+        eq(ordinal_index("doosri entry delete kar do"), 1)
+        eq(ordinal_index("teesri entry delete kar do"), 2)
+        eq(ordinal_index("600 wali aadhaar entry delete kar do"), None)
+        eq(ordinal_index("isko remove kar do"), None)
+        s = Session()
+        s.snap["txs"] = [
+            {"id": 11, "category": "Xerox", "amount": 30000, "mode": "CASH"},
+            {"id": 12, "category": "Printing", "amount": 20000, "mode": "UPI"},
+            {"id": 13, "category": "Aadhaar Services", "amount": 60000, "mode": "UPI"},
+        ]
+        r = s.send("Dusra wala delete kar do")
+        eq(r["action"]["transaction_id"], 12, "the 2nd entry in the shown order")
+        r = s.send("Pehli wali entry hata do")
+        eq(r["action"]["transaction_id"], 11, "the 1st entry in the shown order")
+
+    @t("u25-regression: delete pronoun still resolves; greeting never Marathi")
+    def _():
+        ctx = {"day": TODAY, "last_saved_entry": {
+            "id": 7, "label": "Aadhaar Services ₹600 (UPI)",
+            "service_label": "Aadhaar Services", "amount": 60000, "mode": "UPI"}}
+        kind, a = parse("Isko remove kardo", ctx)
+        eq(kind, "Action")
+        eq(a["kind"], "DeleteTransaction")
+        eq(a["transaction_id"], 7)
+        kind, a = parse("Aadhaar 600 wali entry delete kar do", {})
+        eq(kind, "Clarify")
+        eq(a["missing"], ["exact entry"])
+        r = respond("Kaise Ho Bhai", {}, EMPTY_SNAP)
+        is_true("Main badhiya hoon" in r["text"], "greeting answered in Hinglish")
+        is_true("koi record nahi" not in r["text"].lower(), "never a no-records greeting")
+
     passed = 0
     failures = []
     lang_totals = {}
@@ -8775,6 +9479,7 @@ def main():
                           ("u21-multiturn-long", "UPDATE 21 long arcs (10-15 msgs)"),
                           ("u22-appchange", "UPDATE 22 app-change requests"),
                           ("u23-delete", "UPDATE 23 context-aware delete"),
+                          ("u25-", "UPDATE 25 AI voice + chat understanding"),
                           ("u20-ambiguous-fail", "UPDATE 20 ambiguous / failed / unavailable"),
                           ("regression-", "Classifier regression traces")):
         names = [n for n in outcomes if n.startswith(prefix)]

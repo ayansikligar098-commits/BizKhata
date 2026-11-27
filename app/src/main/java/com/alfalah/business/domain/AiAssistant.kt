@@ -1,5 +1,6 @@
 package com.alfalah.business.domain
 
+import com.alfalah.business.ui.components.formatRupees
 import java.security.MessageDigest
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -193,7 +194,13 @@ object AiAssistantParser {
         val serviceLabel: String,
         val amountPaise: Long,
         val mode: PaymentMode,
-        val description: String
+        val description: String,
+        /** UPDATE 25 (C-11): this entry's own day, for an explicit
+         *  multi-date message ("Aaj printing ke 150 hue, aur kal ke
+         *  200 bhi add kar do" — the ₹200 is yesterday's). Null =
+         *  the action's dayEpoch. The executor + duplicate check use
+         *  this, never the action day, when it is set. */
+        val dayEpoch: Long? = null
     )
 
     data class AiExpenseDraft(
@@ -323,7 +330,11 @@ object AiAssistantParser {
              *  the ViewModel executes a confirmed service add or saves
              *  the queued development request. */
             val appChangeSpec: AppChangeRequest? = null,
-            val appChangeConfirmed: Boolean = false
+            val appChangeConfirmed: Boolean = false,
+            /** UPDATE 25 (C-13): the language a TRANSLATE_REPLY
+             *  targets — the ViewModel translates the last reply into
+             *  it (never a profile switch). */
+            val requestedLanguage: AiLanguage? = null
         ) : AiParseResult
 
         /** Nothing understood — fall through to knowledge / built-in. */
@@ -479,6 +490,19 @@ object AiAssistantParser {
         else -> "Other" to null
     }
 
+    /** UPDATE 25 (C-18) — ordinal pick in a list the chat just
+     *  showed: pehli/pehla = 0, dusri/dusra/doosri/doosra = 1,
+     *  teesri/teesra = 2. Null = no ordinal in the message. The
+     *  ViewModel's bare-delete uses this so "Dusra wala delete kar
+     *  do" picks the 2nd entry in the SAME order the list is shown. */
+    fun ordinalIndex(q: String): Int? = when {
+        q.contains("pehli") || q.contains("pehla") -> 0
+        q.contains("dusri") || q.contains("dusra") ||
+            q.contains("doosri") || q.contains("doosra") -> 1
+        q.contains("teesri") || q.contains("teesra") -> 2
+        else -> null
+    }
+
     /** Split a multi-entry message into segments ("Xerox 300 cash, 200
      *  UPI aur Smart Card 500 cash" → 3 segments). A segment without a
      *  service inherits the previous segment's service; one without a
@@ -502,7 +526,7 @@ object AiAssistantParser {
     }
 
     fun canonicalDaily(entries: List<AiDailyEntry>): String =
-        entries.joinToString(";") { "${it.serviceLabel}:${it.amountPaise}:${it.mode}" }
+        entries.joinToString(";") { "${it.serviceLabel}:${it.amountPaise}:${it.mode}:${it.dayEpoch ?: ""}" }
 
     // ------------------------------------------------------------------
     // Main parse.
@@ -521,8 +545,13 @@ object AiAssistantParser {
         // carries no language signal (e.g. a bare "300"), the last
         // language from the conversation context is kept.
         val detected = Multilingual.detectLanguage(rawText)
-        val lang = if (detected.language != AiLanguage.UNKNOWN) detected.language
-            else context.lastLanguage
+        // UPDATE 25 (C-14): a weak detection (confidence ≤ 0.5 — one
+        // stray token, or a number with "upi"/"cash") must NOT flip
+        // the reply language. Keep the conversation's last language;
+        // only a confident detection switches it.
+        val lang = if (detected.language != AiLanguage.UNKNOWN && detected.confidence > 0.5) {
+            detected.language
+        } else context.lastLanguage
 
         // --- UPDATE 14/15/16: understand the actual meaning FIRST.
         //     Casual / statement / plan / general / language-switch /
@@ -537,6 +566,7 @@ object AiAssistantParser {
         when (meaning.intent) {
             ConversationIntent.CASUAL, ConversationIntent.STATEMENT,
             ConversationIntent.PLAN, ConversationIntent.LANGUAGE_REQUEST,
+            ConversationIntent.TRANSLATE_REPLY,
             ConversationIntent.CHECKLIST, ConversationIntent.QUESTION_GENERAL,
             ConversationIntent.ACCEPT_OFFER, ConversationIntent.OFFER_DECLINED,
             ConversationIntent.APP_CHANGE, ConversationIntent.DO_IT_SUMMARY -> {
@@ -551,7 +581,8 @@ object AiAssistantParser {
                     checklistTopic = reply.checklistTopic,
                     checklistCount = reply.checklistCount,
                     appChangeSpec = reply.appChangeSpec,
-                    appChangeConfirmed = reply.appChangeConfirmed
+                    appChangeConfirmed = reply.appChangeConfirmed,
+                    requestedLanguage = reply.requestedLanguage
                 )
             }
             else -> { /* business / help / navigation: existing pipeline */ }
@@ -602,8 +633,16 @@ object AiAssistantParser {
         }
 
         // --- "Kal" (yesterday/tomorrow) is ambiguous — never guess a date.
+        // UPDATE 25 (C-11): EXCEPT an explicit multi-date message —
+        // "Aaj printing ke 150 hue, aur kal ke 200 bhi add kar do"
+        // names both days with an amount each, so each entry is dated
+        // by its own words in parseDailyEntries instead of the whole
+        // message becoming a date question (which used to drop BOTH
+        // entries). A lone "kal" still clarifies, as before.
         val dayEpoch = context.dayEpoch
-        if (Regex("\\bkal\\b").containsMatchIn(q)) {
+        val multiDate = Regex("\\bkal\\b").containsMatchIn(q) && q.contains("aaj") &&
+            findMoneyHits(q).size >= 2
+        if (Regex("\\bkal\\b").containsMatchIn(q) && !multiDate) {
             return AiParseResult.Clarify(
                 MultilingualReplies.get(lang, "kal"),
                 missing = listOf("date")
@@ -732,6 +771,9 @@ object AiAssistantParser {
             q.contains("agent") -> "agent_payment"
             q.contains("receipt") || q.contains("rasid") || q.contains("bill") -> "receipt"
             q.contains("daily") || q.contains("report") -> "daily_report"
+            // UPDATE 25 (C-8): "Kaise add karu dhadhe ka" — the day's
+            // business, spelled the owner's way.
+            q.contains("dhandha") || q.contains("dhadhe") || q.contains("dhande") -> "daily_report"
             q.contains("profile") -> "change_profile"
             q.contains("service") && (q.contains("add") || q.contains("new")) -> "new_service"
             q.contains("language") || q.contains("bhasha") -> "language"
@@ -862,13 +904,21 @@ object AiAssistantParser {
                 return@forEachIndexed
             }
             if (mode == null) missingMode = true
+            // UPDATE 25 (C-11): this entry's own day, from the words
+            // around ITS amount — "kal ke 200" in a multi-date message
+            // is yesterday's entry (dayEpoch - 1). The "aaj" entries
+            // keep the action day (null here = action's dayEpoch).
+            val entryDay = if ((headText + " " + tailText).contains("kal")) {
+                context.dayEpoch - 1
+            } else null
             entries.add(
                 AiDailyEntry(
                     service = service,
                     serviceLabel = label,
                     amountPaise = hit.amountPaise,
                     mode = mode ?: PaymentMode.CASH, // placeholder; clarified below
-                    description = "AI entry: $label ${formatRupees(hit.amountPaise)}"
+                    description = "AI entry: $label ${formatRupees(hit.amountPaise)}",
+                    dayEpoch = entryDay
                 )
             )
             currentService = service
@@ -898,14 +948,21 @@ object AiAssistantParser {
             )
         }
         val action = AiAction.DailyEntries(entries, context.dayEpoch)
-        return AiParseResult.Action(action, previewDaily(entries, lang))
+        return AiParseResult.Action(action, previewDaily(entries, lang, context.dayEpoch))
     }
 
-    /** Preview text for a daily-entries action (shown before confirm). */
-    fun previewDaily(entries: List<AiDailyEntry>, lang: AiLanguage = AiLanguage.HINGLISH): String = buildString {
+    /** Preview text for a daily-entries action (shown before confirm).
+     *  UPDATE 25 (C-11): an entry dated yesterday is marked "(kal)"
+     *  so the preview shows which day each entry belongs to. */
+    fun previewDaily(
+        entries: List<AiDailyEntry>,
+        lang: AiLanguage = AiLanguage.HINGLISH,
+        todayEpoch: Long = 0L
+    ): String = buildString {
         appendLine(MultilingualReplies.get(lang, "previewHeader"))
         entries.forEach {
-            appendLine("• ${it.serviceLabel} ${formatRupees(it.amountPaise)} ${it.mode.name}")
+            val dayNote = if (todayEpoch != 0L && it.dayEpoch != null && it.dayEpoch != todayEpoch) " (kal)" else ""
+            appendLine("• ${it.serviceLabel} ${formatRupees(it.amountPaise)} ${it.mode.name}$dayNote")
         }
         appendLine(MultilingualReplies.get(lang, "totalLine", "total" to formatRupees(entries.sumOf { it.amountPaise })))
     }
@@ -1099,14 +1156,23 @@ object AiAssistantParser {
         // received). If the split is impossible (received > total and no
         // due-word), ask instead of guessing.
         val amounts = findAmounts(q)
-        val receivedMarker = Regex("\\b(mile|mila|mil gaye|mil gaya)\\b").containsMatchIn(q)
+        // UPDATE 25 (C-12): "Ramesh ne 200 diye, baaki 300 udhaar" —
+        // the amount next to "diye/diya" is the RECEIVED part and the
+        // amount next to "baaki/udhaar" is the DUE (total = 200 + 300
+        // = 500). The old code only recognised mile/mila as a
+        // received marker, so the ₹200 was silently dropped and the
+        // ₹300 was recorded as the whole due.
+        val dueWordHere = q.contains("baaki") || q.contains("baki") ||
+            q.contains("due") || q.contains("pending")
+        val receivedMarker = Regex("\\b(mile|mila|mil gaye|mil gaya)\\b").containsMatchIn(q) ||
+            (dueWordHere && Regex("\\b(diye|diya)\\b").containsMatchIn(q))
         var totalPaise = rupeesToPaise(amount)
         var receivedPaise = 0L
         var splitImpossible = false
         var receivedRupees = 0
         if (amounts.size >= 2 && receivedMarker) {
             val received = amounts.find { a ->
-                Regex("\\b$a\\s*(?:rs\\.?|rupaye|rupee|rupay)?\\s*(?:mile|mila|mil gaye|mil gaya)\\b")
+                Regex("\\b$a\\s*(?:rs\\.?|rupaye|rupee|rupay)?\\s*(?:mile|mila|mil gaye|mil gaya|diye|diya)\\b")
                     .containsMatchIn(q)
             } ?: amounts.minOrNull()!!
             receivedRupees = received
@@ -1383,15 +1449,75 @@ object AiAssistantParser {
             n.contains("rehne do")
     }
 
+    /** UPDATE 25 (C-3) — the (old, new) amount pair of a correction
+     *  ("300 galat the, 250 hone chahiye" → old 300, new 250;
+     *  "nahi, 500 nahi 600 tha" → old 500, new 600). The number
+     *  attached to "galat"/"nahi" is the REJECTED (old) value; the
+     *  other number is the correction. Without a rejection marker
+     *  ("300 wali entry ko 350 karo") the first number is the old
+     *  one, the second the new one. A single number is the old one
+     *  with no new amount yet. Amounts are paise. */
+    fun correctionPair(q: String): Pair<Long?, Long?> {
+        val n = normalise(q)
+        val numbers = Regex("\\d+(?:\\.\\d+)?").findAll(n)
+            .map { it.value.toBigDecimal().toLong() }.toList()
+        if (numbers.isEmpty()) return null to null
+        if (numbers.size == 1) return rupeesToPaise(numbers[0]) to null
+        val rejected = mutableSetOf<Long>()
+        Regex("(\\d+(?:\\.\\d+)?)\\s*(?:nahi|nahin|galat)\\b").findAll(n)
+            .forEach { rejected.add(it.groupValues[1].toBigDecimal().toLong()) }
+        val old = numbers.firstOrNull { it in rejected } ?: numbers[0]
+        val new = numbers.firstOrNull { it != old } ?: numbers.last()
+        return rupeesToPaise(old) to rupeesToPaise(new)
+    }
+
+    /** UPDATE 25 (C-2) — strip a leading yes ("haan, / ha / yes /
+     *  ok / theek hai") from a message that carries MORE content
+     *  ("Haan, aur Xerox 300 cash hue"). Returns the remainder, ""
+     *  when the whole message IS just a yes (possibly with trailing
+     *  punctuation), or null when the message does not start with a
+     *  yes at all. The caller must never treat a yes+content message
+     *  as a bare confirm — the content is a real instruction. */
+    fun stripLeadingYes(q: String): String? {
+        val n = normalise(q).trim()
+        val yes = Regex("^(haan|ha+|yes|yep|ok|okay|theek hai|bilkul|ji haan)[\\s,.!]*")
+        val m = yes.find(n) ?: return null
+        return n.substring(m.value.length).trim()
+    }
+
+    /** UPDATE 25 (C-7) — a key-status statement ("Mene Key Dal Di
+     *  Starting Me", "Key save hai?"): the user is STATING that the
+     *  key was entered, or ASKING whether it is saved. The caller
+     *  answers from the device's actual key state — never displays
+     *  the key, never tells the user to enter a key they just
+     *  entered. A how-to question ("key kahan dalu") is NOT this —
+     *  it has no "dal di / save hai" statement in it. */
+    fun isKeyStatusMessage(q: String): Boolean {
+        val n = normalise(q)
+        if (!n.contains("key")) return false
+        return listOf(
+            "key dal di", "key daal di", "key dal diya", "key daal diya",
+            "key add kar di", "key add ki", "key save kar di",
+            "key save hai", "key dal gayi", "key daal gayi",
+            "key dal di hai", "key daal di hai", "api key dal di"
+        ).any { n.contains(it) }
+    }
+
     /** UPDATE 20 — "Nahi, 500 the" corrects the pending preview's
      *  amount, it does not cancel it. A number + a correction marker
      *  (nahi/no/galat/the/tha/thi), and NOT a follow-up add ("aur" /
-     *  "bhi" / "add" belongs to the merge path). Returns paise or null. */
+     *  "bhi" / "add" belongs to the merge path). Returns paise or null.
+     *  UPDATE 25 (C-3): the number attached to "nahi"/"galat" is the
+     *  REJECTED value, never the correction — "nahi, 500 nahi 600
+     *  tha" corrects to ₹600, not ₹500 (the old code took the
+     *  largest amount, which is wrong when the rejected number is
+     *  the larger one: "nahi, 600 nahi 500 tha" must correct to
+     *  ₹500). */
     fun correctedPreviewAmount(q: String): Long? {
         val n = normalise(q)
         if (n.contains("aur") || n.contains("bhi") || n.contains("add")) return null
         if (!Regex("\\b(no|nahi|galat|the|tha|thi|actually|matlab)\\b").containsMatchIn(n)) return null
-        return mainAmount(n)?.let { rupeesToPaise(it) }
+        return correctionPair(n).second ?: mainAmount(n)?.let { rupeesToPaise(it) }
     }
 
     /** A bare follow-up amount ("Aur 200 UPI bhi add kar do") — same

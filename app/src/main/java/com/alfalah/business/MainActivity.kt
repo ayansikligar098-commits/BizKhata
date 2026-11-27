@@ -85,6 +85,7 @@ import androidx.navigation.compose.rememberNavController
 import com.alfalah.business.data.ChatHistoryStore
 import com.alfalah.business.data.SettingsStore
 import com.alfalah.business.data.entity.BusinessProfileEntity
+import com.alfalah.business.domain.AiVoiceConfig
 import com.alfalah.business.domain.AppLanguage
 import com.alfalah.business.domain.Branding
 import com.alfalah.business.domain.BusinessCategory
@@ -96,6 +97,7 @@ import com.alfalah.business.ui.auth.AuthScreen
 import com.alfalah.business.ui.cashbook.CashBookScreen
 import com.alfalah.business.ui.cashbook.DifferenceFinderScreen
 import com.alfalah.business.ui.chatbot.ChatbotScreen
+import com.alfalah.business.ui.chatbot.ChatbotViewModel
 import com.alfalah.business.ui.dashboard.DashboardScreen
 import com.alfalah.business.ui.dashboard.DashboardViewModel
 import com.alfalah.business.ui.dailybusiness.DailyBusinessScreen
@@ -151,7 +153,13 @@ class MainActivity : ComponentActivity() {
             val aiKey by settings.aiKey.collectAsState(initial = "")
             val aiLanguagePref by settings.aiLanguagePref.collectAsState(initial = "AUTO")
             val voiceResponsesEnabled by settings.voiceResponsesEnabled.collectAsState(initial = true)
-            val voiceSpeechRate by settings.voiceSpeechRate.collectAsState(initial = 1.0f)
+            // UPDATE 25: the AI voice pick + today's usage (the
+            // counter resets at midnight Pacific; a stored date from
+            // an earlier day means 0 used today).
+            val voiceName by settings.voiceName.collectAsState(initial = AiVoiceConfig.DEFAULT_VOICE)
+            val voiceUsedCount by settings.voiceUsedCount.collectAsState(initial = 0)
+            val voiceUsedDate by settings.voiceUsedDate.collectAsState(initial = "")
+            val voiceUsedToday = if (AiVoiceConfig.isNewDay(voiceUsedDate, System.currentTimeMillis())) 0 else voiceUsedCount
             val voiceContinuousMode by settings.voiceContinuousMode.collectAsState(initial = false)
             var unlocked by remember { mutableStateOf(false) }
 
@@ -583,6 +591,18 @@ class MainActivity : ComponentActivity() {
                                 }
                                 composable(Routes.SETTINGS) {
                                     val profile = activeProfile ?: return@composable
+                                    // UPDATE 25: the voice hear-test runs
+                                    // through a ChatbotViewModel scoped to
+                                    // this destination (same profile /
+                                    // settings / history as the chat
+                                    // screen's own instance; the quota is
+                                    // enforced atomically in SettingsStore,
+                                    // so two instances cannot overspend).
+                                    val chatbotVm: ChatbotViewModel = viewModel(
+                                        factory = vmFactory { ChatbotViewModel(profile.id, app.repository, settings, chatHistory) }
+                                    )
+                                    val voiceTestAudio by chatbotVm.voiceTestAudio.collectAsState()
+                                    val voiceTestError by chatbotVm.voiceTestError.collectAsState()
                                     SettingsScreen(
                                         profileId = profile.id,
                                         language = language,
@@ -601,8 +621,13 @@ class MainActivity : ComponentActivity() {
                                         onAiLanguagePref = { code -> scope.launch { settings.setAiLanguagePref(code) } },
                                         voiceResponsesEnabled = voiceResponsesEnabled,
                                         onVoiceResponsesEnabled = { enabled -> scope.launch { settings.setVoiceResponsesEnabled(enabled) } },
-                                        voiceSpeechRate = voiceSpeechRate,
-                                        onVoiceSpeechRate = { rate -> scope.launch { settings.setVoiceSpeechRate(rate) } },
+                                        voiceName = voiceName,
+                                        onVoiceName = { name -> scope.launch { settings.setVoiceName(name) } },
+                                        voiceUsedToday = voiceUsedToday,
+                                        voiceTestAudio = voiceTestAudio,
+                                        voiceTestError = voiceTestError,
+                                        onVoiceTest = { name -> chatbotVm.testVoice(name) },
+                                        onClearVoiceTest = { chatbotVm.clearVoiceTestAudio() },
                                         voiceContinuousMode = voiceContinuousMode,
                                         onVoiceContinuousMode = { enabled -> scope.launch { settings.setVoiceContinuousMode(enabled) } }
                                     )

@@ -104,8 +104,11 @@ enum class ConversationIntent {
     /** App-change request (UPDATE 22): "module bana do", "naya
      *  service add karo", "report create karo" … — a proposed change
      *  to BizKhata itself. Spec → confirm → queued development
-     *  request. NEVER a financial action, NEVER a portal deflection. */
-    APP_CHANGE,
+     *  request. NEVER a financial action, NEVER a portal deflection.
+     *  UPDATE 25 (C-13): "… mein likho" is NOT a switch — it is a
+     *  one-off translation of the last reply (TRANSLATE_REPLY).
+     *  Only "… mein baat karo / samjhao" switches the language. */
+    TRANSLATE_REPLY,
     DO_IT_SUMMARY,
     UNKNOWN
 }
@@ -161,7 +164,11 @@ data class LocalReply(
     val checklistCount: Int? = null,
     /** UPDATE 22 — the proposed app change (spec / confirmed). */
     val appChangeSpec: AiAssistantParser.AppChangeRequest? = null,
-    val appChangeConfirmed: Boolean = false
+    val appChangeConfirmed: Boolean = false,
+    /** UPDATE 25 (C-13): the language a TRANSLATE_REPLY targets —
+     *  carried to the ViewModel so it translates the last reply
+     *  into that language (never a profile switch). */
+    val requestedLanguage: AiLanguage? = null
 )
 
 object MeaningParser {
@@ -313,11 +320,22 @@ object MeaningParser {
 
         // 1. Language request — "Mujhe Gujarati mein samjhao" /
         //    "ગુજરાતીમાં મારી સાથે વાત કરો" — switches immediately.
-        languageRequest(rawText, lowerRaw)?.let { requested ->
-            return Meaning(
-                ConversationIntent.LANGUAGE_REQUEST, "language", null, null, null,
-                rawText, q, lang, requested
-            )
+        //    UPDATE 25 (C-13): "Aur English mein likho" is a
+        //    TRANSLATE (one-off, last reply only) — it never switches
+        //    the profile language. Only "… mein baat karo / samjhao"
+        //    is a real switch.
+        languageRequestForm(rawText, lowerRaw)?.let { (requested, translateOnly) ->
+            return if (translateOnly) {
+                Meaning(
+                    ConversationIntent.TRANSLATE_REPLY, "language", null, null, null,
+                    rawText, q, lang, requested
+                )
+            } else {
+                Meaning(
+                    ConversationIntent.LANGUAGE_REQUEST, "language", null, null, null,
+                    rawText, q, lang, requested
+                )
+            }
         }
 
         // 1b. App-change request (UPDATE 22) — "module bana do",
@@ -396,8 +414,13 @@ object MeaningParser {
         }
 
         // 7. Casual conversation — strict patterns + no business signal.
+        // UPDATE 25 (C-5): a greeting must never hijack a question
+        // that also asks about the business ("Aaj su chale chhe,
+        // ketlo profit thayo?", "Kaise ho, aaj ka total kitna hai?").
+        // A business question in the same message wins — the greeting
+        // is answered along with the figures, never instead of them.
         val casualTopic = casualTopic(q, lowerRaw)
-        if (casualTopic != null && !hasMoneySignal(q)) {
+        if (casualTopic != null && !hasMoneySignal(q) && !isBusinessQuestion(q)) {
             return Meaning(ConversationIntent.CASUAL, casualTopic, timeRef, null, null, rawText, q, lang)
         }
 
@@ -517,7 +540,15 @@ object MeaningParser {
      *  by "mein likho" and the message is short. "English mein
      *  message likh do" is a WRITING request, not a switch, and must
      *  NOT land here. */
-    fun languageRequest(rawText: String, lowerRaw: String): AiLanguage? {
+    fun languageRequest(rawText: String, lowerRaw: String): AiLanguage? =
+        languageRequestForm(rawText, lowerRaw)?.first
+
+    /** UPDATE 25 (C-13): like languageRequest, but also says whether
+     *  the message is a one-off "… mein likho" (translate THIS reply
+     *  only — second = true) or a real switch ("… mein baat karo /
+     *  samjhao / bolo" — second = false). "Aur English mein likho"
+     *  never permanently switches the language. */
+    fun languageRequestForm(rawText: String, lowerRaw: String): Pair<AiLanguage, Boolean>? {
         val asksLanguage = lowerRaw.contains("samjhao") || lowerRaw.contains("samjhaao") ||
             lowerRaw.contains("bolo") || lowerRaw.contains("baat karo") ||
             lowerRaw.contains("vaat karo") || lowerRaw.contains("mein baat") ||
@@ -533,13 +564,14 @@ object MeaningParser {
                         lowerRaw.contains("${name.lowercase()} me likho") ||
                         rawText.contains("$name में लिखो") || rawText.contains("$name मे लिखो")
                 }
-                if (hit != null) return hit.second
+                if (hit != null) return hit.second to true
             }
             return null
         }
-        return languageNames.firstOrNull { (name, _) ->
+        val hit = languageNames.firstOrNull { (name, _) ->
             lowerRaw.contains(name.lowercase()) || rawText.contains(name)
-        }?.second
+        } ?: return null
+        return hit.second to false
     }
 
     // BUG A (UPDATE 20) — the "bana do" space bug, mirrored from the
@@ -699,10 +731,18 @@ object MeaningParser {
         val writeWords = q.contains("kha likhu") || q.contains("kahan likhu") ||
             q.contains("kaha likhu") || q.contains("kahan likh") ||
             q.contains("kha likh") || q.contains("kahan likhun") ||
-            q.contains("kha likhun") || q.contains("where do i write")
+            q.contains("kha likhun") || q.contains("where do i write") ||
+            // UPDATE 25 (C-8): "Kaise Add Karu" — how to add the
+            // day's business — is the same where-to-write question,
+            // even without "kahan likhu" in it.
+            q.contains("kaise add karu") || q.contains("kaise add karun") ||
+            q.contains("kaise likhu") || q.contains("kaise likhun") ||
+            q.contains("kaise add kar") || q.contains("add karu")
         val businessRef = q.contains("dhandha") || q.contains("business") ||
             q.contains("dukaan") || q.contains("dukan") || q.contains("shop") ||
-            q.contains("kamai") || q.contains("collection")
+            q.contains("kamai") || q.contains("collection") ||
+            // "dhadhe" / "dhande" — the owner's spelling of "dhandhe".
+            q.contains("dhadhe") || q.contains("dhande")
         return writeWords && businessRef
     }
 
@@ -830,6 +870,11 @@ object MeaningParser {
      *  Returns null for anything else — the caller must then use the
      *  cloud AI or answer honestly, never invent. */
     fun generalTopic(q: String, lowerRaw: String): String? {
+        // UPDATE 25 (C-9): basic general knowledge the local engine
+        // can genuinely answer without a key — India's capital.
+        // Anything else still needs the cloud (never invented).
+        if (q.contains("rajdhani") || (q.contains("capital") &&
+                (q.contains("bharat") || q.contains("india")))) return "gk_capital"
         if (q.contains("pan card") || q.contains("pan ke baare")) return "pan_explainer"
         if (q.contains("aadhaar") || q.contains("aadhar")) return "aadhaar_explainer"
         if (q.contains("voter")) return "voter_explainer"
@@ -2091,6 +2136,19 @@ object ConversationEngine {
             ConversationIntent.STATEMENT -> composeStatement(meaning, context, seed)
             ConversationIntent.PLAN -> composePlan(meaning, context, seed)
             ConversationIntent.LANGUAGE_REQUEST -> composeLanguageRequest(meaning, context)
+            ConversationIntent.TRANSLATE_REPLY -> {
+                // UPDATE 25 (C-13): "Aur English mein likho" is a
+                // one-off translation, never a profile switch. With an
+                // active checklist it translates the CHECKLIST (content
+                // preserved, same as a language request); otherwise the
+                // ViewModel translates the last reply via the cloud —
+                // or says honestly it needs the key.
+                if (context.activeChecklist != null) {
+                    composeLanguageRequest(meaning, context)
+                } else {
+                    LocalReply("", "translate_reply", requestedLanguage = meaning.requestedLanguage)
+                }
+            }
             ConversationIntent.CHECKLIST -> composeChecklist(meaning, context)
             ConversationIntent.ACCEPT_OFFER -> {
                 // UPDATE 20 (BUG A) — a bare "Ha" / "Bana do" while a
@@ -2239,7 +2297,7 @@ object ConversationEngine {
         }
         val text = ConversationReplies.get(requested, "languageConfirm")
             .replace("{language}", requested.nativeName)
-        return LocalReply(text, "language_request")
+        return LocalReply(text, "language_request", requestedLanguage = requested)
     }
 
     /** UPDATE 22 — app-change spec / confirm. Unconfirmed: show the
@@ -2311,10 +2369,18 @@ object ConversationEngine {
             }
         }
         return when (lang) {
-            AiLanguage.ENGLISH -> "I cannot $action — I have no access to UIDAI or any government portal, and I cannot submit anything on your behalf. What I can do is track your shop's work in BizKhata — ask me for the module and I will make a spec and save a development request for it."
-            AiLanguage.HINDI -> "मैं $action नहीं कर सकता — मेरे पास UIDAI या किसी government portal का access नहीं है, और मैं तुम्हारे behalf पर submit नहीं कर सकता। जो मैं कर सकता हूँ: तुम्हारे दुकान के काम को BizKhata में track करना — उसके लिए module request करो तो मैं spec बना कर development request save कर दूँगा।"
-            AiLanguage.GUJARATI -> "Hu $action nahi kari shaku — mara paase UIDAI ke kai government portal no access nathi, ane hu tamara behalf par submit nahi kari shaku. Je hu kari shaku chhu: tamara dukaan nu kaam BizKhata ma track karvu — tena mate module request karo to hu spec banavi ne development request save kari daish."
-            else -> "Main $action nahi kar sakta — mere paas UIDAI ya kisi government portal ka access nahi hai, aur main tumhare behalf par submit nahi kar sakta. Jo main kar sakta hoon: tumhare dukaan ke kaam ko BizKhata mein track karna — uske liye module request karo to main spec bana kar development request save kar dunga."
+            // UPDATE 25 (C-6): the old trailing offer — "ask me for
+            // the module and I will make a spec and save a development
+            // request for it" — is REMOVED. It proactively told the
+            // user to ask for the cancelled "Aadhaar Mobile Number
+            // Update" module. The replacement names what BizKhata CAN
+            // do (track the work in Aadhaar Services) and never
+            // suggests asking for a module. An EXPLICIT module request
+            // is still handled by AppChangeSpecBuilder (UPDATE 20).
+            AiLanguage.ENGLISH -> "I cannot $action — I have no access to UIDAI or any government portal, and I cannot submit anything on your behalf. What I can do is track your shop's work in BizKhata — you can track the work in Aadhaar Services, with entries and dues recorded there."
+            AiLanguage.HINDI -> "मैं $action नहीं कर सकता — मेरे पास UIDAI या किसी government portal का access नहीं है, और मैं तुम्हारे behalf पर submit नहीं कर सकता। जो मैं कर सकता हूँ: तुम्हारे दुकान के काम को BizKhata में track करना — Aadhaar Services में entries और due track कर सकते हो।"
+            AiLanguage.GUJARATI -> "Hu $action nahi kari shaku — mara paase UIDAI ke kai government portal no access nathi, ane hu tamara behalf par submit nahi kari shaku. Je hu kari shaku chhu: tamara dukaan nu kaam BizKhata ma track karvu — Aadhaar Services ma entries ane due track kari shako chho."
+            else -> "Main $action nahi kar sakta — mere paas UIDAI ya kisi government portal ka access nahi hai, aur main tumhare behalf par submit nahi kar sakta. Jo main kar sakta hoon: tumhare dukaan ke kaam ko BizKhata mein track karna — Aadhaar Services mein entries aur due track kar sakte ho."
         }
     }
 
@@ -2497,10 +2563,21 @@ object ConversationEngine {
             "writing" -> writingHelp(lang)
             "translation" -> translationHelp(meaning, lang)
             "calculation" -> calculate(meaning, lang)
+            // UPDATE 25 (C-9): a basic fact the local engine can
+            // genuinely answer — Bharat's capital — in the user's
+            // own language. No key needed, nothing invented.
+            "gk_capital" -> gkCapitalAnswer(lang)
             "live_info" -> null
             "general_explain" -> null
             else -> null
         }
+    }
+
+    private fun gkCapitalAnswer(lang: AiLanguage): String = when (lang) {
+        AiLanguage.ENGLISH -> "Bharat ki rajdhani New Delhi hai."
+        AiLanguage.HINDI -> "भारत की राजधानी New Delhi है।"
+        AiLanguage.GUJARATI -> "Bharat ni rajdhani New Delhi chhe."
+        else -> "Bharat ki rajdhani New Delhi hai."
     }
 
     private fun explainer(lang: AiLanguage, hinglish: String, english: String, hindi: String, gujarati: String): String =
@@ -2969,7 +3046,7 @@ object ConversationMemory {
                     )
                 }
             }
-            ConversationIntent.LANGUAGE_REQUEST -> {
+            ConversationIntent.LANGUAGE_REQUEST, ConversationIntent.TRANSLATE_REPLY -> {
                 // A translate (active checklist) keeps the pending
                 // question (website KEEP_QUESTION includes
                 // checklist_translate); the offer itself expires. A

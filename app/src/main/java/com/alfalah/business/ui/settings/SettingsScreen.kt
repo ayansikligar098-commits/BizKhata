@@ -19,20 +19,25 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.alfalah.business.data.SettingsStore
 import com.alfalah.business.data.entity.BusinessProfileEntity
 import com.alfalah.business.domain.AiLanguage
+import com.alfalah.business.domain.AiVoiceConfig
 import com.alfalah.business.domain.AppLanguage
 import com.alfalah.business.domain.Branding
 import com.alfalah.business.navigation.Routes
+import com.alfalah.business.ui.chatbot.VoiceTestPlayer
 import com.alfalah.business.ui.components.BizCard
 import com.alfalah.business.ui.theme.BizColors
 
@@ -59,14 +64,20 @@ fun SettingsScreen(
     onClearAiKey: () -> Unit = {},
     aiLanguagePref: String = "AUTO",
     onAiLanguagePref: (String) -> Unit = {},
-    // UPDATE 18 — voice: spoken replies on/off, speech rate, and
-    // continuous conversation mode. Voice uses the phone's own speech
-    // services; the conversational intelligence is the same as text
-    // chat. No audio is ever stored.
+    // UPDATE 25 — voice: spoken replies on/off, the AI voice pick,
+    // and continuous conversation mode. Spoken replies use the real
+    // AI voice (never the phone's voice); the voice is rationed to 10
+    // spoken replies per day (visible counter), and the picker lets
+    // the owner hear each voice and choose. No audio is ever stored.
     voiceResponsesEnabled: Boolean = true,
     onVoiceResponsesEnabled: (Boolean) -> Unit = {},
-    voiceSpeechRate: Float = 1.0f,
-    onVoiceSpeechRate: (Float) -> Unit = {},
+    voiceName: String = AiVoiceConfig.DEFAULT_VOICE,
+    onVoiceName: (String) -> Unit = {},
+    voiceUsedToday: Int = 0,
+    voiceTestAudio: ByteArray? = null,
+    voiceTestError: String? = null,
+    onVoiceTest: (String) -> Unit = {},
+    onClearVoiceTest: () -> Unit = {},
     voiceContinuousMode: Boolean = false,
     onVoiceContinuousMode: (Boolean) -> Unit = {}
 ) {
@@ -80,6 +91,18 @@ fun SettingsScreen(
     var showAiLanguage by remember { mutableStateOf(false) }
     var showVoice by remember { mutableStateOf(false) }
     var aiKeyInput by remember { mutableStateOf("") }
+
+    // UPDATE 25: the "Suno" hear-test player — plays the test audio
+    // the ViewModel fetched for the picked voice. Released when
+    // Settings goes away; the test audio is cleared after it plays.
+    val voiceTestPlayer = remember { VoiceTestPlayer(context = LocalContext.current) }
+    LaunchedEffect(voiceTestAudio) {
+        if (voiceTestAudio != null) {
+            voiceTestPlayer.play(voiceTestAudio)
+            onClearVoiceTest()
+        }
+    }
+    DisposableEffect(Unit) { onDispose { voiceTestPlayer.release() } }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
@@ -122,15 +145,13 @@ fun SettingsScreen(
             val aiLangLabel = if (aiLanguagePref == "AUTO") "Auto — detects your language"
                 else AiLanguage.fromCode(aiLanguagePref).displayName
             SettingsRow("AI Assistant Language", "Current: $aiLangLabel") { showAiLanguage = true }
-            // UPDATE 18 — voice settings: spoken replies, speed,
+            // UPDATE 25 — voice settings: spoken replies (real AI
+            // voice), voice pick with hear-test, daily counter,
             // continuous mode. Mic permission is asked in the chat
             // screen when the mic is tapped, never here.
             val voiceLabel = (if (voiceResponsesEnabled) "Spoken replies ON" else "Spoken replies OFF (mute)") +
-                ", speed " + when (voiceSpeechRate) {
-                    0.8f -> "Slow"
-                    1.25f -> "Fast"
-                    else -> "Normal"
-                } + if (voiceContinuousMode) ", continuous ON" else ""
+                ", " + AiVoiceConfig.quotaLabel(voiceUsedToday) +
+                ", voice: $voiceName" + if (voiceContinuousMode) ", continuous ON" else ""
             SettingsRow("Voice Assistant", voiceLabel) { showVoice = true }
             SettingsRow("Audit Log", "Old → new values for every change") { onOpen(Routes.AUDIT_LOG) }
             SettingsRow("Recycle Bin", "Deleted jobs — restore them here") { onOpen(Routes.RECYCLE_BIN) }
@@ -210,14 +231,40 @@ fun SettingsScreen(
                             modifier = Modifier.weight(1f)
                         ) { Text(if (!voiceResponsesEnabled) "✓ OFF (mute)" else "OFF (mute)") }
                     }
-                    Text("Bolne ki speed", fontWeight = FontWeight.SemiBold)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf(0.8f to "Slow", 1.0f to "Normal", 1.25f to "Fast").forEach { (rate, label) ->
+                    // UPDATE 25: the spoken reply is a real AI voice —
+                    // never the phone's voice. Pick a voice and hear it
+                    // with "Suno" before choosing. A hear-test uses 1
+                    // of today's 10 spoken replies, same as a reply.
+                    Text("AI awaz (voice)", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        AiVoiceConfig.quotaLabel(voiceUsedToday) +
+                            " — roz 10 spoken replies milte hain; limit khatm ho jaye to jawab sirf text mein dikhega. " +
+                            "Counter har roz midnight Pacific par reset hota hai.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    AiVoiceConfig.VOICES.forEach { name ->
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
                             Button(
-                                onClick = { onVoiceSpeechRate(rate) },
+                                onClick = { onVoiceName(name) },
                                 modifier = Modifier.weight(1f)
-                            ) { Text(if (voiceSpeechRate == rate) "✓ $label" else label) }
+                            ) { Text(if (voiceName == name) "✓ $name" else name) }
+                            Button(
+                                onClick = { onVoiceTest(name) },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("Suno") }
                         }
+                    }
+                    if (voiceTestError != null) {
+                        Text(
+                            voiceTestError,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
                     }
                     Text("Continuous conversation", fontWeight = FontWeight.SemiBold)
                     Text(

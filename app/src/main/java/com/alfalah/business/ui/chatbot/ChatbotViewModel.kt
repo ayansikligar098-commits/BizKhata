@@ -12,6 +12,10 @@ import com.alfalah.business.domain.AccountingEngine
 import com.alfalah.business.domain.AiAssistantParser
 import com.alfalah.business.domain.AiLanguage
 import com.alfalah.business.domain.AiNavigation
+import com.alfalah.business.domain.AiVoiceClient
+import com.alfalah.business.domain.AiVoiceConfig
+import com.alfalah.business.domain.AiVoiceResult
+import com.alfalah.business.domain.AiVoiceText
 import com.alfalah.business.domain.AppHelpKnowledge
 import com.alfalah.business.domain.BuiltInChatbotResponder
 import com.alfalah.business.domain.BusinessKnowledge
@@ -30,6 +34,7 @@ import com.alfalah.business.domain.MeaningParser
 import com.alfalah.business.domain.Multilingual
 import com.alfalah.business.domain.MultilingualReplies
 import com.alfalah.business.domain.VoiceDecision
+import com.alfalah.business.domain.VoiceInterrupt
 import com.alfalah.business.domain.VoicePipeline
 import com.alfalah.business.domain.VoiceState
 import com.alfalah.business.domain.VoiceText
@@ -253,21 +258,40 @@ class ChatbotViewModel(
     private val _voiceResponsesEnabled = MutableStateFlow(true)
     val voiceResponsesEnabled: StateFlow<Boolean> = _voiceResponsesEnabled
 
-    private val _speechRate = MutableStateFlow(1.0f)
-    val speechRate: StateFlow<Float> = _speechRate
+    /** The picked AI voice (plain name, e.g. "Kore" — Settings → Voice). */
+    private val _voiceName = MutableStateFlow(AiVoiceConfig.DEFAULT_VOICE)
+    val voiceName: StateFlow<String> = _voiceName
 
-    private val _speechPitch = MutableStateFlow(1.0f)
-    val speechPitch: StateFlow<Float> = _speechPitch
+    /** AI-voice replies used today (Pacific day) — the visible counter
+     *  (chat + Settings → Voice). The limit is AiVoiceConfig.DAILY_LIMIT. */
+    private val _voiceUsedToday = MutableStateFlow(0)
+    val voiceUsedToday: StateFlow<Int> = _voiceUsedToday
 
     private val _continuousMode = MutableStateFlow(false)
     val continuousMode: StateFlow<Boolean> = _continuousMode
 
-    /** One spoken reply, in the reply language. The screen collects
-     *  these and speaks them with VoiceSpeaker (native TTS). */
-    data class VoiceSpeakRequest(val text: String, val languageTag: String)
+    /** One spoken reply, as real AI-voice audio. The screen plays
+     *  these with VoiceSpeaker (MediaPlayer). No text is ever spoken
+     *  through the device voice — there is no device-voice path left. */
+    data class VoiceSpeakRequest(val audioBytes: ByteArray, val languageTag: String)
 
     private val _speakEvents = MutableSharedFlow<VoiceSpeakRequest>(extraBufferCapacity = 8)
     val speakEvents: SharedFlow<VoiceSpeakRequest> = _speakEvents
+
+    /** A voice-picker test clip (Settings → Voice → "Suno"): the
+     *  screen plays it with its test player. Null when none is
+     *  waiting; cleared after it is played. One test costs one daily
+     *  voice reply, like any spoken reply. */
+    private val _voiceTestAudio = MutableStateFlow<ByteArray?>(null)
+    val voiceTestAudio: StateFlow<ByteArray?> = _voiceTestAudio
+
+    /** Honest one-time notices: the "no key" line is shown at most
+     *  once per voice session, the "voice finished today" line at
+     *  most once per Pacific day — the reply text itself is already
+     *  on screen, so repeating the line on every reply would spam
+     *  the chat. */
+    private var noKeyVoiceNoticeShown = false
+    private var quotaVoiceNoticeDay: String? = null
 
     /** Emitted when speech must stop now (interruption / session end). */
     private val _stopSpeakingEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
@@ -288,8 +312,15 @@ class ChatbotViewModel(
         val preferred = AiLanguage.fromCode(_aiLanguagePref.value.takeIf { it != "AUTO" })
         if (preferred != AiLanguage.UNKNOWN) return preferred
         val detected = Multilingual.detectLanguage(text)
-        return if (detected.language != AiLanguage.UNKNOWN) detected.language
-            else context.lastLanguage
+        // UPDATE 25 (C-14): a low-confidence detection (<= 0.5 — a
+        // bare number, a name, or script-only evidence such as a
+        // Devanagari STT transcript in a Roman-Hinglish conversation)
+        // keeps the conversation language instead of flipping the
+        // reply language (and script) mid-conversation.
+        if (detected.language != AiLanguage.UNKNOWN && detected.confidence > 0.5) {
+            return detected.language
+        }
+        return context.lastLanguage
     }
 
     private val _snapshot = MutableStateFlow(BusinessSnapshot())
@@ -358,9 +389,15 @@ class ChatbotViewModel(
             }
         }
         // UPDATE 18: voice preferences (Settings -> voice section).
+        // UPDATE 25: rate/pitch are gone with the device voice; the
+        // picker name + the daily counter take their place.
         viewModelScope.launch { settings.voiceResponsesEnabled.collect { _voiceResponsesEnabled.value = it } }
-        viewModelScope.launch { settings.voiceSpeechRate.collect { _speechRate.value = it } }
-        viewModelScope.launch { settings.voiceSpeechPitch.collect { _speechPitch.value = it } }
+        viewModelScope.launch { settings.voiceName.collect { _voiceName.value = it } }
+        viewModelScope.launch {
+            combine(settings.voiceUsedCount, settings.voiceUsedDate) { used, day ->
+                if (AiVoiceConfig.isNewDay(day, System.currentTimeMillis())) 0 else used
+            }.collect { _voiceUsedToday.value = it }
+        }
         viewModelScope.launch { settings.voiceContinuousMode.collect { _continuousMode.value = it } }
         viewModelScope.launch {
             val sessions = chatHistory.loadSessions(profileId)
@@ -524,18 +561,35 @@ class ChatbotViewModel(
 
     /**
      * UPDATE 18 — speak a finished assistant reply aloud while a
-     * voice session is active and voice responses are on. Called
-     * from append() (previews, clarifications, confirmations) and
-     * from replaceMessage() (a streamed reply's FINAL text — the
-     * per-word display updates are still streaming, so they are
-     * skipped, and a stopped generation is never spoken). The
-     * (id, text) guard means a message is spoken exactly once even
-     * though replaceMessage runs for every display update.
+     * voice session is active and voice responses are on. UPDATE 25:
+     * the voice is the REAL AI voice (AiVoiceClient → VoiceSpeaker /
+     * MediaPlayer), rationed to 10 short replies/day with a visible
+     * counter and a hard stop — the device voice is gone and is
+     * NEVER a fallback. Called from append() (previews,
+     * clarifications, confirmations) and from replaceMessage() (a
+     * streamed reply's FINAL text — the per-word display updates are
+     * still streaming, so they are skipped, and a stopped generation
+     * is never spoken). The (id, text) guard means a message is
+     * spoken exactly once even though replaceMessage runs for every
+     * display update.
+     *
+     * ORDER (quota-safe): the slot is RESERVED first (atomic
+     * consume — two replies racing cannot both spend the last one),
+     * then the speech call runs; a failed call still spent its slot
+     * (rationing is conservative by design). No key → the honest
+     * guidance line once per session; limit reached (or a 429) →
+     * the honest "voice finished today" line once per day. Either
+     * way the reply stays TEXT on screen — chat never breaks.
+     * Notice messages themselves are never spoken (see
+     * [neverSpeakIds] — otherwise the notice would trigger another
+     * speak, forever).
      */
     private var lastSpokenKey: String? = null
+    private val neverSpeakIds = mutableSetOf<Long>()
 
     private fun maybeSpeak(message: ChatMessage) {
         if (message.fromUser) return
+        if (message.id in neverSpeakIds) return
         if (!_voiceSessionActive.value || !_voiceResponsesEnabled.value) return
         if (message.streaming || message.streamingStopped) return
         val text = message.text.trim()
@@ -543,9 +597,107 @@ class ChatbotViewModel(
         val key = "${message.id}:$text"
         if (key == lastSpokenKey) return
         lastSpokenKey = key
-        _speakEvents.tryEmit(
-            VoiceSpeakRequest(VoiceText.speakable(text), _voiceLanguageTag.value)
-        )
+        viewModelScope.launch { speakWithAiVoice(text) }
+    }
+
+    /** One spoken reply through the AI voice (see [maybeSpeak] for
+     *  the rules). Runs in the ViewModel scope so the chat never
+     *  waits for it; the audio is emitted on [speakEvents] and the
+     *  screen plays it. */
+    private suspend fun speakWithAiVoice(text: String) {
+        val lang = context.lastLanguage
+        val shortText = AiVoiceText.shortenForVoice(text)
+        if (shortText.isBlank()) return
+        val key = settings.aiKey.first()
+        if (key.isBlank()) {
+            if (!noKeyVoiceNoticeShown) {
+                noKeyVoiceNoticeShown = true
+                appendVoiceNotice(AiVoiceText.noKeyLine(lang))
+            }
+            return
+        }
+        val todayPacific = AiVoiceConfig.pacificDay(System.currentTimeMillis())
+        if (!settings.consumeVoiceReply(todayPacific, AiVoiceConfig.DAILY_LIMIT)) {
+            appendQuotaFinishedNotice(todayPacific, lang)
+            return
+        }
+        when (val result = AiVoiceClient(key).speak(shortText, _voiceName.value)) {
+            is AiVoiceResult.Audio -> {
+                _speakEvents.emit(VoiceSpeakRequest(result.wavBytes, _voiceLanguageTag.value))
+            }
+            is AiVoiceResult.QuotaExhausted -> {
+                settings.markVoiceQuotaExhausted(todayPacific, AiVoiceConfig.DAILY_LIMIT)
+                appendQuotaFinishedNotice(todayPacific, lang)
+            }
+            else -> {
+                // Network / service failure: the reply is already on
+                // screen as text, so nothing is lost and nothing is
+                // said — the slot stays spent (conservative rationing).
+            }
+        }
+    }
+
+    /** Append a voice notice (no-key / quota) that is never itself
+     *  spoken. Shown at most once per session/day (callers guard). */
+    private fun appendVoiceNotice(text: String) {
+        val message = ChatMessage(text = text, fromUser = false)
+        neverSpeakIds.add(message.id)
+        append(message)
+    }
+
+    private fun appendQuotaFinishedNotice(todayPacific: String, lang: AiLanguage) {
+        if (quotaVoiceNoticeDay == todayPacific) return
+        quotaVoiceNoticeDay = todayPacific
+        appendVoiceNotice(AiVoiceText.quotaFinishedLine(lang))
+    }
+
+    /**
+     * UPDATE 25 — hear one voice (Settings → Voice → "Suno"): a
+     * short test sentence spoken in [name]. Costs exactly one daily
+     * voice reply (the test sentence is a real speech call); when
+     * the limit is reached or no key is saved, nothing plays and the
+     * caller is told why through [voiceTestAudio] staying null +
+     * [voiceTestError]. The clip is emitted on [voiceTestAudio] for
+     * the Settings screen's test player.
+     */
+    private val _voiceTestError = MutableStateFlow<String?>(null)
+    val voiceTestError: StateFlow<String?> = _voiceTestError
+
+    fun testVoice(name: String) {
+        viewModelScope.launch {
+            _voiceTestError.value = null
+            val key = settings.aiKey.first()
+            if (key.isBlank()) {
+                _voiceTestError.value = "AI awaz ke liye pehle Settings → AI Chat mein key save karo."
+                return@launch
+            }
+            val todayPacific = AiVoiceConfig.pacificDay(System.currentTimeMillis())
+            if (!settings.consumeVoiceReply(todayPacific, AiVoiceConfig.DAILY_LIMIT)) {
+                _voiceTestError.value = "Aaj ki AI awaz khatm ho gayi hai (10/10) — kal subah phir milegi."
+                return@launch
+            }
+            val sentence = when (context.lastLanguage) {
+                AiLanguage.GUJARATI -> "Namaste! Hu tamari BizKhata AI Assistant chhu. Aaje tamaro total hisab batavu chhu."
+                AiLanguage.ENGLISH -> "Hello! I am your BizKhata AI Assistant. Let me tell you today's total."
+                else -> "Namaste! Main aapki BizKhata AI Assistant hoon. Aaj ka total hisab batata hoon."
+            }
+            when (val result = AiVoiceClient(key).speak(sentence, name)) {
+                is AiVoiceResult.Audio -> _voiceTestAudio.value = result.wavBytes
+                is AiVoiceResult.QuotaExhausted -> {
+                    settings.markVoiceQuotaExhausted(todayPacific, AiVoiceConfig.DAILY_LIMIT)
+                    _voiceTestError.value = "Aaj ki AI awaz khatm ho gayi hai (10/10) — kal subah phir milegi."
+                }
+                else -> _voiceTestError.value = "Awaz abhi nahi mil payi — internet check karke phir try karo."
+            }
+        }
+    }
+
+    fun clearVoiceTestAudio() {
+        _voiceTestAudio.value = null
+    }
+
+    fun clearVoiceTestError() {
+        _voiceTestError.value = null
     }
 
     /** Persist the current message list now (used once, when a
@@ -856,12 +1008,11 @@ class ChatbotViewModel(
         if (!enabled) viewModelScope.launch { _stopSpeakingEvents.emit(Unit) }
     }
 
-    fun setSpeechRate(rate: Float) {
-        viewModelScope.launch { settings.setVoiceSpeechRate(rate) }
-    }
-
-    fun setSpeechPitch(pitch: Float) {
-        viewModelScope.launch { settings.setVoiceSpeechPitch(pitch) }
+    /** UPDATE 25 — pick the AI voice (Settings → Voice). The name
+     *  is a plain prebuilt-voice name ("Kore", "Puck", …); no
+     *  provider/model name ever reaches the UI. */
+    fun setVoiceName(name: String) {
+        viewModelScope.launch { settings.setVoiceName(name) }
     }
 
     fun setContinuousMode(enabled: Boolean) {
@@ -1040,13 +1191,42 @@ class ChatbotViewModel(
         }
     }
 
-    private suspend fun handleMessage(text: String) {
+    private suspend fun handleMessage(rawText: String) {
         val snap = _knowledge.value
         val agents = snap.agents.map { it.name }
         val customers = snap.customers.map { it.name }.distinct()
+        // UPDATE 25 (C-17) — a TYPED interrupt ("Bas", "Bas, short
+        // mein batao") works like the spoken one: stop any speech
+        // first, then either shorten the last reply (a bare "Bas")
+        // or process the instruction that follows it ("Bas, aaj ka
+        // total batao"). Prefix-anchored, so "Bas" inside a longer
+        // sentence is untouched, and the rest of this function works
+        // on the remainder, never on the interrupt words.
+        var text = rawText
+        VoiceInterrupt.stripInterruptPrefix(rawText)?.let { remainder ->
+            viewModelScope.launch { _stopSpeakingEvents.emit(Unit) }
+            stopGeneration()
+            if (remainder.isBlank()) {
+                val lastBot = _messages.value.lastOrNull { !it.fromUser }?.text.orEmpty()
+                val short = shortenToTwoSentences(lastBot)
+                append(
+                    ChatMessage(
+                        text = short.ifBlank {
+                            "Abhi koi jawab nahi hai jo short karu — kuch poochho to batata hoon."
+                        },
+                        fromUser = false
+                    )
+                )
+                return
+            }
+            text = remainder
+        }
         // UPDATE 13: track the language of this message (detected, or the
         // manual preference) — replies and voice input follow it, and a
         // mid-conversation switch is picked up on the next message.
+        // UPDATE 25 (C-14): a low-confidence detection (<= 0.5 — a
+        // bare number, a name, or script-only evidence) keeps the
+        // conversation language instead of flipping the reply.
         val lang = effectiveLanguage(text)
         context = context.copy(lastLanguage = lang)
         if (_aiLanguagePref.value == "AUTO") _voiceLanguageTag.value = lang.bcp47
@@ -1063,30 +1243,57 @@ class ChatbotViewModel(
         _suggestions.value = emptyList()
         _pendingOffer.value = context.pendingChecklistOffer
 
+        // UPDATE 25 (C-7) — "Mene Key Dal Di Starting Me": a key-status
+        // statement, not a request to enter a key. Answer from the
+        // device's ACTUAL key state (saved / not saved) — never display
+        // the key, never tell a man who just said he entered the key
+        // to enter it. Answered here, before any pending-preview
+        // handling, so it never cancels a preview by accident.
+        if (AiAssistantParser.isKeyStatusMessage(text)) {
+            append(ChatMessage(text = keyStatusAnswer(lang), fromUser = false))
+            return
+        }
+
         // --- 1. A pending financial action: Haan / Nahi / follow-up amount.
         pendingAction?.let { pending ->
             val norm = AiAssistantParser.normalise(text)
-            if (AiAssistantParser.isAffirmative(norm)) {
+            // UPDATE 25 (C-2) — a leading yes does NOT swallow the
+            // rest of the message: "Haan, aur Xerox 300 cash hue"
+            // is a NEW entry (merged into the pending preview), not
+            // a bare confirm. Only a message that IS just a yes
+            // confirms the pending preview.
+            val remainder = AiAssistantParser.stripLeadingYes(norm)
+            if (remainder != null && remainder.isNotBlank()) {
+                val followUp = AiAssistantParser.parseFollowUpAmount(remainder, context)
+                if (followUp != null && pending.action is AiAssistantParser.AiAction.DailyEntries) {
+                    mergeFollowUpIntoPending(pending, followUp, lang)
+                    return
+                }
+                val fresh = AiAssistantParser.parse(remainder, context, agents, customers)
+                if (fresh is AiAssistantParser.AiParseResult.Action) {
+                    pendingAction = null
+                    _pendingPreviewId.value = null
+                    append(ChatMessage(text = "Pehli entry ko maine cancel kar diya hai (save nahi hui thi). Ab naye message par kaam karta hoon.", fromUser = false))
+                    showPreview(fresh.action, fresh.preview)
+                    return
+                }
+                // The remainder carries no action ("Haan, aaj ka
+                // total batao") — fall through: the pending preview
+                // is dropped below and the message is handled fresh.
+            }
+            if (remainder != null && remainder.isBlank()) {
+                // Bare yes with only punctuation after it ("Haan,").
+                confirmPendingFromChat()
+                return
+            }
+            if (remainder == null && AiAssistantParser.isAffirmative(norm)) {
                 confirmPendingFromChat()
                 return
             }
             // "Aur 200 UPI bhi add kar do" — append to the pending entries.
             val followUp = AiAssistantParser.parseFollowUpAmount(text, context)
             if (followUp != null && pending.action is AiAssistantParser.AiAction.DailyEntries) {
-                val merged = (pending.action as AiAssistantParser.AiAction.DailyEntries)
-                    .copy(entries = (pending.action as AiAssistantParser.AiAction.DailyEntries).entries + followUp.entries)
-                val newKey = keyFor(merged)
-                pendingAction = pending.copy(action = merged, key = newKey)
-                replaceMessage(
-                    pending.previewMessageId,
-                    ChatMessage(
-                        id = pending.previewMessageId,
-                        text = AiAssistantParser.previewDaily(merged.entries, lang),
-                        fromUser = false,
-                        preview = previewFor(merged),
-                        note = "Confirm karein to save karunga — abhi kuch save nahi hua hai."
-                    )
-                )
+                mergeFollowUpIntoPending(pending, followUp, lang)
                 return
             }
             // UPDATE 20 — "Nahi, 500 the" corrects the single pending
@@ -1113,7 +1320,7 @@ class ChatbotViewModel(
                         ChatMessage(
                             id = pending.previewMessageId,
                             text = "Theek hai — amount update kar diya hai:\n" +
-                                AiAssistantParser.previewDaily(merged.entries, lang),
+                                AiAssistantParser.previewDaily(merged.entries, lang, context.dayEpoch),
                             fromUser = false,
                             preview = previewFor(merged),
                             note = "Confirm karein to save karunga — abhi kuch save nahi hua hai."
@@ -1257,6 +1464,22 @@ class ChatbotViewModel(
             executeServiceAdd(result.appChangeSpec, lang)
             return
         }
+        // UPDATE 25 (C-13) — "Aur English mein likho" with NO active
+        // checklist translates JUST the last reply, one-off. It never
+        // switches the profile language (that is only the Settings
+        // control, or "English mein baat karo").
+        if (result.intent == "translate_reply") {
+            translateLastReply(result, lang)
+            return
+        }
+        // UPDATE 25 (C-13) — a REAL switch ("English mein baat karo"
+        // / "samjhao") applies the preference, so the next reply
+        // really comes in that language. The checklist-translate
+        // path returns intent "checklist", never this one, so it is
+        // never mistaken for a switch.
+        if (result.intent == "language_request" && result.requestedLanguage != null) {
+            settings.setAiLanguagePref(result.requestedLanguage.code)
+        }
         // Contextual follow-up chips (website conversation.ts
         // suggestionsFor): only what THIS reply earned. A queued
         // dev request earns none — the website's "Module Requests
@@ -1316,6 +1539,9 @@ class ChatbotViewModel(
         // one, replace it with the honest guard text (grounded on the
         // last verified save) instead of showing the fabrication.
         if (delivered && cloudFlow != null) guardDeliveredCloudReply()
+        // UPDATE 25 (C-15) — a cloud reply in the wrong language is
+        // never shown as-is either (see guardCloudReplyLanguage).
+        if (delivered && cloudFlow != null) guardCloudReplyLanguage(localText, lang)
         if (!delivered && cloudFlow == null && result.needsCloud) {
             val limitation = ConversationEngine.honestLimitation(lang)
             streamReply(localText = limitation)
@@ -1403,6 +1629,70 @@ class ChatbotViewModel(
         val shown = _messages.value.lastOrNull { !it.fromUser } ?: return
         val guarded = CloudAiClient.guardCloudReply(shown.text, context.lastSavedEntry?.label) ?: return
         replaceMessage(shown.id, shown.copy(text = guarded))
+    }
+
+    /** UPDATE 25 (C-15) — a cloud reply in the WRONG language (e.g.
+     *  English to a Hinglish user, or a Marathi-mixed reply) is
+     *  never shown as-is: the local reply (already in the user's
+     *  language) replaces it, with a short honest note. Only a
+     *  confident detection (>= 0.8, see
+     *  [CloudAiClient.isWrongLanguage]) counts — mixed-language
+     *  replies are left alone. */
+    private fun guardCloudReplyLanguage(localText: String, lang: AiLanguage) {
+        val shown = _messages.value.lastOrNull { !it.fromUser } ?: return
+        if (!CloudAiClient.isWrongLanguage(shown.text, lang)) return
+        val replacement = localText.ifBlank { ConversationEngine.honestLimitation(lang) }
+        replaceMessage(
+            shown.id,
+            shown.copy(
+                text = replacement,
+                note = "AI jawab galat bhasha mein aaya tha — built-in jawab dikhaya gaya hai."
+            )
+        )
+    }
+
+    /** UPDATE 25 (C-13) — translate JUST the last assistant reply
+     *  into [result.requestedLanguage], one-off, without touching
+     *  the profile language. With a key the cloud translates the
+     *  actual last reply; without one (or on failure) the honest
+     *  limitation is shown instead of a fake translation. */
+    private suspend fun translateLastReply(
+        result: AiAssistantParser.AiParseResult.Conversational,
+        lang: AiLanguage
+    ) {
+        val target = result.requestedLanguage ?: AiLanguage.ENGLISH
+        val lastBot = _messages.value.lastOrNull { !it.fromUser }?.text.orEmpty()
+        val key = settings.aiKey.first()
+        if (lastBot.isBlank()) {
+            val text = when (lang) {
+                AiLanguage.ENGLISH -> "There is no reply yet to translate — ask me something first."
+                else -> "Abhi koi jawab nahi hai jise translate karu — pehle kuch poochho."
+            }
+            streamReply(localText = text)
+            return
+        }
+        if (key.isBlank()) {
+            streamReply(
+                localText = "Is jawab ko ${target.displayName} mein likhne ke liye AI key chahiye — Settings → AI Chat mein key save karo. Tab tak jawab chat mein hi padh lo."
+            )
+            return
+        }
+        val translated = try {
+            CloudAiClient(key).converse(
+                "Translate this assistant reply into ${target.displayName}. Reply with ONLY the translation, nothing else, keeping the same meaning and the same numbers:\n\n$lastBot",
+                "The user runs a CSC centre. Reply in ${target.displayName}."
+            )
+        } catch (_: Exception) {
+            null
+        }
+        if (translated.isNullOrBlank()) {
+            streamReply(localText = ConversationEngine.honestLimitation(lang))
+        } else {
+            streamReply(
+                localText = translated.trim(),
+                note = "Translated reply — sirf ye jawab ${target.displayName} mein hai, language setting nahi badli."
+            )
+        }
     }
 
     /** UPDATE 23 — the last verified save as facts for every cloud
@@ -1525,6 +1815,9 @@ class ChatbotViewModel(
             // conversational path: a summary must never claim a
             // financial action.
             if (delivered) guardDeliveredCloudReply()
+            // UPDATE 25 (C-15) — a summary in the wrong language is
+            // never shown as-is either (local built-in reply instead).
+            if (delivered) guardCloudReplyLanguage(builtIn, effectiveLanguage(text))
             if (!delivered) {
                 streamReply(
                     localText = builtIn,
@@ -1617,7 +1910,9 @@ class ChatbotViewModel(
         val duplicateWarning = when (resolved) {
             is AiAssistantParser.AiAction.DailyEntries ->
                 resolved.entries.any { entry ->
-                    repository.possibleDuplicateDailyEntry(profileId, entry, resolved.dayEpoch)
+                    repository.possibleDuplicateDailyEntry(
+                        profileId, entry, entry.dayEpoch ?: resolved.dayEpoch
+                    )
                 }
             else -> false
         }
@@ -1826,6 +2121,62 @@ class ChatbotViewModel(
         viewModelScope.launch { executePending(pending, null) }
     }
 
+    /** Append follow-up entries to the pending preview (UPDATE 25
+     *  C-1/C-2): "Aur 200 UPI" after "Xerox 300 cash" MERGES into
+     *  the one pending preview — both entries survive to Confirm —
+     *  instead of replacing it. Shared by the plain follow-up path
+     *  and the yes+entry path ("Haan, aur Xerox 300 cash hue"). */
+    private fun mergeFollowUpIntoPending(
+        pending: PendingAction,
+        followUp: AiAssistantParser.AiAction.DailyEntries,
+        lang: AiLanguage
+    ) {
+        val current = pending.action as AiAssistantParser.AiAction.DailyEntries
+        val merged = current.copy(entries = current.entries + followUp.entries)
+        val newKey = keyFor(merged)
+        pendingAction = pending.copy(action = merged, key = newKey)
+        replaceMessage(
+            pending.previewMessageId,
+            ChatMessage(
+                id = pending.previewMessageId,
+                text = AiAssistantParser.previewDaily(merged.entries, lang, context.dayEpoch),
+                fromUser = false,
+                preview = previewFor(merged),
+                note = "Confirm karein to save karunga — abhi kuch save nahi hua hai."
+            )
+        )
+    }
+
+    /** First 2 sentences of [text] (UPDATE 25 C-17, typed "Bas,
+     *  short mein batao"). Text only, no voice tail: the full reply
+     *  is already on screen in the chat. */
+    private fun shortenToTwoSentences(text: String): String {
+        val clean = text.replace(Regex("\\s+"), " ").trim()
+        if (clean.isBlank()) return ""
+        return clean.split(Regex("(?<=[.!?])\\s+")).take(2).joinToString(" ").trim()
+    }
+
+    /** UPDATE 25 (C-7) — the honest answer to "Mene Key Dal Di
+     *  Starting Me", from the device's ACTUAL key state. The key
+     *  VALUE is never included — only whether one is saved. */
+    private fun keyStatusAnswer(lang: AiLanguage): String {
+        return if (_aiEnabled.value) {
+            when (lang) {
+                AiLanguage.ENGLISH -> "Haan, key save hai ✓ — AI chat chalu hai."
+                AiLanguage.GUJARATI -> "Ha, key save chhe ✓ — AI chat chalu chhe."
+                AiLanguage.HINDI -> "हाँ, key save है ✓ — AI chat चालू है।"
+                else -> "Haan, key save hai ✓ — AI chat chalu hai."
+            }
+        } else {
+            when (lang) {
+                AiLanguage.ENGLISH -> "Key save nahi dikh rahi — Settings → AI Chat mein jaa kar key save karo. Key kabhi chat mein mat likho."
+                AiLanguage.GUJARATI -> "Key save nathi dekhati — Settings → AI Chat ma jai ne key save karo. Key kabhi chat ma na lakho."
+                AiLanguage.HINDI -> "Key save नहीं दिख रही — Settings → AI Chat में जा कर key save करो। Key कभी chat में मत लिखो।"
+                else -> "Key save nahi dikh rahi — Settings → AI Chat mein jaa kar key save karo. Key kabhi chat mein mat likho."
+            }
+        }
+    }
+
     /** The backend-verified save itself (steps 10–12), shared by the
      *  Confirm button and by a spoken/typed "Haan". */
     private suspend fun executePending(pending: PendingAction, editedLines: List<AiPreviewLine>?) {
@@ -1921,7 +2272,11 @@ class ChatbotViewModel(
                             transactionId = it,
                             label = "${last.serviceLabel} ${formatPaise(last.amountPaise)} (${last.mode.name})",
                             serviceLabel = last.serviceLabel,
-                            amountPaise = last.amountPaise, mode = last.mode, dayEpoch = action.dayEpoch
+                            amountPaise = last.amountPaise, mode = last.mode,
+                            // UPDATE 25 (C-11): the last entry may be
+                            // dated yesterday — its own day, not the
+                            // action day.
+                            dayEpoch = last.dayEpoch ?: action.dayEpoch
                         )
                     } ?: context.lastSavedEntry
                 )
@@ -2009,6 +2364,26 @@ class ChatbotViewModel(
         }
         val completed = completePartial(partial, norm, clar.missing)
         if (completed == null) return false
+        // UPDATE 25 (C-12): a due with a received part still needs
+        // its Cash/UPI home — ask for the mode instead of previewing
+        // an action the backend would refuse (received money without
+        // a mode). The clarification stays alive with the completed
+        // partial, so the mode answer finishes it.
+        if (completed is AiAssistantParser.AiAction.RecordCustomerDue &&
+            completed.receivedPaise > 0L && completed.receivedMode == null
+        ) {
+            clarification = ClarificationState(text, completed, listOf("payment mode"))
+            append(
+                ChatMessage(
+                    text = MultilingualReplies.get(
+                        effectiveLanguage(text), "askMode",
+                        "amount" to formatPaise(completed.receivedPaise)
+                    ),
+                    fromUser = false
+                )
+            )
+            return true
+        }
         clarification = null
         when (completed) {
             is AiAssistantParser.AiAction -> showPreview(completed, previewTextFor(completed))
@@ -2086,7 +2461,7 @@ class ChatbotViewModel(
     }
 
     private fun previewTextFor(action: AiAssistantParser.AiAction): String = when (action) {
-        is AiAssistantParser.AiAction.DailyEntries -> AiAssistantParser.previewDaily(action.entries)
+        is AiAssistantParser.AiAction.DailyEntries -> AiAssistantParser.previewDaily(action.entries, todayEpoch = today)
         is AiAssistantParser.AiAction.Expense -> "Kharcha: ${action.draft.category} — ${formatPaise(action.draft.amountPaise)} (${action.draft.mode?.name})."
         is AiAssistantParser.AiAction.AgentPayment -> "Agent payment: ${action.agentName} ko ${formatPaise(action.amountPaise)} (${action.mode?.name})."
         is AiAssistantParser.AiAction.MoneyTransfer -> "Money Transfer: principal ${formatPaise(action.principalPaise)}, commission ${formatPaise(action.commissionPaise)}."
@@ -2119,14 +2494,13 @@ class ChatbotViewModel(
                 return
             }
         }
-        val amounts = AiAssistantParser.findAmounts(norm)
         val service = AiAssistantParser.detectService(norm)
-        // "300 wali entry ko 350 karo" → old 300, new 350.
-        val (oldAmount, newAmount) = when {
-            amounts.size >= 2 -> AiAssistantParser.rupeesToPaise(amounts[0]) to AiAssistantParser.rupeesToPaise(amounts[1])
-            amounts.size == 1 -> AiAssistantParser.rupeesToPaise(amounts[0]) to null
-            else -> null to null
-        }
+        // UPDATE 25 (C-3) — "Kal wale 300 Xerox galat the, 250 hone
+        // chahiye": the amount next to "galat"/"nahi" is the OLD one
+        // (300), the other is the NEW one (250). findAmounts returns
+        // amounts sorted ascending, so a naive [0]/[1] split would
+        // look for a ₹250 entry that never existed.
+        val (oldAmount, newAmount) = AiAssistantParser.correctionPair(norm)
         val matches = repository.findTransactionsForCorrection(
             profileId, today, oldAmount, service?.label
         )
@@ -2185,6 +2559,19 @@ class ChatbotViewModel(
         val norm = AiAssistantParser.normalise(text)
         val service = AiAssistantParser.detectService(norm)
         val recent = repository.findTransactionsForCorrection(profileId, today, null, service?.label).takeLast(3)
+        // UPDATE 25 (C-18) — ordinal delete: "Dusra wala delete kar
+        // do" / "Pehli wali entry hata do" picks that entry straight
+        // from the list below, in the SAME order the list is shown
+        // (1 = pehli, 2 = dusri, 3 = teesri). Anything else lists
+        // the candidates to pick from, as before.
+        val ordinal = AiAssistantParser.ordinalIndex(norm) ?: -1
+        if (ordinal in recent.indices) {
+            val tx = recent[ordinal]
+            val label = "${tx.category} ${formatPaise(tx.amountPaise)} (${tx.mode.name}) — ${tx.description}"
+            val action = AiAssistantParser.AiAction.DeleteTransaction(tx.id, label)
+            showPreview(action, previewTextFor(action))
+            return
+        }
         when {
             recent.isEmpty() -> {
                 append(

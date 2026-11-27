@@ -79,6 +79,7 @@ import com.alfalah.business.data.ChatHistoryStore
 import com.alfalah.business.data.SettingsStore
 import com.alfalah.business.data.repository.BusinessRepository
 import com.alfalah.business.domain.AppLanguage
+import com.alfalah.business.domain.AiVoiceConfig
 import com.alfalah.business.domain.PaymentMode
 import com.alfalah.business.domain.VoiceState
 import com.alfalah.business.ui.components.BizCard
@@ -174,8 +175,9 @@ fun ChatbotScreen(
     val voiceState by vm.voiceState.collectAsState()
     val voiceSessionActive by vm.voiceSessionActive.collectAsState()
     val voiceResponsesEnabled by vm.voiceResponsesEnabled.collectAsState()
-    val speechRate by vm.speechRate.collectAsState()
-    val speechPitch by vm.speechPitch.collectAsState()
+    // UPDATE 25: the AI voice's daily usage (visible counter — the
+    // free voice is rationed to 10 spoken replies/day).
+    val voiceUsedToday by vm.voiceUsedToday.collectAsState()
     val continuousMode by vm.continuousMode.collectAsState()
     val searchQuery by vm.searchQuery.collectAsState()
     // UPDATE 20 §2/§7 — contextual suggestion chips from the
@@ -210,8 +212,10 @@ fun ChatbotScreen(
             }
         )
     }
-    // UPDATE 18: spoken replies (native TTS). The text is already in
-    // chat; the voice only reads it aloud, in the reply language.
+    // UPDATE 25: spoken replies use the real AI voice (audio from
+    // the assistant's voice service, played with MediaPlayer). The
+    // text is already in chat; the voice only reads it aloud, in the
+    // reply language. No phone/device voice is ever used.
     val voiceSpeaker = remember {
         VoiceSpeaker(
             context = context,
@@ -255,16 +259,15 @@ fun ChatbotScreen(
         vm.stopVoiceSession()
     }
 
-    // UPDATE 18: speak assistant replies + stop speech on demand.
-    // The reply text is already in the chat list; speaking never
-    // creates or changes a message.
+    // UPDATE 25: speak assistant replies with the AI voice + stop
+    // speech on demand. The reply text is already in the chat list;
+    // speaking never creates or changes a message. The audio bytes
+    // come from the ViewModel (already quota-checked and fetched);
+    // this screen only plays them.
     LaunchedEffect(Unit) {
         vm.speakEvents.collect { request ->
             if (!vm.voiceResponsesEnabled.value) return@collect
-            voiceSpeaker.setLanguage(request.languageTag)
-            voiceSpeaker.speechRate = vm.speechRate.value
-            voiceSpeaker.speechPitch = vm.speechPitch.value
-            voiceSpeaker.speak(request.text)
+            voiceSpeaker.playAudio(request.audioBytes)
         }
     }
     LaunchedEffect(Unit) {
@@ -272,11 +275,6 @@ fun ChatbotScreen(
             voiceSpeaker.stop()
             speaking = false
         }
-    }
-    // Voice speed / pitch from Settings apply live to the speaker.
-    LaunchedEffect(speechRate, speechPitch) {
-        voiceSpeaker.speechRate = speechRate
-        voiceSpeaker.speechPitch = speechPitch
     }
     // UPDATE 18: continuous mode — after a reply finishes (or a
     // generation ends with nothing spoken, e.g. voice replies are
@@ -520,6 +518,13 @@ fun ChatbotScreen(
                 selected = voiceResponsesEnabled,
                 onClick = { vm.setVoiceResponsesEnabled(!voiceResponsesEnabled) },
                 label = { Text(if (voiceResponsesEnabled) "Voice replies: ON" else "Voice replies: OFF") }
+            )
+            // UPDATE 25: the AI voice is rationed (10 spoken replies
+            // per day) — the counter is always visible next to the
+            // voice toggle so the owner knows how many are left.
+            SuggestionChip(
+                onClick = { },
+                label = { Text(AiVoiceConfig.quotaLabel(voiceUsedToday)) }
             )
         }
         // UPDATE 20 §2/§7 — contextual suggestion chips: the starter

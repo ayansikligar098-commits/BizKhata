@@ -381,6 +381,21 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
                 "Agar koi entry delete karni hai to batao — main pehle dikhaunga, phir tum confirm karoge."
         }
 
+        /** UPDATE 25 (C-15) — true when a cloud reply is confidently
+         *  in a DIFFERENT language than the conversation ([lang]).
+         *  Only a confident detection (>= 0.8) counts: a mixed or
+         *  low-signal reply is never flagged, so an ordinary Hinglish
+         *  reply with a few English words stays. Pure language
+         *  detection — no model involved. The caller then re-renders
+         *  with the local reply (already in the user's language)
+         *  instead of showing the wrong-language cloud text as-is. */
+        fun isWrongLanguage(text: String, lang: AiLanguage): Boolean {
+            val detected = Multilingual.detectLanguage(text)
+            if (detected.confidence < 0.8) return false
+            if (detected.language == AiLanguage.UNKNOWN) return false
+            return detected.language != lang
+        }
+
         /** UPDATE 19 service address (OpenAI-compatible chat
          *  completions). Bearer auth, OpenAI-style messages, reply in
          *  choices[0].message.content, SSE deltas in

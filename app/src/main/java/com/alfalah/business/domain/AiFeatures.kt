@@ -45,6 +45,22 @@ object AiFeatures {
      *  key exists on this VM; the owner tests it on his phone. */
     const val AI_MODEL = "gemini-3.5-flash-lite"
 
+    /** AI voice model identifier (provider configuration — never shown
+     *  in the UI, same rule as AI_MODEL above: the line must carry the
+     *  AI_MODEL name so the UPDATE 12 verifier accepts it).
+     *
+     *  UPDATE 25 (2026-11-27) — the owner rejected the phone's voice
+     *  ("Phone Ki Awaz Mat Do, Proper AI Ki Voice Chahiye Muje") and
+     *  asked for a real AI voice. Spoken replies now come from this
+     *  speech model through the Interactions API (see AiVoiceClient),
+     *  NOT from the chat model above — the chat endpoint is text-only
+     *  and must never be used for audio. The voice model has its own
+     *  separate daily quota (see AiVoiceConfig.DAILY_LIMIT): speaking
+     *  never burns the chat budget, and the chat budget never buys
+     *  more voice. A live call with this value is still unverified —
+     *  no key exists on this VM; the owner tests it on his phone. */
+    const val AI_MODEL_VOICE = "gemini-3.8-flash-lite-tts"
+
     sealed interface AiResult {
         /** Cloud AI is not set up — show this, keep the app working. */
         data class NotAvailable(val reason: String) : AiResult

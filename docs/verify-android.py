@@ -597,12 +597,17 @@ if "migrateLegacyAiKey" not in (MAIN / "MainActivity.kt").read_text():
 if "migrateLegacyAiKey" not in vm_src:
     fails.append("ChatbotViewModel does not run migrateLegacyAiKey before first aiKey read (UPDATE 17)")
 
-# 16. UPDATE 18 — two-way voice conversation (Android only).
-# STT/TTS are the native Android speech services (free, no key);
-# the intelligence is the SAME conversational client as text chat
+# 16. UPDATE 18/25 — two-way voice conversation (Android only).
+# STT is the native Android speech service (free, no key); the
+# intelligence is the SAME conversational client as text chat
 # (CloudAiClient.converse() via the shared pipeline) — voice builds
 # no separate AI path and no separate intent logic. The user speaks
 # in his own way: no rigid command grammar anywhere.
+# UPDATE 25: spoken replies are the REAL AI voice (AiVoiceClient via
+# the Interactions API, played with MediaPlayer). The phone/device
+# voice is GONE — no TextToSpeech anywhere in the app, no speed/pitch
+# settings, no silent fallback to it. The voice is rationed (10
+# spoken replies/day, midnight Pacific reset) with a visible counter.
 voice_conv = MAIN / "domain/VoiceConversation.kt"
 if not voice_conv.exists():
     fails.append("domain/VoiceConversation.kt missing (UPDATE 18 voice logic)")
@@ -630,14 +635,20 @@ else:
         fails.append("VoiceConversation.kt names a provider (UPDATE 12)")
 voice_out = MAIN / "ui/chatbot/VoiceOutput.kt"
 if not voice_out.exists():
-    fails.append("ui/chatbot/VoiceOutput.kt missing (UPDATE 18 TTS speaker)")
+    fails.append("ui/chatbot/VoiceOutput.kt missing (UPDATE 25 AI-voice speaker)")
 else:
     vo_src = voice_out.read_text()
-    for needle in ["class VoiceSpeaker", "TextToSpeech", "UtteranceProgressListener",
-                   "fun speak", "fun stop", "fun shutdown", "fun setLanguage",
-                   "speechRate", "speechPitch", "QUEUE_FLUSH"]:
+    for needle in ["class VoiceSpeaker", "MediaPlayer", "fun playAudio",
+                   "fun stop", "fun shutdown", "class VoiceTestPlayer",
+                   "fun play", "fun release"]:
         if needle not in vo_src:
             fails.append(f"VoiceOutput.kt missing: {needle}")
+    # UPDATE 25: the device voice is GONE — no TextToSpeech class,
+    # no utterance listener, no speak/setLanguage/rate/pitch API.
+    for bad in ["TextToSpeech", "UtteranceProgressListener", "QUEUE_FLUSH",
+                "fun speak", "setLanguage", "speechRate", "speechPitch"]:
+        if bad in vo_src:
+            fails.append(f"VoiceOutput.kt still uses the device voice: {bad!r} (UPDATE 25)")
     if "gemini" in vo_src.lower():
         fails.append("VoiceOutput.kt names a provider (UPDATE 12)")
 voice_in = MAIN / "ui/chatbot/VoiceInput.kt"
@@ -654,36 +665,54 @@ if "detectService(q) != null && mainAmount(q) != null &&" not in ai_src:
     fails.append("AiAssistant.kt bare-entry gate still requires a mode (UPDATE 18: 'Xerox 300' must clarify)")
 settings_src = (MAIN / "data/SettingsStore.kt").read_text()
 for needle in ["voiceResponsesEnabled", "setVoiceResponsesEnabled",
-               "voiceSpeechRate", "setVoiceSpeechRate",
-               "voiceSpeechPitch", "setVoiceSpeechPitch",
+               "voiceName", "setVoiceName",
+               "voiceUsedCount", "voiceUsedDate", "consumeVoiceReply",
                "voiceContinuousMode", "setVoiceContinuousMode"]:
     if needle not in settings_src:
         fails.append(f"SettingsStore missing voice setting: {needle}")
+for bad in ["voiceSpeechRate", "setVoiceSpeechRate",
+            "voiceSpeechPitch", "setVoiceSpeechPitch"]:
+    if bad in settings_src:
+        fails.append(f"SettingsStore still has the device-voice setting: {bad} (UPDATE 25)")
 settings_screen_src = (MAIN / "ui/settings/SettingsScreen.kt").read_text()
 for needle in ["Voice Assistant", "showVoice", "voiceResponsesEnabled",
-               "onVoiceResponsesEnabled", "voiceSpeechRate", "onVoiceSpeechRate",
+               "onVoiceResponsesEnabled", "voiceName", "onVoiceName",
+               "voiceUsedToday", "quotaLabel", "onVoiceTest", "Suno",
                "voiceContinuousMode", "onVoiceContinuousMode"]:
     if needle not in settings_screen_src:
         fails.append(f"SettingsScreen missing voice piece: {needle}")
+for bad in ["voiceSpeechRate", "onVoiceSpeechRate", "Bolne ki speed"]:
+    if bad in settings_screen_src:
+        fails.append(f"SettingsScreen still has the device-voice UI: {bad} (UPDATE 25)")
 if "gemini" in settings_screen_src.lower():
     fails.append("SettingsScreen voice section names a provider (UPDATE 12)")
 if "voiceResponsesEnabled" not in (MAIN / "MainActivity.kt").read_text():
     fails.append("MainActivity does not wire voice settings to SettingsScreen (UPDATE 18)")
+if "voiceName" not in (MAIN / "MainActivity.kt").read_text():
+    fails.append("MainActivity does not wire the AI voice pick to SettingsScreen (UPDATE 25)")
 vm_src = (MAIN / "ui/chatbot/ChatbotViewModel.kt").read_text()
 for needle in ["onVoiceTranscript", "speakEvents", "stopSpeakingEvents",
                "voiceState", "voiceSessionActive", "interruptSpeaking",
                "stopVoiceSession", "setContinuousMode", "setVoiceResponsesEnabled",
-               "setSpeechRate", "maybeSpeak", "confirmPendingFromChat",
+               "setVoiceName", "voiceName", "voiceUsedToday",
+               "testVoice", "voiceTestAudio", "voiceTestError",
+               "maybeSpeak", "confirmPendingFromChat",
                "queuedVoiceTranscript", "VoiceSpeakRequest"]:
     if needle not in vm_src:
         fails.append(f"ChatbotViewModel.kt missing voice piece: {needle!r}")
+for bad in ["setSpeechRate", "setSpeechPitch", "_speechRate", "_speechPitch"]:
+    if bad in vm_src:
+        fails.append(f"ChatbotViewModel.kt still has the device-voice API: {bad} (UPDATE 25)")
 screen_src = (MAIN / "ui/chatbot/ChatbotScreen.kt").read_text()
 for needle in ["VoiceSpeaker", "VoiceState", "onVoiceTranscript",
                "onResultWithConfidence", "Continuous: ON", "Voice replies: ON",
                "stopVoice", "startListening", "DisposableEffect",
-               "Sun raha hoon", "Bol raha hoon"]:
+               "Sun raha hoon", "Bol raha hoon", "playAudio", "quotaLabel"]:
     if needle not in screen_src:
         fails.append(f"ChatbotScreen.kt missing voice piece: {needle!r}")
+for bad in ["speechRate", "speechPitch", "setLanguage"]:
+    if bad in screen_src:
+        fails.append(f"ChatbotScreen.kt still drives the device voice: {bad} (UPDATE 25)")
 if "gemini" in screen_src.lower():
     fails.append("ChatbotScreen.kt names a provider (UPDATE 12)")
 conv_test = (TEST / "ConversationTest.kt").read_text()
@@ -1023,6 +1052,127 @@ for needle in ["def _is_delete_intent", "def _is_pronoun_ref",
         fails.append(f"ai_assistant_mirror.py missing UPDATE 23 piece: {needle!r}")
 if mirror_src3.count("@t(\"u23-delete") < 10:
     fails.append("ai_assistant_mirror.py has fewer than 10 u23-delete tests")
+
+# 19. UPDATE 25 — real AI voice + chat understanding (Android mirror
+#     of the website fix). Same caps as the website: 10 spoken
+#     replies/day, midnight Pacific reset, first ~2 sentences / 400
+#     chars, Kore default, no device voice anywhere.
+ai_voice = MAIN / "domain/AiVoice.kt"
+ai_voice_client = MAIN / "domain/AiVoiceClient.kt"
+if not ai_voice.exists():
+    fails.append("domain/AiVoice.kt missing (UPDATE 25 AI-voice config + text)")
+else:
+    av_src = ai_voice.read_text()
+    for needle in ["DAILY_LIMIT = 10", "SPOKEN_CAP_CHARS = 400",
+                   "MIN_GAP_MS", "INTERACTIONS_URL", "DEFAULT_VOICE",
+                   "VOICES", "fun pacificDay", "fun isNewDay",
+                   "fun quotaLabel", "object AiVoiceText",
+                   "fun shortenForVoice", "fun quotaFinishedLine",
+                   "fun noKeyLine", "object AiVoiceRequest",
+                   "fun buildJson", "fun extractAudioBase64"]:
+        if needle not in av_src:
+            fails.append(f"AiVoice.kt missing: {needle}")
+    for bad in ["TextToSpeech", "free tier"]:
+        if bad in av_src:
+            fails.append(f"AiVoice.kt still mentions the device voice / free tier: {bad!r} (UPDATE 25)")
+    if "gemini" in av_src.lower():
+        fails.append("AiVoice.kt names a provider outside the model constant (UPDATE 12)")
+if not ai_voice_client.exists():
+    fails.append("domain/AiVoiceClient.kt missing (UPDATE 25 Interactions-API client)")
+else:
+    avc_src = ai_voice_client.read_text()
+    for needle in ["class AiVoiceClient", "fun speak", "x-goog-api-key",
+                   "AiVoiceResult", "INTERACTIONS_URL"]:
+        if needle not in avc_src:
+            fails.append(f"AiVoiceClient.kt missing: {needle}")
+    if "TextToSpeech" in avc_src or "gemini" in avc_src.lower():
+        fails.append("AiVoiceClient.kt names the device voice / a provider (UPDATE 12/25)")
+ai_features_src = (MAIN / "domain/AiFeatures.kt").read_text()
+if "AI_MODEL_VOICE" not in ai_features_src:
+    fails.append("AiFeatures.kt missing AI_MODEL_VOICE (UPDATE 25 speech model)")
+# STT thresholds, unified with the website (0.5 / 5 s).
+vc25_src = voice_conv.read_text()
+for needle in ["MIN_CONFIDENCE = 0.5f", "DUPLICATE_WINDOW_MS = 5000L"]:
+    if needle not in vc25_src:
+        fails.append(f"VoiceConversation.kt STT threshold changed: {needle} (UPDATE 25)")
+# Parser / conversation fixes C-1..C-18.
+ai25_src = (MAIN / "domain/AiAssistant.kt").read_text()
+for needle in ["fun correctionPair", "fun stripLeadingYes",
+               "fun isKeyStatusMessage", "fun ordinalIndex",
+               "val dayEpoch: Long? = null"]:
+    if needle not in ai25_src:
+        fails.append(f"AiAssistant.kt missing UPDATE 25 piece: {needle}")
+if "entry.dayEpoch ?: action.dayEpoch" not in (MAIN / "data/repository/Repositories.kt").read_text():
+    fails.append("Repositories.kt does not save multi-date entries on their own day (UPDATE 25 C-11)")
+conv25_src = (MAIN / "domain/Conversation.kt").read_text()
+for needle in ["TRANSLATE_REPLY", "fun languageRequestForm",
+               "gk_capital", "fun gkCapitalAnswer"]:
+    if needle not in conv25_src:
+        fails.append(f"Conversation.kt missing UPDATE 25 piece: {needle}")
+for bad in ["ask me for the module and I will make a spec",
+            "module request karo to main spec bana"]:
+    if bad in conv25_src:
+        fails.append(f"Conversation.kt still carries the proactive module suggestion: {bad!r} (UPDATE 25 C-6)")
+if '"dhadhe" to "dhandha"' not in (MAIN / "domain/Multilingual.kt").read_text():
+    fails.append("Multilingual.kt missing the 'dhadhe' spelling (UPDATE 25 C-8)")
+if "fun isWrongLanguage" not in (MAIN / "domain/CloudAiClient.kt").read_text():
+    fails.append("CloudAiClient.kt missing isWrongLanguage (UPDATE 25 C-15)")
+# Kotlin acceptance suite.
+u25_test = TEST / "Update25Test.kt"
+if not u25_test.exists():
+    fails.append("Update25Test.kt missing (UPDATE 25 acceptance suite)")
+else:
+    u25_src = u25_test.read_text()
+    for needle in ["c1_followUpAmountMergesIntoPendingPreview",
+                   "c2_yesPlusEntryNotSwallowed",
+                   "c3_correctionPicksRightNumber",
+                   "c4_numberWordsRoute",
+                   "c5_greetingDoesNotHijackProfitQuestion",
+                   "c6_noProactiveModuleSuggestionButExplicitRequestStillSpecs",
+                   "c7_keyStatusUnderstood",
+                   "c8_howToAddDhadhe",
+                   "c9_localGeneralKnowledgeCapital",
+                   "c10_internalTransferBothDirections",
+                   "c11_multiDateEntriesKeepTheirOwnDay",
+                   "c12_dueSplitReceivedPlusDueEqualsTotal",
+                   "c13_translateVsSwitch",
+                   "c14_hinglishMarkersAndLowConfidenceFallback",
+                   "c15_cloudReplyLanguageChecked",
+                   "c17_typedInterruptPrefix",
+                   "c18_ordinalDeletePicksShownOrder",
+                   "voiceCap_dailyLimitIs10",
+                   "voiceShorten_longReplySpeaksFirstTwoSentencesOnly",
+                   "voiceQuota_pacificDayResetsAtMidnightPacific",
+                   "regression_deletePronounStillResolvesToLastSaved"]:
+        if needle not in u25_src:
+            fails.append(f"Update25Test.kt missing test: {needle}")
+# Python mirror batch.
+mirror_src25 = mirror.read_text()
+for needle in ["def correction_pair", "def strip_leading_yes",
+               "def is_key_status_message", "def ordinal_index",
+               "def shorten_for_voice", "def build_voice_json",
+               "def extract_audio_base64", "def pacific_day",
+               "def is_wrong_language", "def strip_interrupt_prefix",
+               "TRANSLATE_REPLY", "gk_capital",
+               "AI_VOICE_DAILY_LIMIT = 10",
+               "u25-c1: follow-up merges",
+               "u25-c2: 'Ha aur 200 UPI bhi add kar do'",
+               "u25-c3: correction picks the right number",
+               "u25-c5: greeting must not hijack",
+               "u25-c6: no proactive module suggestion",
+               "u25-c11: multi-date entries keep their own day",
+               "u25-c12: due split",
+               "u25-c13: 'likho' translates one reply",
+               "u25-c17: typed interrupt",
+               "u25-c18: ordinal delete picks the shown order"]:
+    if needle not in mirror_src25:
+        fails.append(f"ai_assistant_mirror.py missing UPDATE 25 piece: {needle!r}")
+if mirror_src25.count("@t(\"u25-") < 20:
+    fails.append("ai_assistant_mirror.py has fewer than 20 u25- tests")
+for bad in ["ask me for the module and I will make a spec",
+            "module request karo to main spec bana"]:
+    if bad in mirror_src25:
+        fails.append(f"ai_assistant_mirror.py still carries the proactive module suggestion: {bad!r} (UPDATE 25 C-6)")
 
 # 9. Python mirror of AccountingEngine — run the unit-test cases
 def customer_due(total, received): return max(total - received, 0)

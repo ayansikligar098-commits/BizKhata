@@ -5,7 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.booleanPreferencesKey
-import androidx.datastore.preferences.core.floatPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -50,8 +50,9 @@ class SettingsStore(context: Context) {
     private val AI_LANGUAGE_PREF = stringPreferencesKey("ai_language_pref")
     private val CUSTOM_SERVICES = stringPreferencesKey("custom_services")
     private val VOICE_RESPONSES = booleanPreferencesKey("voice_responses_enabled")
-    private val VOICE_RATE = floatPreferencesKey("voice_speech_rate")
-    private val VOICE_PITCH = floatPreferencesKey("voice_speech_pitch")
+    private val VOICE_NAME = stringPreferencesKey("voice_name")
+    private val VOICE_USED_COUNT = intPreferencesKey("voice_used_count")
+    private val VOICE_USED_DATE = stringPreferencesKey("voice_used_date")
     private val VOICE_CONTINUOUS = booleanPreferencesKey("voice_continuous_mode")
 
     /** Theme mode: LIGHT, DARK or SYSTEM (default SYSTEM — follows the phone). */
@@ -336,14 +337,32 @@ class SettingsStore(context: Context) {
         store.edit { it[AI_LANGUAGE_PREF] = code.trim().ifBlank { "AUTO" } }
     }
 
-    // --- BizKhata AI Assistant voice (UPDATE 18) ---
-    // Speak replies aloud (default ON), speech rate / pitch, and
+    // --- BizKhata AI Assistant voice (UPDATE 18, rewritten UPDATE 25) ---
+    // Speak replies aloud (default ON) with the REAL AI voice, and
     // continuous conversation mode. Stored app-wide in v1, like the
     // AI-language preference above — the same values apply whichever
     // business profile is active; profile isolation of the RECORDS
     // is unaffected (every voice action still goes through the
     // pipeline with this profile's id). No audio is ever stored.
-    // Speech rate 1.0 = normal; 0.8 slow, 1.25 fast.
+    //
+    // UPDATE 25 (owner order 2026-11-27): the phone's voice is GONE
+    // ("Phone Ki Awaz Mat Do, Proper AI Ki Voice Chahiye Muje") —
+    // the old speech-rate / pitch settings were device-voice settings
+    // and are retired with it (their DataStore keys are simply no
+    // longer read). What remains:
+    //  - [voiceName]: the picked AI voice (a plain prebuilt-voice
+    //    name, default "Kore" — the owner hears the voices in
+    //    Settings → Voice and picks his own; no provider/model name
+    //    ever appears in the UI).
+    //  - The daily counter ([voiceUsedCount] + [voiceUsedDate]): how
+    //    many of today's 10 AI-voice replies are used. The day is a
+    //    Pacific calendar day (the provider resets daily quotas at
+    //    midnight Pacific) — [consumeVoiceReply] resets the counter
+    //    when the stored day is not today. The counter is VISIBLE
+    //    (chat + Settings → Voice) and the limit is a HARD STOP.
+    // The voice-replies toggle now controls the AI voice; off = text
+    // only. When the voice cannot speak (no key / limit reached) the
+    // reply stays text — never a silent device-voice fallback.
 
     val voiceResponsesEnabled: Flow<Boolean> = store.data.map { it[VOICE_RESPONSES] ?: true }
 
@@ -351,16 +370,52 @@ class SettingsStore(context: Context) {
         store.edit { it[VOICE_RESPONSES] = enabled }
     }
 
-    val voiceSpeechRate: Flow<Float> = store.data.map { (it[VOICE_RATE] ?: 1.0f).coerceIn(0.5f, 2.0f) }
+    val voiceName: Flow<String> = store.data.map { it[VOICE_NAME] ?: "Kore" }
 
-    suspend fun setVoiceSpeechRate(rate: Float) {
-        store.edit { it[VOICE_RATE] = rate.coerceIn(0.5f, 2.0f) }
+    suspend fun setVoiceName(name: String) {
+        val clean = name.trim().ifBlank { "Kore" }
+        store.edit { it[VOICE_NAME] = clean }
     }
 
-    val voiceSpeechPitch: Flow<Float> = store.data.map { (it[VOICE_PITCH] ?: 1.0f).coerceIn(0.5f, 2.0f) }
+    /** Spoken replies used today (Pacific day, see [voiceUsedDate]). */
+    val voiceUsedCount: Flow<Int> = store.data.map { it[VOICE_USED_COUNT] ?: 0 }
 
-    suspend fun setVoiceSpeechPitch(pitch: Float) {
-        store.edit { it[VOICE_PITCH] = pitch.coerceIn(0.5f, 2.0f) }
+    /** The Pacific day (yyyy-MM-dd) the counter belongs to. */
+    val voiceUsedDate: Flow<String> = store.data.map { it[VOICE_USED_DATE] ?: "" }
+
+    /**
+     * Spend one AI-voice reply for today (Pacific day [todayPacific]).
+     * Resets the counter first when the stored day is not today.
+     * Returns false — spending NOTHING — when today's limit
+     * ([dailyLimit], 10) is already reached, so the caller shows the
+     * honest "voice finished today" line instead of speaking. The
+     * check + increment run INSIDE one store.edit, so two replies
+     * racing cannot both spend the last slot.
+     */
+    suspend fun consumeVoiceReply(todayPacific: String, dailyLimit: Int): Boolean {
+        var spent = false
+        store.edit { prefs ->
+            val used = if (prefs[VOICE_USED_DATE] != todayPacific) 0 else (prefs[VOICE_USED_COUNT] ?: 0)
+            if (used < dailyLimit) {
+                prefs[VOICE_USED_COUNT] = used + 1
+                prefs[VOICE_USED_DATE] = todayPacific
+                spent = true
+            }
+        }
+        return spent
+    }
+
+    /**
+     * Mark today as fully spent (the service answered 429 — the
+     * limit is hit even if our counter disagrees). The counter is
+     * set to the limit for today, so the next reply shows the honest
+     * line instead of calling again.
+     */
+    suspend fun markVoiceQuotaExhausted(todayPacific: String, dailyLimit: Int) {
+        store.edit { prefs ->
+            prefs[VOICE_USED_COUNT] = dailyLimit
+            prefs[VOICE_USED_DATE] = todayPacific
+        }
     }
 
     val voiceContinuousMode: Flow<Boolean> = store.data.map { it[VOICE_CONTINUOUS] ?: false }

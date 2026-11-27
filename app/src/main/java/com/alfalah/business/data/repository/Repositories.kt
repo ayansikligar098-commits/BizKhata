@@ -506,7 +506,11 @@ class BusinessRepository(private val db: AppDatabase) {
                     ratePaise = entry.amountPaise,
                     totalPaise = entry.amountPaise,
                     mode = entry.mode,
-                    dayEpoch = action.dayEpoch,
+                    // UPDATE 25 (C-11): an entry dated by its own
+                    // words ("kal ke 200") saves on ITS day, not the
+                    // action day — otherwise yesterday's entry would
+                    // land in today's books.
+                    dayEpoch = entry.dayEpoch ?: action.dayEpoch,
                     createdAtEpochMs = System.currentTimeMillis(),
                     directExpensePaise = 0,
                     notes = "AI Assistant se add ki gayi"
@@ -515,8 +519,11 @@ class BusinessRepository(private val db: AppDatabase) {
             markExecuted(profileId, key, "daily entries total=${action.entries.sumOf { it.amountPaise }}")
         }
         // Verify: re-read the rows just written (the backend result, not a guess).
+        // UPDATE 25 (C-11): a multi-date save writes on several days,
+        // so the re-read covers every entry day, not just the action day.
+        val entryDays = action.entries.map { it.dayEpoch ?: action.dayEpoch }.toSet()
         val savedToday = txs.search(profileId, "AI Assistant")
-            .filter { it.dateEpochDay == action.dayEpoch && it.kind == "INCOME" }
+            .filter { it.dateEpochDay in entryDays && it.kind == "INCOME" }
         ids.addAll(savedToday.map { it.id })
         return AiExecuteResult.Saved(
             "Save ho gaya: ${action.entries.joinToString(", ") { "${it.serviceLabel} ${rupeesText(it.amountPaise)} (${it.mode.name})" }}. " +
