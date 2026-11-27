@@ -99,8 +99,52 @@ object AiAssistantParser {
          *  banao"). Lives for ONE turn like the checklist offer; a
          *  bare yes while it is pending CONFIRMS it (queue the
          *  development request, or perform the service add). */
-        val pendingAppChange: AppChangeRequest? = null
+        val pendingAppChange: AppChangeRequest? = null,
+        /** UPDATE 23 — the most recent entry this conversation
+         *  VERIFIED as saved (backend-confirmed ids, never a guess).
+         *  "Isko remove kardo" / "Hatana hai" resolves against this
+         *  entry — the website delete bug (2026-11-27 16:02–16:04 IST)
+         *  was exactly that the delete path had no such record and
+         *  fell through to the cloud model, which fabricated the
+         *  deletion and then denied the verified save. Cleared when
+         *  the entry itself is deleted. Never a financial record on
+         *  its own: it only points at a real saved row. */
+        val lastSavedEntry: LastSavedEntry? = null
     )
+
+    /** UPDATE 23 — one backend-verified saved entry, for "isko"
+     *  resolution and for the contradiction guard (the cloud prompt
+     *  and the cloud-reply guard both ground on this, never on a
+     *  guess). [transactionId] is the real Room row id. */
+    data class LastSavedEntry(
+        val transactionId: Long,
+        val label: String,
+        val serviceLabel: String,
+        val amountPaise: Long,
+        val mode: PaymentMode?,
+        val dayEpoch: Long
+    ) {
+        /** The label rebuilt from the current amount — a correction
+         *  changes the amount, and the label must follow it.
+         *  [formatPaise] is the same-package formatter (Chatbot.kt);
+         *  the file's older formatRupees call sites resolve against
+         *  the UI package and are a separate pre-existing issue. */
+        fun withAmount(newAmountPaise: Long): LastSavedEntry = copy(
+            amountPaise = newAmountPaise,
+            label = "$serviceLabel ${formatPaise(newAmountPaise)}${mode?.let { " (${it.name})" } ?: ""}"
+        )
+    }
+
+    /** UPDATE 23 — the last verified save as plain facts for the
+     *  cloud prompt / contradiction guard. Null when nothing in this
+     *  conversation was verified as saved — then no save is ever
+     *  claimed. */
+    fun lastSavedFacts(context: AiConversationContext): String? {
+        val saved = context.lastSavedEntry ?: return null
+        return "Last verified saved entry in this conversation: ${saved.label} — " +
+            "saved and verified by the backend. Never say it was not saved, " +
+            "never say its figures existed before, and never claim you deleted it."
+    }
 
     /** UPDATE 22 — a proposed change to BizKhata itself (module /
      *  service / feature / category / field / report / modify), as
@@ -541,9 +585,17 @@ object AiAssistantParser {
             )
         }
 
-        // --- Correction / deletion of an existing transaction ------------
+        // --- UPDATE 23: context-aware delete (mirror of the website
+        //     fix for the 2026-11-27 16:02–16:04 IST bug). "Isko remove
+        //     kardo" / "Hatana hai" have NO amount in the message, so
+        //     the old amount-gated delete never fired and the message
+        //     fell through to the cloud model, which fabricated the
+        //     deletion. Delete is handled HERE, locally, before the
+        //     correction branch — never by the cloud.
+        if (isDeleteIntent(q)) return parseDelete(q, context, lang)
+
+        // --- Correction of an existing transaction ----------------
         if (q.contains("galat") || q.contains("correct") || q.contains("sahi karo") ||
-            q.contains("delete") || q.contains("hatao") || q.contains("remove") ||
             q.contains("badlo") || q.contains("change karo")
         ) {
             return parseCorrection(q, context)
@@ -698,6 +750,11 @@ object AiAssistantParser {
     }
 
     private fun isFactualQuestion(q: String): Boolean {
+        // UPDATE 23 — a delete request is an ACTION, never a factual
+        // question: "Hatana hai?" must reach the delete path, not the
+        // knowledge engine (which has no delete answer and would
+        // deflect to a limitation).
+        if (isDeleteIntent(q)) return false
         val questionWord = q.contains("kitna") || q.contains("kitne") || q.contains("kitni") ||
             q.contains("kis") || q.contains("kaun") || q.contains("kya") || q.contains("kab") ||
             q.contains("compare") || q.contains("batao") || q.contains("dikhao") ||
@@ -1167,13 +1224,72 @@ object AiAssistantParser {
         )
     }
 
+    /** UPDATE 23 — delete intent: "delete / hata / remove / mita"
+     *  in any common form ("hatao", "hatana hai", "delete kar do",
+     *  "remove kardo", "mita do", "isko hata do"). Substring match is
+     *  safe here: "hata" only occurs in delete words in the
+     *  canonicalised vocabulary, and the checklist guard ("checklist
+     *  delete kar do" is a checklist edit, not a ledger delete) lives
+     *  in [MeaningParser]. */
+    fun isDeleteIntent(q: String): Boolean {
+        val n = normalise(q)
+        return n.contains("delete") || n.contains("hata") ||
+            n.contains("remove") || n.contains("mita")
+    }
+
+    /** UPDATE 23 — a pronoun / demonstrative pointing at the
+     *  just-saved entry: "isko", "ye", "is entry ko", "ye wali",
+     *  "is wali", "us entry". Word-boundary regex: a bare "ye"
+     *  inside another word must not match. */
+    fun isPronounReference(q: String): Boolean {
+        val n = normalise(q).trim()
+        return Regex("\\b(isko|is entry|is wali|ye wali|ye entry|us entry|usko|ye)\\b")
+            .containsMatchIn(n)
+    }
+
+    /** UPDATE 23 — the delete path (see parse()). Three cases, in
+     *  order — none of them ever reaches the cloud:
+     *  1. Pronoun + a verified last saved entry → delete THAT entry:
+     *     a real [AiAction.DeleteTransaction] for preview → confirm →
+     *     backend delete → verify (Recycle Bin + audit).
+     *  2. An amount (and/or service) in the message → the existing
+     *     exact-entry resolution ([parseCorrection] → the ViewModel
+     *     resolves it against today's transactions, lists candidates
+     *     when several match, honest error when none match).
+     *  3. Bare delete — no amount, no resolvable "isko" → Clarify
+     *     with missing ["delete target"]: the ViewModel lists the
+     *     recent entries to pick from, never a cloud fall-through
+     *     and never a fake "hata diya". */
+    private fun parseDelete(
+        q: String,
+        context: AiConversationContext,
+        lang: AiLanguage = AiLanguage.HINGLISH
+    ): AiParseResult {
+        val saved = context.lastSavedEntry
+        if (isPronounReference(q) && saved != null) {
+            val action = AiAction.DeleteTransaction(saved.transactionId, saved.label)
+            return AiParseResult.Action(
+                action,
+                "Ye entry delete karu?\n• ${saved.label}"
+            )
+        }
+        if (mainAmount(q) != null) return parseCorrection(q, context)
+        return AiParseResult.Clarify(
+            "Kaunsi entry delete karu? Aaj ki recent entries me se batao — " +
+                "ya amount/service batao (jaise \"600 wali Aadhaar entry delete kar do\"). " +
+                "Main pehle dikhaunga, phir aap confirm karenge; delete hone par entry " +
+                "Recycle Bin me jayegi, hamesha ke liye nahi mitegi.",
+            missing = listOf("delete target")
+        )
+    }
+
     private fun parseCorrection(q: String, context: AiConversationContext): AiParseResult {
         // Correction needs an identified record — the ViewModel resolves it
         // by amount/service against today's transactions and, when exactly
         // one matches, confirms; otherwise it lists the matches to pick.
         // Here we only extract the intent + amount; resolution is in the VM.
         val amount = mainAmount(q)
-        val isDelete = q.contains("delete") || q.contains("hatao") || q.contains("remove")
+        val isDelete = isDeleteIntent(q)
         val service = detectService(q)
         val newAmount = Regex("(\\d+)\\s*(?:rs|rupaye)?\\s*(?:se|to|kar|karo|badlo)").find(q)
             ?.groupValues?.get(1)?.toLongOrNull()

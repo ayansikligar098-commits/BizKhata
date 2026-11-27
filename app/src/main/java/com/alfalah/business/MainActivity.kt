@@ -348,12 +348,25 @@ class MainActivity : ComponentActivity() {
                                     AuthScreen(
                                         hasPin = hasPin,
                                         savedMobile = savedMobile,
-                                        onCreatePin = { mobile, pin ->
+                                        // Honest "no account" state: profiles
+                                        // already on this device means the
+                                        // create-PIN screen is a re-lock,
+                                        // not a fresh install (UPDATE 24).
+                                        hasExistingData = profiles.isNotEmpty(),
+                                        onCreatePin = { mobile, pin, onError ->
                                             scope.launch {
-                                                settings.setPin(mobile, pin)
-                                                unlocked = true
-                                                nav.navigate(Routes.DASHBOARD) {
-                                                    popUpTo(Routes.AUTH) { inclusive = true }
+                                                // setPin refuses (false)
+                                                // when a PIN already
+                                                // exists — one account per
+                                                // mobile, never an
+                                                // overwrite (UPDATE 24).
+                                                if (settings.setPin(mobile, pin)) {
+                                                    unlocked = true
+                                                    nav.navigate(Routes.DASHBOARD) {
+                                                        popUpTo(Routes.AUTH) { inclusive = true }
+                                                    }
+                                                } else {
+                                                    onError("Is number par account pehle se hai — login karo ya Forgot PIN use karo")
                                                 }
                                             }
                                         },
@@ -366,6 +379,22 @@ class MainActivity : ComponentActivity() {
                                                     }
                                                 } else {
                                                     onWrong()
+                                                }
+                                            }
+                                        },
+                                        // Forgot PIN (UPDATE 24): the
+                                        // registered mobile is the gate;
+                                        // on success the user is logged
+                                        // in immediately with the new PIN.
+                                        onResetPin = { mobile, pin, onError ->
+                                            scope.launch {
+                                                if (settings.resetPin(mobile, pin)) {
+                                                    unlocked = true
+                                                    nav.navigate(Routes.DASHBOARD) {
+                                                        popUpTo(Routes.AUTH) { inclusive = true }
+                                                    }
+                                                } else {
+                                                    onError("Number account wale number se match nahi karta — wahi number daalo jo account banate waqt diya tha.")
                                                 }
                                             }
                                         },

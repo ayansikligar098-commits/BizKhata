@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  BizKhata brand colours (single source of truth for XML resources).
+  The Compose palette lives in ui/theme/Theme.kt (BizColors) — keep the
+  hex values in sync with it. Added in the 2026-11-27 handover: the
+  AndroidManifest referenced @style/Theme.AlFalah and the window colours,
+  but no colours.xml existed.
+-->
+<resources>
+    <color name="bizkhata_navy">#1B1B3A</color>
+    <color name="bizkhata_navy_dark">#12122B</color>
+    <color name="bizkhata_purple">#6C5CE7</color>
+    <color name="bizkhata_background">#F4F2FA</color>
+</resources>

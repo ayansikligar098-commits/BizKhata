@@ -85,6 +85,8 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
             "Gujarati, Marathi, Bengali, Punjabi, Tamil, Telugu, Kannada, Malayalam, Odia, Assamese, Urdu, " +
             "Nepali or another Indian language, in native script or Roman letters. Reply naturally in that language. " +
             "Use ONLY the facts in the user's message. NEVER invent a number, a name or a record. " +
+            "NEVER claim that you saved, deleted, corrected or refunded any record — you cannot perform " +
+            "financial actions; only the app does that, after the user confirms it. " +
             "If the facts say there is no record, say so plainly. " +
             "If the question is casual conversation, reply naturally and briefly — never mention business records unless the question asks about them. " +
             "Keep the answer short and simple, in plain words a shopkeeper understands."
@@ -120,6 +122,7 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
                     "If the user states a plan (for example they will do PAN Card work tomorrow), acknowledge the plan and offer relevant help such as a checklist — NEVER ask how much money was involved. " +
                     "If the user asks about their business, use ONLY the ledger facts given below — never invent a number, a name or a record; if there is no record, say so plainly and give the real figure (zero when nothing is recorded). " +
                     "You never perform a financial action yourself: if the user wants an entry, a payment or a change, say what you understood and ask them to confirm — the app handles the actual save. " +
+                    "NEVER claim that you saved, deleted, corrected or refunded any record, and NEVER say a saved entry was never saved or that its figures existed before — the facts below state what was verified as saved. " +
                     "If you do not know something (live prices, news, weather, or anything outside the facts below), say so honestly in plain words instead of inventing it. " +
                     "Keep replies short and simple, in plain words a shopkeeper understands."
                 val user = context + "\n\nLatest message: " + question
@@ -165,6 +168,7 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
             "If the user states a plan (for example they will do PAN Card work tomorrow), acknowledge the plan and offer relevant help such as a checklist — NEVER ask how much money was involved. " +
             "If the user asks about their business, use ONLY the ledger facts given below — never invent a number, a name or a record; if there is no record, say so plainly and give the real figure (zero when nothing is recorded). " +
             "You never perform a financial action yourself: if the user wants an entry, a payment or a change, say what you understood and ask them to confirm — the app handles the actual save. " +
+            "NEVER claim that you saved, deleted, corrected or refunded any record, and NEVER say a saved entry was never saved or that its figures existed before — the facts below state what was verified as saved. " +
             "If you do not know something (live prices, news, weather, or anything outside the facts below), say so honestly in plain words instead of inventing it. " +
             "Keep replies short and simple, in plain words a shopkeeper understands."
         val user = context + "\n\nLatest message: " + question
@@ -323,6 +327,60 @@ class CloudAiClient(private val apiKey: String) : AiFeatures.AiAssistant {
     }
 
     companion object {
+        /** UPDATE 23 — deterministic cloud-reply guard (the
+         *  2026-11-27 16:02–16:04 IST bug: the cloud model fabricated
+         *  "hata diya" and then denied a verified save). A cloud
+         *  reply must NEVER claim a financial action happened: when
+         *  the local engine produced no action, any such claim is a
+         *  fabrication and the caller replaces the reply with
+         *  [guardCloudReply]'s honest text. The patterns cover
+         *  Hinglish + English claims of save / delete / correct /
+         *  refund, and the contradiction ("save hi nahi ki thi",
+         *  "pehle se tha") that denied a verified save. */
+        private val financialClaimPatterns = listOf(
+            Regex("hata\\s*diya", RegexOption.IGNORE_CASE),
+            Regex("delete\\s*(kar\\s*)?diya", RegexOption.IGNORE_CASE),
+            Regex("remove\\s*(kar\\s*)?diya", RegexOption.IGNORE_CASE),
+            Regex("mita\\s*diya", RegexOption.IGNORE_CASE),
+            Regex("delete\\s*ho\\s*gaya", RegexOption.IGNORE_CASE),
+            Regex("save\\s*(kar\\s*)?diya", RegexOption.IGNORE_CASE),
+            Regex("save\\s*ho\\s*gaya", RegexOption.IGNORE_CASE),
+            Regex("refund\\s*(kar\\s*)?diya", RegexOption.IGNORE_CASE),
+            Regex("sahi\\s*kar\\s*diya", RegexOption.IGNORE_CASE),
+            Regex("correct\\s*kar\\s*diya", RegexOption.IGNORE_CASE),
+            Regex("save\\s*hi\\s*nahi\\s*ki", RegexOption.IGNORE_CASE),
+            Regex("save\\s*nahi\\s*ki\\s*thi", RegexOption.IGNORE_CASE),
+            Regex("pehle\\s*se\\s*tha", RegexOption.IGNORE_CASE),
+            Regex("pehle\\s*se\\s*hi", RegexOption.IGNORE_CASE),
+            Regex("\\bsaved\\b", RegexOption.IGNORE_CASE),
+            Regex("\\bdeleted\\b", RegexOption.IGNORE_CASE),
+            Regex("\\brefunded\\b", RegexOption.IGNORE_CASE)
+        )
+
+        /** True when [text] claims a financial action happened
+         *  (saved / deleted / corrected / refunded) or denies a
+         *  verified save. Pure pattern match — no model involved. */
+        fun containsFinancialActionClaim(text: String): Boolean =
+            financialClaimPatterns.any { it.containsMatchIn(text) }
+
+        /** The honest replacement for a cloud reply that claimed a
+         *  financial action: states plainly that nothing was
+         *  saved/deleted from chat, and grounds the last verified
+         *  save ([lastSavedLabel]) instead of denying it. Returns
+         *  null when the reply is clean (no claim) — the caller
+         *  keeps it unchanged. */
+        fun guardCloudReply(text: String, lastSavedLabel: String?): String? {
+            if (!containsFinancialActionClaim(text)) return null
+            val savedNote = if (lastSavedLabel != null) {
+                " Aapki last verified saved entry ($lastSavedLabel) abhi bhi saved hai — maine use delete nahi kiya hai."
+            } else {
+                ""
+            }
+            return "Ruko — maine abhi chat se koi entry save ya delete nahi ki hai. " +
+                "Jo entry confirm karke save ya delete hoti hai, wahi asal me hoti hai.$savedNote " +
+                "Agar koi entry delete karni hai to batao — main pehle dikhaunga, phir tum confirm karoge."
+        }
+
         /** UPDATE 19 service address (OpenAI-compatible chat
          *  completions). Bearer auth, OpenAI-style messages, reply in
          *  choices[0].message.content, SSE deltas in

@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.alfalah.business.domain.AppLanguage
+import com.alfalah.business.domain.AuthUtils
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -89,29 +90,122 @@ class SettingsStore(context: Context) {
     // --- Local mobile + PIN login (v2 spec §A, single-owner local-first) ---
     // Only a SHA-256 hash of the 4-digit PIN is stored — never the PIN
     // itself, and never a password. No PIN set = no lock screen.
+    //
+    // UPDATE 24 — login/account mirror (2026-11-27, owner report:
+    // "Login Save Nahi Rehta, Ek Number Se Kai Account Bana Rahe Hai" /
+    // "Kal Account Banaya Tha, Aaj No Account Found Bata Rha Hai").
+    // Website bugs checked against Android, and what was found:
+    //  (1) Re-registration overwrote the owner — setPin() blindly
+    //      replaced PIN_HASH + MOBILE, so Settings → Remove PIN Lock →
+    //      restart → create-PIN silently made a "second account" from
+    //      any number, changing the PIN/identity. FIXED: setPin() now
+    //      refuses (returns false, writes nothing) when a PIN already
+    //      exists — the check runs INSIDE store.edit, so it is atomic.
+    //      The only way to replace a PIN is the explicit resetPin()
+    //      (Forgot PIN), which requires the registered mobile.
+    //  (2) No mobile normalisation — the mobile was stored raw
+    //      (trim only), and AuthScreen truncated input to 10 digits,
+    //      so "+91 98123 45670" was stored as the WRONG number
+    //      "9198123456". FIXED: every mobile goes through
+    //      AuthUtils.normalizeMobile (strip non-digits, drop +91/91/0,
+    //      keep last 10) before it is stored or compared. The PIN hash
+    //      is SHA-256 of the PIN alone, never salted with the mobile,
+    //      so normalising cannot break an existing PIN.
+    //      LIMIT: a mobile mangled by the old truncation (stored as a
+    //      wrong 10-digit number) cannot be recovered by normalising —
+    //      the lost digit is gone. The PIN still works (hash is
+    //      PIN-only), so the owner can always unlock with the PIN and
+    //      remove/re-create it; only PIN-forgotten + mangled-mobile
+    //      together has no in-app recovery.
+    //  (3) Login persistence — DIFFERS from the website, nothing to
+    //      mirror: there is no session/token/cookie here at all. The
+    //      owner (PIN hash + mobile) lives in the DataStore file
+    //      "bizkhata_settings", which survives app restart and process
+    //      death — no localStorage split, no refresh-token rotation,
+    //      no multi-tab race. The per-process "unlocked" flag resetting
+    //      on restart is the intended PIN lock (re-prompt), not
+    //      account loss; no code path drops the owner on restart.
+    //  (4) "No account" wording — the create screen used to appear
+    //      with no explanation whenever no PIN was stored, even when
+    //      business data already existed. AuthScreen now says so
+    //      (see hasExistingData), and resetPin() distinguishes a
+    //      wrong number from no account at all.
+    //  (5) Forgot PIN — there was NO reset flow: the old hint was
+    //      "remove the PIN from Settings after unlocking, or clear app
+    //      data (erases everything)" — a catch-22 when the PIN itself
+    //      is forgotten. FIXED: resetPin() below + Forgot PIN in
+    //      AuthScreen; on success the user is logged in immediately.
+    //      LIMIT: v1 is local-first with no OTP/SMS (free-only build),
+    //      so the gate is knowing the registered mobile number.
+    //  (6) Data preservation — VERIFIED: setPin/clearPin touch only
+    //      DataStore keys, never Room; registration only inserts a
+    //      profile. No wipe path exists in the auth flow.
 
     val hasPin: Flow<Boolean> = store.data.map { !it[PIN_HASH].isNullOrBlank() }
     val mobile: Flow<String> = store.data.map { it[MOBILE] ?: "" }
 
-    suspend fun setPin(mobileNumber: String, pin: String) {
+    /**
+     * Create the owner account (first run, or after the PIN was removed
+     * in Settings). Returns false — writing NOTHING — when a PIN already
+     * exists: one account per mobile, re-registration is refused, never
+     * an overwrite. Callers show "Is number par account pehle se hai —
+     * login karo ya Forgot PIN use karo". The mobile is normalised
+     * before storing; throws when the PIN/number is malformed.
+     */
+    suspend fun setPin(mobileNumber: String, pin: String): Boolean {
         require(pin.length == 4 && pin.all { it.isDigit() }) { "PIN must be 4 digits" }
-        val hash = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(pin.toByteArray(Charsets.UTF_8))
-            .joinToString("") { "%02x".format(it) }
-        store.edit {
-            it[PIN_HASH] = hash
-            it[MOBILE] = mobileNumber.trim()
+        val mobile = AuthUtils.normalizeMobile(mobileNumber)
+        require(mobile.length == 10) { "Enter a valid 10-digit mobile number." }
+        var created = false
+        store.edit { prefs ->
+            if (prefs[PIN_HASH].isNullOrBlank()) {
+                prefs[PIN_HASH] = AuthUtils.hashPin(pin)
+                prefs[MOBILE] = mobile
+                created = true
+            }
         }
+        return created
+    }
+
+    /**
+     * Forgot PIN: replace the PIN only when an account exists AND the
+     * entered mobile matches the registered mobile (both normalised, so
+     * a stored number written before UPDATE 24 still matches when it
+     * was stored correctly). Returns false on a wrong number or when
+     * there is no account at all — the caller tells those apart.
+     * On success the caller logs the user in immediately.
+     */
+    suspend fun resetPin(mobileNumber: String, pin: String): Boolean {
+        require(pin.length == 4 && pin.all { it.isDigit() }) { "PIN must be 4 digits" }
+        val mobile = AuthUtils.normalizeMobile(mobileNumber)
+        require(mobile.length == 10) { "Enter a valid 10-digit mobile number." }
+        var reset = false
+        store.edit { prefs ->
+            val storedHash = prefs[PIN_HASH]
+            val storedMobile = AuthUtils.normalizeMobile(prefs[MOBILE] ?: "")
+            if (!storedHash.isNullOrBlank() && storedMobile == mobile) {
+                prefs[PIN_HASH] = AuthUtils.hashPin(pin)
+                prefs[MOBILE] = mobile
+                reset = true
+            }
+        }
+        return reset
     }
 
     suspend fun verifyPin(pin: String): Boolean {
-        val hash = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(pin.toByteArray(Charsets.UTF_8))
-            .joinToString("") { "%02x".format(it) }
+        val hash = AuthUtils.hashPin(pin)
         val stored = store.data.first()[PIN_HASH]
         return stored != null && stored == hash
     }
 
+    /**
+     * Remove the PIN lock (deliberate owner action from Settings, only
+     * reachable while unlocked). The MOBILE is deliberately KEPT: when
+     * the owner creates a new PIN afterwards, AuthScreen enforces the
+     * same registered number, so a removed PIN can never be used to
+     * silently re-register the account under a different number. Room
+     * data is never touched here.
+     */
     suspend fun clearPin() {
         store.edit { it.remove(PIN_HASH) }
     }

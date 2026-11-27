@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Launch / window theme for BizKhata. The app UI itself is Jetpack Compose
+  (ui/theme/Theme.kt — BizKhataTheme); this XML theme is what the system
+  shows before Compose draws (window background, status/navigation bars).
+
+  Added in the 2026-11-27 handover: the AndroidManifest referenced
+  @style/Theme.AlFalah, but no themes.xml existed, so the project could
+  not build. Parent is Theme.Material3.DayNight.NoActionBar (Material 3
+  is a project dependency); NoActionBar because Compose provides its own
+  top app bar. Colours come from colors.xml (navy + purple brand).
+-->
+<resources>
+    <style name="Theme.AlFalah" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:windowBackground">@color/bizkhata_background</item>
+        <item name="android:statusBarColor">@color/bizkhata_navy</item>
+        <item name="android:navigationBarColor">@color/bizkhata_navy</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

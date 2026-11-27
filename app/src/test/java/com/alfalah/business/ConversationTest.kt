@@ -18,7 +18,9 @@ import com.alfalah.business.domain.VoiceInterrupt
 import com.alfalah.business.domain.VoiceNaturalPhrasing
 import com.alfalah.business.domain.VoicePipeline
 import com.alfalah.business.domain.VoiceText
-import com.alfalah.business.domain.ServiceType
+import com.alfalah.business.domain.CloudAiClient
+import com.alfalah.business.domain.ConversationIntent
+import com.alfalah.business.domain.PaymentMode
 import com.alfalah.business.domain.AiFeatures
 import com.alfalah.business.domain.GraphemeChunker
 import com.alfalah.business.domain.SseEvent
@@ -1449,5 +1451,128 @@ class StreamingTest {
     fun serviceCountQuestionFromLedger() {
         val answer = knowledgeAnswer("Kitne PAN Card banaye aaj?")
         assertTrue("the count comes from the ledger: $answer", answer.contains("PAN Card jobs: 0"))
+    }
+
+    // ------------------------------------------------------------------
+    // UPDATE 23 — context-aware delete (the 2026-11-27 16:02–16:04 IST
+    // live bug: "Isko Remove Kardo" → fake "hata diya", then the
+    // verified ₹600 save denied, then a false "chat can't delete").
+    // ------------------------------------------------------------------
+    private val savedEntryCtx = ctx.copy(
+        lastSavedEntry = AiAssistantParser.LastSavedEntry(
+            transactionId = 7L,
+            label = "Aadhaar Services ₹600 (UPI)",
+            serviceLabel = "Aadhaar Services",
+            amountPaise = 60_000L,
+            mode = PaymentMode.UPI,
+            dayEpoch = today
+        )
+    )
+
+    @Test
+    fun deleteIntent_hatanaHaiIsBusinessActionNotStatement() {
+        val meaning = ConversationEngine.understand("Hatana hai", ctx, AiLanguage.HINGLISH)
+        assertEquals("a bare delete is a financial action, never a statement", ConversationIntent.BUSINESS_ACTION, meaning.intent)
+        val meaning2 = ConversationEngine.understand("Isko remove kardo", ctx, AiLanguage.HINGLISH)
+        assertEquals("a pronoun delete is a financial action, never unknown", ConversationIntent.BUSINESS_ACTION, meaning2.intent)
+    }
+
+    @Test
+    fun deletePronoun_resolvesToLastSavedEntry() {
+        val result = parse("Isko remove kardo", savedEntryCtx)
+        assertTrue("pronoun delete must be a delete action, not a clarification: $result", result is AiAssistantParser.AiParseResult.Action)
+        val action = (result as AiAssistantParser.AiParseResult.Action).action
+        assertTrue("the action deletes the saved row: $action", action is AiAssistantParser.AiAction.DeleteTransaction)
+        assertEquals(7L, (action as AiAssistantParser.AiAction.DeleteTransaction).transactionId)
+        assertTrue("the preview names the entry", result.preview.contains("Aadhaar Services"))
+        assertTrue("the preview names the amount", result.preview.contains("₹600"))
+    }
+
+    @Test
+    fun deletePronoun_exact4pmWordingResolves() {
+        val result = parse("Isko remove kardo me bus check kar rha tha", savedEntryCtx)
+        assertTrue("the exact owner wording must resolve: $result", result is AiAssistantParser.AiParseResult.Action)
+        val action = (result as AiAssistantParser.AiParseResult.Action).action
+        assertTrue(action is AiAssistantParser.AiAction.DeleteTransaction)
+        assertEquals(7L, (action as AiAssistantParser.AiAction.DeleteTransaction).transactionId)
+    }
+
+    @Test
+    fun deletePronoun_withoutSavedEntryIsBareClarification() {
+        val result = parse("Isko remove kardo", ctx)
+        assertTrue("no verified save → ask which entry, never a fake delete: $result", result is AiAssistantParser.AiParseResult.Clarify)
+        assertTrue("the clarification asks for the delete target", (result as AiAssistantParser.AiParseResult.Clarify).missing.contains("delete target"))
+        assertFalse("never a delete action without a target: $result", result is AiAssistantParser.AiParseResult.Action)
+    }
+
+    @Test
+    fun deleteBare_hatanaHaiIsClarificationNotCloud() {
+        val result = parse("Hatana hai", ctx)
+        assertTrue("bare delete asks which entry: $result", result is AiAssistantParser.AiParseResult.Clarify)
+        assertTrue((result as AiAssistantParser.AiParseResult.Clarify).missing.contains("delete target"))
+        assertFalse("bare delete never becomes a conversational/cloud reply", result is AiAssistantParser.AiParseResult.Conversational)
+    }
+
+    @Test
+    fun deleteAmountForm_stillResolvesByAmount() {
+        val result = parse("Aadhaar 600 wali entry delete kar do", ctx)
+        assertTrue("amount delete still resolves by amount/service: $result", result is AiAssistantParser.AiParseResult.Clarify)
+        assertTrue("the amount path asks for the exact entry", (result as AiAssistantParser.AiParseResult.Clarify).missing.contains("exact entry"))
+    }
+
+    @Test
+    fun deleteIntent_doesNotBecomeFactualQuestion() {
+        val result = parse("Hatana hai?", ctx)
+        assertFalse("a delete with '?' is not a factual question: $result", result is AiAssistantParser.AiParseResult.Factual)
+        assertTrue("it is the bare-delete clarification: $result", result is AiAssistantParser.AiParseResult.Clarify)
+    }
+
+    @Test
+    fun deleteIntent_wordFormsRecognised() {
+        assertTrue(AiAssistantParser.isDeleteIntent("entry hata do"))
+        assertTrue(AiAssistantParser.isDeleteIntent("ye wali entry mita do"))
+        assertTrue(AiAssistantParser.isDeleteIntent("delete kar do"))
+        assertTrue(AiAssistantParser.isDeleteIntent("isko remove kar do"))
+        assertFalse("a save is not a delete", AiAssistantParser.isDeleteIntent("Xerox ke 300 cash hue"))
+        assertTrue(AiAssistantParser.isPronounReference("isko remove kardo"))
+        assertTrue(AiAssistantParser.isPronounReference("ye wali entry hata do"))
+        assertTrue(AiAssistantParser.isPronounReference("is entry ko delete kar do"))
+        assertFalse("an amount delete has no pronoun", AiAssistantParser.isPronounReference("600 wali entry delete kar do"))
+    }
+
+    @Test
+    fun cloudGuard_claimsAreCaughtAndCleanRepliesPass() {
+        assertTrue("fabricated deletion is a claim", CloudAiClient.containsFinancialActionClaim("Theek hai bhai, hata diya."))
+        assertTrue("denying a verified save is a claim", CloudAiClient.containsFinancialActionClaim("Maine koi entry save hi nahi ki thi, ₹600 pehle se tha."))
+        assertTrue("an English delete claim is a claim", CloudAiClient.containsFinancialActionClaim("Entry deleted successfully."))
+        assertTrue("a save claim is a claim", CloudAiClient.containsFinancialActionClaim("Save ho gaya, ₹600 UPI."))
+        assertFalse("a plain summary is not a claim", CloudAiClient.containsFinancialActionClaim("Aaj ka profit ₹600 hai."))
+        assertFalse("a greeting is not a claim", CloudAiClient.containsFinancialActionClaim("Namaste! Aaj shop ka kaam kaisa chal raha hai?"))
+    }
+
+    @Test
+    fun cloudGuard_replacementIsHonestAndGroundsTheSave() {
+        val guarded = CloudAiClient.guardCloudReply("Theek hai bhai, hata diya.", "Aadhaar Services ₹600 (UPI)")
+        assertNotNull("a claim must be replaced", guarded)
+        assertTrue("the replacement says nothing was deleted from chat: $guarded", guarded!!.contains("koi entry save ya delete nahi ki"))
+        assertTrue("the replacement grounds the verified save: $guarded", guarded.contains("Aadhaar Services ₹600 (UPI)"))
+        assertFalse("the replacement never repeats the denial: $guarded", guarded.contains("save hi nahi ki"))
+        assertNull("a clean reply is kept unchanged", CloudAiClient.guardCloudReply("Aaj ka profit ₹600 hai.", "Aadhaar Services ₹600 (UPI)"))
+    }
+
+    @Test
+    fun lastSavedFacts_groundVerifiedSave() {
+        val facts = AiAssistantParser.lastSavedFacts(savedEntryCtx)
+        assertNotNull("a verified save produces facts", facts)
+        assertTrue("the facts name the entry: $facts", facts!!.contains("Aadhaar Services ₹600 (UPI)"))
+        assertTrue("the facts forbid denying the save: $facts", facts.contains("Never say it was not saved"))
+        assertNull("no verified save → no facts, never a claimed save", AiAssistantParser.lastSavedFacts(ctx))
+    }
+
+    @Test
+    fun correctionStillWorksAfterDeleteFix() {
+        val result = parse("Xerox 300 wali entry galat hai, 350 karo", ctx)
+        assertTrue("a correction is still the exact-entry clarification: $result", result is AiAssistantParser.AiParseResult.Clarify)
+        assertTrue((result as AiAssistantParser.AiParseResult.Clarify).missing.contains("exact entry"))
     }
 }

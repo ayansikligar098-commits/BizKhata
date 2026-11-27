@@ -1186,7 +1186,11 @@ class ChatbotViewModel(
             is AiAssistantParser.AiParseResult.Conversational -> handleConversational(result, text, lang)
             is AiAssistantParser.AiParseResult.Action -> showPreview(result.action, result.preview)
             is AiAssistantParser.AiParseResult.Clarify -> {
-                if (result.missing == listOf("exact entry")) {
+                if (result.missing == listOf("delete target")) {
+                    // UPDATE 23 — bare delete: list the recent entries
+                    // to pick from, never a cloud fall-through.
+                    resolveBareDelete(text)
+                } else if (result.missing == listOf("exact entry")) {
                     resolveCorrection(text)
                 } else {
                     clarification = ClarificationState(text, result.partial, result.missing)
@@ -1307,6 +1311,11 @@ class ChatbotViewModel(
             deepLinkRoute = result.deepLinkRoute,
             deepLinkLabel = result.deepLinkLabel
         )
+        // UPDATE 23 — deterministic cloud guard: a cloud reply must
+        // NEVER claim a financial action. If the streamed text claims
+        // one, replace it with the honest guard text (grounded on the
+        // last verified save) instead of showing the fabrication.
+        if (delivered && cloudFlow != null) guardDeliveredCloudReply()
         if (!delivered && cloudFlow == null && result.needsCloud) {
             val limitation = ConversationEngine.honestLimitation(lang)
             streamReply(localText = limitation)
@@ -1384,6 +1393,24 @@ class ChatbotViewModel(
         }
     }
 
+    /** UPDATE 23 — deterministic cloud guard, applied to the last
+     *  delivered bot message after a cloud stream: if the cloud text
+     *  claims a save / delete / correct / refund, or denies a
+     *  verified save, replace it in place with the honest guard text.
+     *  The guard is pattern-based ([CloudAiClient.guardCloudReply]),
+     *  never the model judging itself. */
+    private fun guardDeliveredCloudReply() {
+        val shown = _messages.value.lastOrNull { !it.fromUser } ?: return
+        val guarded = CloudAiClient.guardCloudReply(shown.text, context.lastSavedEntry?.label) ?: return
+        replaceMessage(shown.id, shown.copy(text = guarded))
+    }
+
+    /** UPDATE 23 — the last verified save as facts for every cloud
+     *  prompt, so the model is told what WAS saved and can never
+     *  honestly claim it was not. Empty when nothing was verified. */
+    private fun lastSavedFactsForCloud(): String =
+        AiAssistantParser.lastSavedFacts(context)?.let { "\n$it" }.orEmpty()
+
     /** The cloud conversational reply as a REAL streaming Flow
      *  (UPDATE 17): chunks arrive over SSE and are fed to the
      *  typewriter as they arrive. Null when no key is configured. */
@@ -1395,7 +1422,7 @@ class ChatbotViewModel(
         }
         val contextText = "The user runs a CSC centre (Xerox, Printing, PAN Card, Aadhaar, Voter ID, Ayushman Card, Money Transfer, Passport Photo, Scanning). " +
             "Reply in the same language and style as the user's latest message.\n\n" +
-            snapshotFacts(_snapshot.value) + "\nConversation so far:\n$history"
+            snapshotFacts(_snapshot.value) + lastSavedFactsForCloud() + "\nConversation so far:\n$history"
         return CloudAiClient(key).converseStreaming(userText, contextText)
     }
 
@@ -1410,7 +1437,7 @@ class ChatbotViewModel(
         }
         val contextText = "The user runs a CSC centre (Xerox, Printing, PAN Card, Aadhaar, Voter ID, Ayushman Card, Money Transfer, Passport Photo, Scanning). " +
             "Reply in the same language and style as the user's latest message.\n\n" +
-            snapshotFacts(_snapshot.value) + "\nConversation so far:\n$history"
+            snapshotFacts(_snapshot.value) + lastSavedFactsForCloud() + "\nConversation so far:\n$history"
         return CloudAiClient(key).converse(userText, contextText)
     }
 
@@ -1486,7 +1513,7 @@ class ChatbotViewModel(
             }
             val cloudFlow = CloudAiClient(key).converseStreaming(
                 text,
-                snapshotFacts(_snapshot.value) + "\nConversation so far:\n$history"
+                snapshotFacts(_snapshot.value) + lastSavedFactsForCloud() + "\nConversation so far:\n$history"
             )
             val delivered = streamReply(
                 localText = builtIn,
@@ -1494,6 +1521,10 @@ class ChatbotViewModel(
                 isAiSummary = true,
                 note = "AI summary — figures aapke real record se hain."
             )
+            // UPDATE 23 — same deterministic cloud guard as the
+            // conversational path: a summary must never claim a
+            // financial action.
+            if (delivered) guardDeliveredCloudReply()
             if (!delivered) {
                 streamReply(
                     localText = builtIn,
@@ -1804,7 +1835,7 @@ class ChatbotViewModel(
             val result = repository.executeAiAction(profileId, action, key)
             when (result) {
                 is BusinessRepository.AiExecuteResult.Saved -> {
-                    updateContextFrom(action)
+                    updateContextFrom(action, result.ids)
                     append(ChatMessage(text = "✓ ${result.message}", fromUser = false))
                 }
                 is BusinessRepository.AiExecuteResult.Duplicate -> {
@@ -1874,16 +1905,43 @@ class ChatbotViewModel(
         }
     }
 
-    private fun updateContextFrom(action: AiAssistantParser.AiAction) {
+    private fun updateContextFrom(action: AiAssistantParser.AiAction, savedIds: List<Long> = emptyList()) {
         context = when (action) {
             is AiAssistantParser.AiAction.DailyEntries -> {
                 val last = action.entries.last()
-                context.copy(lastService = last.service, lastServiceLabel = last.serviceLabel, lastMode = last.mode, dayEpoch = action.dayEpoch)
+                // UPDATE 23 — remember the VERIFIED save (the real Room
+                // id from the backend result, never a guess) so "isko
+                // remove kardo" resolves to it, and so the cloud prompt
+                // + guard can ground on it instead of denying it.
+                val savedId = savedIds.lastOrNull()
+                context.copy(
+                    lastService = last.service, lastServiceLabel = last.serviceLabel, lastMode = last.mode, dayEpoch = action.dayEpoch,
+                    lastSavedEntry = savedId?.let {
+                        AiAssistantParser.LastSavedEntry(
+                            transactionId = it,
+                            label = "${last.serviceLabel} ${formatPaise(last.amountPaise)} (${last.mode.name})",
+                            serviceLabel = last.serviceLabel,
+                            amountPaise = last.amountPaise, mode = last.mode, dayEpoch = action.dayEpoch
+                        )
+                    } ?: context.lastSavedEntry
+                )
             }
             is AiAssistantParser.AiAction.Expense -> context.copy(lastMode = action.draft.mode ?: context.lastMode, dayEpoch = action.dayEpoch)
             is AiAssistantParser.AiAction.AgentPayment -> context.copy(lastAgentName = action.agentName, lastMode = action.mode ?: context.lastMode, dayEpoch = action.dayEpoch)
             is AiAssistantParser.AiAction.MoneyTransfer -> context.copy(lastService = ServiceType.MONEY_TRANSFER, lastServiceLabel = "Money Transfer", lastMode = action.mode ?: context.lastMode, dayEpoch = action.dayEpoch)
             is AiAssistantParser.AiAction.CustomerPayment -> context.copy(lastCustomerName = action.customerName, lastMode = action.mode ?: context.lastMode, dayEpoch = action.dayEpoch)
+            is AiAssistantParser.AiAction.DeleteTransaction -> {
+                // UPDATE 23 — the deleted entry is gone: "isko" must
+                // never resolve to it again.
+                if (context.lastSavedEntry?.transactionId == action.transactionId) context.copy(lastSavedEntry = null) else context
+            }
+            is AiAssistantParser.AiAction.CorrectTransaction -> {
+                // UPDATE 23 — a corrected entry keeps its identity but
+                // its amount (and label) change; the guard must quote
+                // the NEW figure, never the old one.
+                val saved = context.lastSavedEntry
+                if (saved?.transactionId == action.transactionId) context.copy(lastSavedEntry = saved.withAmount(action.newAmountPaise)) else context
+            }
             else -> context
         }
     }
@@ -2048,7 +2106,19 @@ class ChatbotViewModel(
     // ------------------------------------------------------------------
     private suspend fun resolveCorrection(text: String) {
         val norm = AiAssistantParser.normalise(text)
-        val isDelete = norm.contains("delete") || norm.contains("hatao") || norm.contains("remove")
+        val isDelete = AiAssistantParser.isDeleteIntent(norm)
+        // UPDATE 23 — "isko" resolves to the verified last saved
+        // entry first, even when the amount is in a different message
+        // (or in none at all). This is the defence behind the
+        // parser's own pronoun branch: whichever path reaches here,
+        // a pronoun delete never becomes an amount question.
+        if (isDelete && AiAssistantParser.isPronounReference(norm)) {
+            context.lastSavedEntry?.let { saved ->
+                val action = AiAssistantParser.AiAction.DeleteTransaction(saved.transactionId, saved.label)
+                showPreview(action, previewTextFor(action))
+                return
+            }
+        }
         val amounts = AiAssistantParser.findAmounts(norm)
         val service = AiAssistantParser.detectService(norm)
         // "300 wali entry ko 350 karo" → old 300, new 350.
@@ -2096,6 +2166,50 @@ class ChatbotViewModel(
                 append(
                     ChatMessage(
                         text = "Aisi ${candidates.size} entries mili — kaunsi wali?\n$list\n\"Pehli\" / \"Dusri\" ya number likh dein.",
+                        fromUser = false
+                    )
+                )
+            }
+        }
+    }
+
+    /** UPDATE 23 — bare delete: no amount in the message and no
+     *  resolvable "isko". List the most recent entries (last 3 of
+     *  today, service-filtered when the message names one) and let
+     *  the user pick — one match goes straight to the delete preview,
+     *  several become a clarification with candidates, and none is an
+     *  honest "koi entry nahi mili", never a cloud fall-through and
+     *  never a fake "hata diya". Delete still needs preview +
+     *  confirmation, like every financial action. */
+    private suspend fun resolveBareDelete(text: String) {
+        val norm = AiAssistantParser.normalise(text)
+        val service = AiAssistantParser.detectService(norm)
+        val recent = repository.findTransactionsForCorrection(profileId, today, null, service?.label).takeLast(3)
+        when {
+            recent.isEmpty() -> {
+                append(
+                    ChatMessage(
+                        text = "Aaj ki ${service?.label ?: ""} koi entry nahi mili jo delete kar sakun. " +
+                            "Pehle entry add karein, ya amount/service batao — jaise \"600 wali Aadhaar entry delete kar do\".",
+                        fromUser = false
+                    )
+                )
+            }
+            recent.size == 1 -> {
+                val tx = recent[0]
+                val label = "${tx.category} ${formatPaise(tx.amountPaise)} (${tx.mode.name}) — ${tx.description}"
+                val action = AiAssistantParser.AiAction.DeleteTransaction(tx.id, label)
+                showPreview(action, previewTextFor(action))
+            }
+            else -> {
+                val candidates = recent.map {
+                    CandidateTx(it.id, "${it.category} ${formatPaise(it.amountPaise)} (${it.mode.name})", it.amountPaise)
+                }
+                clarification = ClarificationState(text, null, listOf("exact entry"), candidates = candidates, isDelete = true)
+                val list = candidates.mapIndexed { i, c -> "${i + 1}. ${c.label}" }.joinToString("\n")
+                append(
+                    ChatMessage(
+                        text = "Aisi ${candidates.size} recent entries mili — kaunsi delete karni hai?\n$list\n\"Pehli\" / \"Dusri\" ya number likh dein.",
                         fromUser = false
                     )
                 )

@@ -900,6 +900,130 @@ for prefix in ["u21-followups", "u21-multiturn-long", "u22-appchange",
 if "FULL 10-15 MESSAGE ARC" not in mirror_src2:
     fails.append("ai_assistant_mirror.py does not print a full 10-15 message arc transcript (UPDATE 21 report requirement)")
 
+# 15. UPDATE 24 — login/account mirror (website fix mirrored to Android).
+# Owner report 2026-11-27: "Login Save Nahi Rehta, Ek Number Se Kai
+# Account Bana Rahe Hai" / "Kal Account Banaya Tha, Aaj No Account
+# Found Bata Rha Hai". Website bugs checked against Android:
+# (1) setPin blindly overwrote the owner -> now refuses when a PIN
+# exists; (2) no mobile normalisation (+91 truncated to a wrong
+# number by take(10)) -> AuthUtils.normalizeMobile everywhere;
+# (5) no Forgot PIN at all -> resetPin + Forgot PIN screen.
+# (3) persistence and (6) data preservation differ / were already
+# correct on Android (DataStore, no session/token; auth never touches
+# Room) — no code to check, documented in SettingsStore.
+auth_utils = MAIN / "domain/AuthUtils.kt"
+if not auth_utils.exists():
+    fails.append("domain/AuthUtils.kt missing (UPDATE 24 normalisation + hash)")
+else:
+    au_src = auth_utils.read_text()
+    for needle in ["fun normalizeMobile", "takeLast(10)", "fun hashPin", "fun maskMobile"]:
+        if needle not in au_src:
+            fails.append(f"AuthUtils.kt missing: {needle}")
+settings_store_src = (MAIN / "data/SettingsStore.kt").read_text()
+for needle in ["fun setPin(mobileNumber: String, pin: String): Boolean",
+               "fun resetPin(mobileNumber: String, pin: String): Boolean",
+               "AuthUtils.normalizeMobile", "AuthUtils.hashPin"]:
+    if needle not in settings_store_src:
+        fails.append(f"SettingsStore missing: {needle} (UPDATE 24)")
+if "it[MOBILE] = mobileNumber.trim()" in settings_store_src:
+    fails.append("SettingsStore still stores the mobile raw (must normalise, UPDATE 24)")
+if 'getInstance("SHA-256")' in settings_store_src:
+    fails.append("SettingsStore still hashes the PIN inline (must use AuthUtils.hashPin, UPDATE 24)")
+auth_src = (MAIN / "ui/auth/AuthScreen.kt").read_text()
+for needle in ["Forgot PIN", "onResetPin", "hasExistingData",
+               "Is number par account pehle se hai", "take(12)",
+               "Is device par aapka business data pehle se hai"]:
+    if needle not in auth_src:
+        fails.append(f"AuthScreen missing: {needle!r} (UPDATE 24)")
+if ".take(10)" in auth_src:
+    fails.append("AuthScreen still truncates the mobile field with take(10) (mangles +91 numbers, UPDATE 24)")
+if "clear the app data (this erases local data" in auth_src:
+    fails.append("AuthScreen still tells forgot-PIN users to clear app data (UPDATE 24 reset replaces this)")
+for needle in ["onResetPin", "hasExistingData",
+               "Is number par account pehle se hai — login karo ya Forgot PIN use karo",
+               "Number account wale number se match nahi karta"]:
+    if needle not in main_act:
+        fails.append(f"MainActivity missing: {needle!r} (UPDATE 24)")
+if not (TEST / "AuthUtilsTest.kt").exists():
+    fails.append("AuthUtilsTest.kt missing (UPDATE 24 test suite)")
+else:
+    au_test = (TEST / "AuthUtilsTest.kt").read_text()
+    for needle in ["plus91WithSpacesAndDashes_sameNumber", "leadingZero_sameNumber",
+                   "tenDigitsStartingWith91_notStripped", "hashPin_isDeterministicSha256Hex"]:
+        if needle not in au_test:
+            fails.append(f"AuthUtilsTest.kt missing: {needle}")
+
+
+# 18. UPDATE 23 — context-aware delete (the 2026-11-27 16:02–16:04 IST
+# live bug: "Isko Remove Kardo" → fake "hata diya", then the verified
+# ₹600 save denied, then a false "chat can't delete"). The website
+# root cause was a delete gated on an amount in the same message with
+# no "isko" resolution; the Android mirror must have the same five
+# behaviours: pronoun delete resolves to the last VERIFIED save,
+# bare delete lists recent candidates (never a cloud fall-through),
+# the cloud never claims a financial action (deterministic guard +
+# prompt hardening), the contradiction guard grounds on the verified
+# save, and the add flow / checklist / "Ha" / module behaviour is kept.
+ai_src3 = (MAIN / "domain/AiAssistant.kt").read_text()
+for needle in ["LastSavedEntry", "lastSavedEntry", "isDeleteIntent",
+               "isPronounReference", "parseDelete", "\"delete target\"",
+               "fun lastSavedFacts"]:
+    if needle not in ai_src3:
+        fails.append(f"AiAssistant.kt missing: {needle} (UPDATE 23 context-aware delete)")
+if "isDeleteIntent(q)" not in ai_src3.split("private fun isFactualQuestion")[1].split("private fun detectHelp")[0]:
+    fails.append("AiAssistant.kt isFactualQuestion does not guard delete intents (UPDATE 23: 'Hatana hai?' must reach the delete path)")
+conv_src3 = (MAIN / "domain/Conversation.kt").read_text()
+if "AiAssistantParser.isDeleteIntent(q)" not in conv_src3:
+    fails.append("Conversation.kt understand() does not classify delete intent before casual/statement (UPDATE 23: 'Hatana hai' would be a statement, 'Isko remove kardo' unknown)")
+_u23 = conv_src3.split("fun understand")[1].split("fun resolveFollowUp")[0]
+if "2c. UPDATE 23" not in _u23 or _u23.index("2c. UPDATE 23") < _u23.index("2b. UPDATE 21"):
+    fails.append("Conversation.kt delete step (2c) is missing or not after the follow-up step (UPDATE 23)")
+cloud_src = (MAIN / "domain/CloudAiClient.kt").read_text()
+for needle in ["containsFinancialActionClaim", "guardCloudReply",
+               "NEVER claim that you saved, deleted, corrected or refunded"]:
+    if needle not in cloud_src:
+        fails.append(f"CloudAiClient.kt missing: {needle} (UPDATE 23 cloud-never-claims guard)")
+vm_src3 = (MAIN / "ui/chatbot/ChatbotViewModel.kt").read_text()
+for needle in ["resolveBareDelete", "lastSavedEntry", "guardDeliveredCloudReply",
+               "lastSavedFactsForCloud", "\"delete target\""]:
+    if needle not in vm_src3:
+        fails.append(f"ChatbotViewModel.kt missing: {needle} (UPDATE 23 delete mirror)")
+if "DeleteTransaction ->" not in vm_src3.split("private fun updateContextFrom")[1].split("private fun tryCompleteClarification")[0]:
+    fails.append("ChatbotViewModel.updateContextFrom does not clear lastSavedEntry on delete (UPDATE 23: 'isko' would resolve to a deleted entry)")
+conv_test3 = (TEST / "ConversationTest.kt").read_text()
+for needle in ["deleteIntent_hatanaHaiIsBusinessActionNotStatement",
+               "deletePronoun_resolvesToLastSavedEntry",
+               "deletePronoun_exact4pmWordingResolves",
+               "deletePronoun_withoutSavedEntryIsBareClarification",
+               "deleteBare_hatanaHaiIsClarificationNotCloud",
+               "deleteAmountForm_stillResolvesByAmount",
+               "deleteIntent_doesNotBecomeFactualQuestion",
+               "deleteIntent_wordFormsRecognised",
+               "cloudGuard_claimsAreCaughtAndCleanRepliesPass",
+               "cloudGuard_replacementIsHonestAndGroundsTheSave",
+               "lastSavedFacts_groundVerifiedSave",
+               "correctionStillWorksAfterDeleteFix"]:
+    if needle not in conv_test3:
+        fails.append(f"ConversationTest.kt missing UPDATE 23 test: {needle}")
+mirror_src3 = mirror.read_text()
+for needle in ["def _is_delete_intent", "def _is_pronoun_ref",
+               "def _parse_delete", "def cloud_claim_guard",
+               "def last_saved_facts", "def _resolve_bare_delete",
+               "def _resolve_correction", "\"delete target\"",
+               "u23-delete: exact 4pm sequence",
+               "u23-delete: bare delete lists recent candidates",
+               "u23-delete: amount-form delete still works",
+               "u23-delete: two same-amount entries are disambiguated",
+               "u23-delete: non-existent amount is an honest error",
+               "u23-delete: correction still works",
+               "u23-delete: no contradiction after a verified save",
+               "u23-delete: cloud guard catches fabricated claims",
+               "u23-delete: parser-level"]:
+    if needle not in mirror_src3:
+        fails.append(f"ai_assistant_mirror.py missing UPDATE 23 piece: {needle!r}")
+if mirror_src3.count("@t(\"u23-delete") < 10:
+    fails.append("ai_assistant_mirror.py has fewer than 10 u23-delete tests")
+
 # 9. Python mirror of AccountingEngine — run the unit-test cases
 def customer_due(total, received): return max(total - received, 0)
 def agent_payable(charges, paid): return max(charges - paid, 0)

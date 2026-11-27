@@ -727,8 +727,10 @@ def parse(text, ctx=None, agents=None, customers=None):
         return ("Factual", text)
     if "refund" in q or "wapas" in q or "return" in q:
         return ("Clarify", {"question": reply(lang, "refund"), "missing": ["refund entry", "amount", "mode"]})
-    if any(w in q for w in ("galat", "correct", "sahi karo", "delete", "hatao", "remove", "badlo", "change karo")):
+    if any(w in q for w in ("galat", "correct", "sahi karo", "badlo", "change karo")):
         return ("Clarify", {"question": "correction", "missing": ["exact entry"]})
+    if _is_delete_intent(q):
+        return _parse_delete(q, ctx, lang)
     if re.search(r"\bkal\b", q):
         return ("Clarify", {"question": reply(lang, "kal"), "missing": ["date"]})
     if is_internal(q):
@@ -816,7 +818,99 @@ def detect_help(q):
     return None
 
 
+def _is_delete_intent(q):
+    """UPDATE 23 — delete intent: delete / hata / remove / mita in
+    any common form ("hatao", "hatana hai", "delete kar do",
+    "remove kardo", "mita do"). Mirror of AiAssistantParser.isDeleteIntent."""
+    n = normalise(q)
+    return ("delete" in n or "hata" in n or "remove" in n or "mita" in n)
+
+
+def _is_pronoun_ref(q):
+    """UPDATE 23 — a pronoun / demonstrative pointing at the
+    just-saved entry: "isko", "ye", "is entry ko", "ye wali",
+    "is wali", "us entry". Mirror of isPronounReference."""
+    n = normalise(q).strip()
+    return bool(re.search(r"\b(isko|is entry|is wali|ye wali|ye entry|us entry|usko|ye)\b", n))
+
+
+def _parse_delete(q, ctx, lang="hinglish"):
+    """UPDATE 23 — the delete path (mirror of AiAssistantParser.parseDelete).
+    Three cases, in order — none ever reaches the cloud:
+    1. Pronoun + a verified last saved entry -> delete THAT entry
+       (a real DeleteTransaction action for preview -> confirm ->
+       backend delete -> verify, Recycle Bin + audit).
+    2. An amount (and/or service) in the message -> the exact-entry
+       clarification (the Session resolves it against today's
+       transactions, lists candidates when several match, honest
+       error when none match).
+    3. Bare delete — no amount, no resolvable "isko" -> Clarify
+       with missing ["delete target"]: the Session lists the recent
+       entries to pick from, never a cloud fall-through and never a
+       fake "hata diya"."""
+    saved = (ctx or {}).get("last_saved_entry")
+    if _is_pronoun_ref(q) and saved is not None:
+        action = {"kind": "DeleteTransaction",
+                  "transaction_id": saved["id"], "label": saved["label"],
+                  "preview": f"Ye entry delete karu?\n• {saved['label']}"}
+        return ("Action", action)
+    if main_amount(q) is not None:
+        return ("Clarify", {"question": "correction",
+                            "missing": ["exact entry"]})
+    return ("Clarify", {
+        "question": ("Kaunsi entry delete karu? Aaj ki recent entries me se batao — "
+                     "ya amount/service batao (jaise \"600 wali Aadhaar entry delete kar do\"). "
+                     "Main pehle dikhaunga, phir aap confirm karenge; delete hone par entry "
+                     "Recycle Bin me jayegi, hamesha ke liye nahi mitegi."),
+        "missing": ["delete target"]})
+
+
+def cloud_claim_guard(reply, last_saved_entry=None):
+    """UPDATE 23 — deterministic cloud-reply guard (mirror of
+    CloudAiClient.guardCloudReply). A cloud reply must NEVER claim a
+    financial action happened: when the local engine produced no
+    action, any such claim is a fabrication. Returns the honest
+    replacement text when the reply claims a save / delete / correct
+    / refund or denies a verified save, else None (keep it)."""
+    patterns = [
+        r"hata\s*diya", r"delete\s*(kar\s*)?diya", r"remove\s*(kar\s*)?diya",
+        r"mita\s*diya", r"delete\s*ho\s*gaya", r"save\s*(kar\s*)?diya",
+        r"save\s*ho\s*gaya", r"refund\s*(kar\s*)?diya", r"sahi\s*kar\s*diya",
+        r"correct\s*kar\s*diya", r"save\s*hi\s*nahi\s*ki",
+        r"save\s*nahi\s*ki\s*thi", r"pehle\s*se\s*tha", r"pehle\s*se\s*hi",
+        r"\bsaved\b", r"\bdeleted\b", r"\brefunded\b"]
+    if not any(re.search(p, reply, re.I) for p in patterns):
+        return None
+    saved_note = ""
+    if last_saved_entry is not None:
+        saved_note = (f" Aapki last verified saved entry ({last_saved_entry['label']}) "
+                      "abhi bhi saved hai — maine use delete nahi kiya hai.")
+    return ("Ruko — maine abhi chat se koi entry save ya delete nahi ki hai. "
+            "Jo entry confirm karke save ya delete hoti hai, wahi asal me hoti hai."
+            + saved_note + " "
+            "Agar koi entry delete karni hai to batao — main pehle dikhaunga, "
+            "phir tum confirm karoge.")
+
+
+def last_saved_facts(ctx):
+    """UPDATE 23 — the last verified save as plain facts for the cloud
+    prompt / contradiction guard (mirror of AiAssistantParser.lastSavedFacts).
+    None when nothing in this conversation was verified as saved."""
+    saved = (ctx or {}).get("last_saved_entry")
+    if saved is None:
+        return None
+    return (f"Last verified saved entry in this conversation: {saved['label']} — "
+            "saved and verified by the backend. Never say it was not saved, "
+            "never say its figures existed before, and never claim you deleted it.")
+
+
 def is_factual(q):
+    # UPDATE 23 — a delete request is an ACTION, never a factual
+    # question: "Hatana hai?" must reach the delete path, not the
+    # knowledge engine (which has no delete answer and would deflect
+    # to a limitation). Mirror of the Kotlin isFactualQuestion guard.
+    if _is_delete_intent(q):
+        return False
     qw = any(w in q for w in ("kitna", "kitne", "kitni", "kis", "kaun", "kya", "kab",
                               "compare", "batao", "dikhao", "show", "hua tha", "last month",
                               "pichhle", "summary", "performance", "sabse zyada")) or q.endswith("?")
@@ -2459,6 +2553,19 @@ def understand(text, ctx=None, lang="hinglish"):
     fu = _resolve_follow_up(text, q, ctx, lang, time_ref)
     if fu is not None:
         return fu
+    # 2c. UPDATE 23 — delete intent ("Isko remove kardo",
+    #     "Hatana hai", "Aadhaar 600 wali entry delete kar do").
+    #     A financial ACTION, classified BEFORE casual / statement /
+    #     plan: "Hatana hai" would otherwise be a STATEMENT ("hai" is
+    #     a common word) and "Isko remove kardo" an UNKNOWN — both
+    #     used to fall through to the cloud model, which fabricated
+    #     the deletion (2026-11-27 16:02–16:04 IST). The "checklist"
+    #     guard: "checklist delete kar do" is a checklist edit, not a
+    #     ledger delete.
+    if "checklist" not in q and _is_delete_intent(q):
+        return {"intent": "BUSINESS_ACTION", "topic": _detect_topic(q, ctx),
+                "time": time_ref, "service": svc, "amount": amt_paise,
+                "raw": text, "canon": q, "lang": lang, "requested": None}
     # 3. Checklist — explicit service, then remembered plan, then the
     #    pending offer's topic, then the words.
     if _is_checklist(q, ctx):
@@ -3670,6 +3777,14 @@ class Session:
         self.dev_requests = []  # queued DevRequest records
         self.saved_entries = []  # executed financial actions
         self.saved_keys = set()
+        # UPDATE 23 — delete bookkeeping (mirror of the Room backend):
+        # soft-deleted rows land in the Recycle Bin with an audit log
+        # entry, and every saved income row gets a real id so "isko"
+        # can point at it. ctx["last_saved_entry"] is the verified
+        # save (set in _execute_pending, cleared when it is deleted).
+        self.recycle_bin = []
+        self.audit_log = []
+        self._next_tx_id = 1
 
     # -- helpers ------------------------------------------------------
     def _append(self, text, from_user=False, checklist=None,
@@ -3714,6 +3829,68 @@ class Session:
             self.pending_action = None
             return self._out("Conversational", text, "duplicate")
         self.saved_keys.add(key)
+        # UPDATE 23 — delete / correct (mirror of
+        # executeAiDeleteTransaction / executeAiCorrectTransaction):
+        # the target row must exist, the delete soft-deletes it into
+        # the Recycle Bin with an audit entry and VERIFIES it is gone
+        # before claiming anything; a correction rewrites the amount
+        # with an audit entry. A missing row is an honest failure,
+        # never a fake "hata diya".
+        if action.get("kind") in ("DeleteTransaction", "CorrectTransaction"):
+            tx = next((t for t in self.snap.get("txs", [])
+                       if t.get("id") == action.get("transaction_id")), None)
+            self.pending_action = None
+            if tx is None:
+                text = ("Wo entry nahi mili — shayad pehle hi delete ho chuki hai. "
+                        "Kuch bhi delete nahi hua hai.")
+                self._append(text)
+                return self._out("Conversational", text, "delete_failed")
+            if action.get("kind") == "DeleteTransaction":
+                self.snap["txs"] = [t for t in self.snap.get("txs", [])
+                                    if t.get("id") != tx["id"]]
+                self.saved_entries = [e for e in self.saved_entries
+                                      if e.get("id") != tx["id"]]
+                self.recycle_bin.append(dict(tx))
+                self.audit_log.append({"action": "DELETED",
+                                       "label": action.get("label"),
+                                       "old": f"{tx.get('category')} {tx.get('amount')}"})
+                # VERIFY: the row is really gone from the store.
+                gone = all(t.get("id") != tx["id"]
+                           for t in self.snap.get("txs", []))
+                if self.ctx.get("last_saved_entry", {}).get("id") == tx["id"]:
+                    self.ctx["last_saved_entry"] = None
+                if gone:
+                    text = (f"✓ Entry delete ho gayi: {action.get('label')}. "
+                            "Recycle Bin me gayi hai; audit log me record hai.")
+                    self._append(text)
+                    return self._out("Conversational", text, "deleted")
+                text = ("Delete nahi ho paya — phir se try karein. "
+                        "Kuch bhi delete nahi hua hai.")
+                self._append(text)
+                return self._out("Conversational", text, "delete_failed")
+            old = tx.get("amount", 0)
+            new = action.get("new_amount", 0)
+            if new <= 0:
+                text = "Sahi amount zero se zyada hona chahiye."
+                self._append(text)
+                return self._out("Conversational", text, "delete_failed")
+            tx["amount"] = new
+            for e in self.saved_entries:
+                if e.get("id") == tx["id"]:
+                    e["amount"] = new
+            self.audit_log.append({"action": "EDITED",
+                                   "label": action.get("label"),
+                                   "old": f"{tx.get('category')} {old}",
+                                   "new": f"{tx.get('category')} {new}"})
+            saved_entry = self.ctx.get("last_saved_entry")
+            if saved_entry is not None and saved_entry.get("id") == tx["id"]:
+                saved_entry["amount"] = new
+                saved_entry["label"] = (f"{saved_entry.get('service_label')} "
+                                        f"{fmt(new)} ({saved_entry.get('mode')})")
+            text = (f"✓ Entry sahi ho gayi: {tx.get('category')} {fmt(old)} → {fmt(new)}. "
+                    "Purani value audit log me safe hai.")
+            self._append(text)
+            return self._out("Conversational", text, "corrected")
         # Ledger validation (mirror of executeAiCustomerPayment /
         # executeAiAgentPayment): a payment only saves when the ledger
         # supports it — a customer payment needs a job with due >= the
@@ -3761,7 +3938,13 @@ class Session:
             # hai?"). Mirror that: the saved entries join the snap.
             for e in entries:
                 if action.get("kind") == "DailyEntries":
+                    # UPDATE 23 — every saved income row gets a real
+                    # id (mirror of the Room row id the backend
+                    # returns), so "isko" can point at it.
+                    e["id"] = self._next_tx_id
+                    self._next_tx_id += 1
                     self.snap.setdefault("txs", []).append({
+                        "id": e["id"],
                         "kind": "INCOME", "category": e.get("label"),
                         "amount": e.get("amount"), "mode": e.get("mode")})
                 elif action.get("kind") == "Expense":
@@ -3829,6 +4012,17 @@ class Session:
             self.ctx["last_service"] = (last.get("service"), last.get("label"))
             self.ctx["last_label"] = last.get("label")
             self.ctx["last_mode"] = last.get("mode")
+            # UPDATE 23 — remember the VERIFIED save (real id, real
+            # label) so "isko remove kardo" resolves to it, and so the
+            # cloud prompt + guard can ground on it instead of denying
+            # it. Only DailyEntries carry a row id here.
+            if action.get("kind") == "DailyEntries" and last.get("id") is not None:
+                self.ctx["last_saved_entry"] = {
+                    "id": last["id"],
+                    "label": f"{last.get('label')} {fmt(last.get('amount', 0))} ({last.get('mode')})",
+                    "service_label": last.get("label"),
+                    "amount": last.get("amount", 0),
+                    "mode": last.get("mode")}
             text = "✓ Save ho gaya.\n" + pending["preview"]
         else:
             text = ("Save nahi ho paya — phir se try karein. "
@@ -3865,6 +4059,57 @@ class Session:
         drop the clarification and treat the message as fresh)."""
         q = normalise(text)
         missing = clar.get("missing", [])
+        # UPDATE 23 — candidate picking ("Pehli" / "Dusri" / 1 / 2)
+        # for a delete / correction clarification, and the new amount
+        # for a correction (mirror of ChatbotViewModel.tryCompleteClarification).
+        candidates = clar.get("candidates", [])
+        if missing == ["new amount"] and candidates:
+            new = main_amount(q)
+            if new is None:
+                text_out = "Sahi amount kitna hona chahiye? Misal: \"350 karo\"."
+                self._append(text_out)
+                return self._out("Clarify", text_out, "clarify",
+                                 missing=["new amount"])
+            chosen = candidates[0]
+            self.clarification = None
+            action = {"kind": "CorrectTransaction",
+                      "transaction_id": chosen["id"], "label": chosen["label"],
+                      "new_amount": new * 100,
+                      "preview": f"Ye entry sahi karu?\n• {chosen['label']} → {fmt(new * 100)}"}
+            return self._show_preview(action, action["preview"])
+        if candidates:
+            pick = -1
+            if "pehli" in q or q.strip() == "1":
+                pick = 0
+            elif "dusri" in q or "doosri" in q or q.strip() == "2":
+                pick = 1
+            elif "teesri" in q or q.strip() == "3":
+                pick = 2
+            if 0 <= pick < len(candidates):
+                chosen = candidates[pick]
+                self.clarification = None
+                if clar.get("is_delete"):
+                    action = {"kind": "DeleteTransaction",
+                              "transaction_id": chosen["id"], "label": chosen["label"],
+                              "preview": f"Ye entry delete karu?\n• {chosen['label']}"}
+                    return self._show_preview(action, action["preview"])
+                new = main_amount(q)
+                if new is None:
+                    # Ask for the new amount — and remember that this
+                    # is now the pending question, so the next answer
+                    # ("350") routes to the new-amount branch above.
+                    self.clarification = {"text": clar["text"],
+                                          "missing": ["new amount"],
+                                          "candidates": [chosen]}
+                    text_out = "Sahi amount kitna hona chahiye? Misal: \"350 karo\"."
+                    self._append(text_out)
+                    return self._out("Clarify", text_out, "clarify",
+                                     missing=["new amount"])
+                action = {"kind": "CorrectTransaction",
+                          "transaction_id": chosen["id"], "label": chosen["label"],
+                          "new_amount": new * 100,
+                          "preview": f"Ye entry sahi karu?\n• {chosen['label']} → {fmt(new * 100)}"}
+                return self._show_preview(action, action["preview"])
         supplied = False
         if "payment mode" in missing and detect_mode(q):
             supplied = True
@@ -3920,6 +4165,109 @@ class Session:
                 "Kuch bhi change nahi hua hai.")
         self._append(text)
         return self._out("Conversational", text, "service_add_failed")
+
+    def _resolve_bare_delete(self, text):
+        """UPDATE 23 — bare delete (mirror of ChatbotViewModel.resolveBareDelete):
+        no amount and no resolvable "isko". List the most recent
+        entries (last 3 of today, service-filtered when the message
+        names one): one match goes straight to the delete preview,
+        several become a clarification with candidates, none is an
+        honest "koi entry nahi mili" — never a cloud fall-through and
+        never a fake "hata diya"."""
+        q = normalise(text)
+        svc = detect_service(q)
+        recent = [t for t in self.snap.get("txs", [])
+                  if svc is None or t.get("category") == svc[1]][-3:]
+        if not recent:
+            text_out = (f"Aaj ki {svc[1] if svc else ''} koi entry nahi mili jo delete kar sakun. "
+                        "Pehle entry add karein, ya amount/service batao — "
+                        "jaise \"600 wali Aadhaar entry delete kar do\".")
+            self._append(text_out)
+            return self._out("Conversational", text_out, "delete_not_found")
+        if len(recent) == 1:
+            tx = recent[0]
+            label = f"{tx.get('category')} {fmt(tx.get('amount', 0))} ({tx.get('mode')})"
+            action = {"kind": "DeleteTransaction", "transaction_id": tx["id"],
+                      "label": label,
+                      "preview": f"Ye entry delete karu?\n• {label}"}
+            return self._show_preview(action, action["preview"])
+        candidates = [{"id": t["id"],
+                       "label": f"{t.get('category')} {fmt(t.get('amount', 0))} ({t.get('mode')})",
+                       "amount": t.get("amount", 0)} for t in recent]
+        self.clarification = {"text": text, "missing": ["exact entry"],
+                              "candidates": candidates, "is_delete": True}
+        listing = "\n".join(f"{i + 1}. {c['label']}"
+                            for i, c in enumerate(candidates))
+        text_out = (f"Aisi {len(candidates)} recent entries mili — kaunsi delete karni hai?\n"
+                    f"{listing}\n\"Pehli\" / \"Dusri\" ya number likh dein.")
+        self._append(text_out)
+        return self._out("Clarify", text_out, "clarify",
+                         missing=["exact entry"], candidates=candidates)
+
+    def _resolve_correction(self, text):
+        """UPDATE 23 — amount/service delete or correction (mirror of
+        ChatbotViewModel.resolveCorrection): a pronoun resolves to
+        the verified last saved entry first; otherwise today's real
+        transactions are matched by amount/service. One match goes to
+        the preview (delete, or correct when a second amount is the
+        new one); several become candidates to pick; none is an
+        honest error naming the amount/service searched for."""
+        q = normalise(text)
+        is_delete = _is_delete_intent(q)
+        if is_delete and _is_pronoun_ref(q) and self.ctx.get("last_saved_entry"):
+            saved = self.ctx["last_saved_entry"]
+            action = {"kind": "DeleteTransaction",
+                      "transaction_id": saved["id"], "label": saved["label"],
+                      "preview": f"Ye entry delete karu?\n• {saved['label']}"}
+            return self._show_preview(action, action["preview"])
+        amounts = find_amounts(q)
+        svc = detect_service(q)
+        old = amounts[0] * 100 if amounts else None
+        new = amounts[1] * 100 if len(amounts) >= 2 else None
+        matches = [t for t in self.snap.get("txs", [])
+                   if (old is None or t.get("amount") == old)
+                   and (svc is None or t.get("category") == svc[1])]
+        if not matches:
+            amount_txt = f"{fmt(old)} ki " if old is not None else ""
+            service_txt = svc[1] if svc else ""
+            text_out = (f"Aaj ki {amount_txt}{service_txt} entry mujhe nahi mili. "
+                        "Kya aap Cash Book / Daily Business se check karke exact amount batayenge?")
+            self._append(text_out)
+            return self._out("Conversational", text_out, "delete_not_found")
+        if len(matches) == 1:
+            tx = matches[0]
+            label = f"{tx.get('category')} {fmt(tx.get('amount', 0))} ({tx.get('mode')})"
+            if is_delete:
+                action = {"kind": "DeleteTransaction",
+                          "transaction_id": tx["id"], "label": label,
+                          "preview": f"Ye entry delete karu?\n• {label}"}
+                return self._show_preview(action, action["preview"])
+            if new is not None:
+                action = {"kind": "CorrectTransaction",
+                          "transaction_id": tx["id"], "label": label,
+                          "new_amount": new,
+                          "preview": f"Ye entry sahi karu?\n• {label} → {fmt(new)}"}
+                return self._show_preview(action, action["preview"])
+            self.clarification = {"text": text, "missing": ["new amount"],
+                                  "candidates": [{"id": tx["id"], "label": label,
+                                                  "amount": tx.get("amount", 0)}]}
+            text_out = f"Mili: {label}\nSahi amount kitna hona chahiye?"
+            self._append(text_out)
+            return self._out("Clarify", text_out, "clarify",
+                             missing=["new amount"])
+        candidates = [{"id": t["id"],
+                       "label": f"{t.get('category')} {fmt(t.get('amount', 0))} ({t.get('mode')})",
+                       "amount": t.get("amount", 0)} for t in matches]
+        self.clarification = {"text": text, "missing": ["exact entry"],
+                              "candidates": candidates, "is_delete": is_delete}
+        listing = "\n".join(f"{i + 1}. {c['label']}"
+                            for i, c in enumerate(candidates))
+        verb = "delete" if is_delete else "sahi"
+        text_out = (f"Aisi {len(candidates)} entries mili — kaunsi wali {verb} karni hai?\n"
+                    f"{listing}\n\"Pehli\" / \"Dusri\" ya number likh dein.")
+        self._append(text_out)
+        return self._out("Clarify", text_out, "clarify",
+                         missing=["exact entry"], candidates=candidates)
 
     def send(self, text):
         """One user message through the whole pipeline. Returns the
@@ -4102,11 +4450,20 @@ class Session:
         if kind == "Action":
             return self._show_preview(a, a.get("preview", ""))
         if kind == "Clarify":
+            missing = a.get("missing", [])
+            if missing == ["delete target"]:
+                # UPDATE 23 — bare delete: list the recent entries to
+                # pick from, never a cloud fall-through.
+                return self._resolve_bare_delete(text)
+            if missing == ["exact entry"]:
+                # UPDATE 23 — amount/service delete (or correction):
+                # resolve against today's real transactions.
+                return self._resolve_correction(text)
             self.clarification = {"text": text,
-                                  "missing": a.get("missing", [])}
+                                  "missing": missing}
             self._append(a.get("question", ""))
             return self._out("Clarify", a.get("question", ""), "clarify",
-                             missing=a.get("missing", []))
+                             missing=missing)
         text_out = _reply(lang, "honestLimitation", 0)
         self._append(text_out)
         return self._out("Conversational", text_out, "honest_limitation")
@@ -8162,6 +8519,224 @@ def main():
         is_true("add ho gayi" not in r["text"],
                 "the failure never claims success")
 
+    # --- UPDATE 23 delete fix: the exact 2026-11-27 16:02–16:04 IST
+    #     live sequence, bare-delete clarification, amount-form delete,
+    #     disambiguation, honest errors, correction, no contradiction
+    #     after a verified save, and the cloud guard. ---
+    def _u23_add_aadhaar_600(s):
+        """The 16:02 add flow: Aadhaar Biometric ₹600, asked mode,
+        UPI, preview, confirm, verified save. Returns the session."""
+        r = s.send("Aaj Aadhar Card ka Biometric ka customer aaya 600 ka payment leke")
+        eq(r["kind"], "Clarify")
+        is_true("Cash" in r["text"] and "UPI" in r["text"],
+                "the add flow asks Cash ya UPI")
+        r = s.send("Upi")
+        eq(r["kind"], "Action")
+        is_true("600" in r["text"], "the preview shows ₹600")
+        r = s.send("Haan")
+        eq(r["intent"], "saved")
+        is_true("Save ho gaya" in r["text"], "the verified save is reported")
+        eq(len(s.snap["txs"]), 1, "exactly one row saved")
+        eq(sum(t["amount"] for t in s.snap["txs"]
+               if t["mode"] == "UPI"), 60000, "UPI is ₹600 after the save")
+        is_true(s.ctx.get("last_saved_entry") is not None,
+                "the verified save is remembered for 'isko'")
+        return s
+
+    @t("u23-delete: exact 4pm sequence — add ₹600 UPI, 'Isko remove kardo', 'Ha', verified deleted")
+    def _():
+        s = _u23_add_aadhaar_600(Session())
+        r = s.send("Isko remove kardo me bus check kar rha tha")
+        eq(r["kind"], "Action", "the pronoun delete is a real delete preview, never a fake reply")
+        eq(r["action"]["kind"], "DeleteTransaction")
+        is_true("Aadhaar Services" in r["text"] and "600" in r["text"],
+                "the preview names the just-saved entry")
+        is_true("hata diya" not in r["text"].lower(),
+                "no fake 'hata diya' before confirmation")
+        eq(len(s.snap["txs"]), 1, "nothing deleted before confirmation")
+        r = s.send("Ha")
+        eq(r["intent"], "deleted")
+        is_true("delete ho gayi" in r["text"], "the verified delete is reported")
+        eq(len(s.snap["txs"]), 0, "the row is gone from the store")
+        eq(sum(t["amount"] for t in s.snap["txs"]
+               if t["mode"] == "UPI"), 0, "UPI is back to ₹0")
+        eq(len(s.recycle_bin), 1, "the deleted row is in the Recycle Bin")
+        is_true(any(a["action"] == "DELETED" for a in s.audit_log),
+                "the delete has an audit log entry")
+        is_true(s.ctx.get("last_saved_entry") is None,
+                "'isko' no longer points at the deleted entry")
+
+    @t("u23-delete: 'Hatana hai' with one saved entry goes to its delete preview")
+    def _():
+        s = _u23_add_aadhaar_600(Session())
+        r = s.send("Hatana hai")
+        eq(r["kind"], "Action", "bare 'Hatana hai' resolves against the recent entry")
+        eq(r["action"]["kind"], "DeleteTransaction")
+        r = s.send("Haan")
+        eq(r["intent"], "deleted")
+        eq(len(s.snap["txs"]), 0)
+
+    @t("u23-delete: 'Isko remove kardo' with nothing saved is honest, never fake")
+    def _():
+        s = Session()
+        r = s.send("Isko remove kardo")
+        is_true(r["kind"] in ("Clarify", "Conversational"),
+                "no saved entry -> clarification or honest error, never an Action")
+        is_true("hata diya" not in r["text"].lower()
+                and "delete ho gayi" not in r["text"].lower(),
+                "no fake deletion is ever claimed")
+        eq(len(s.saved_entries), 0, "nothing was saved or deleted")
+
+    @t("u23-delete: bare delete lists recent candidates to pick from")
+    def _():
+        s = Session()
+        s.send("Aaj Xerox ke 300 cash hue")
+        s.send("Haan")
+        s.send("Aaj Smart Card ke 500 cash hue")
+        s.send("Haan")
+        eq(len(s.snap["txs"]), 2)
+        r = s.send("Entry delete kar do")
+        eq(r["kind"], "Clarify", "bare delete asks which entry")
+        is_true("Xerox" in r["text"] and "Smart Card" in r["text"],
+                "both recent entries are listed")
+        r = s.send("Pehli")
+        eq(r["kind"], "Action")
+        eq(r["action"]["kind"], "DeleteTransaction")
+        r = s.send("Haan")
+        eq(r["intent"], "deleted")
+        eq(len(s.snap["txs"]), 1, "only the picked entry is gone")
+        eq(s.snap["txs"][0]["category"], "Smart Card",
+           "the other entry survives")
+
+    @t("u23-delete: amount-form delete still works ('600 wali entry delete kar do')")
+    def _():
+        s = _u23_add_aadhaar_600(Session())
+        r = s.send("Aadhaar 600 wali entry delete kar do")
+        eq(r["kind"], "Action")
+        eq(r["action"]["kind"], "DeleteTransaction")
+        r = s.send("Haan")
+        eq(r["intent"], "deleted")
+        eq(len(s.snap["txs"]), 0)
+
+    @t("u23-delete: two same-amount entries are disambiguated, the right one is deleted")
+    def _():
+        s = Session()
+        s.send("Aaj Xerox ke 300 cash hue")
+        s.send("Haan")
+        s.send("Aaj Smart Card ke 300 cash hue")
+        s.send("Haan")
+        r = s.send("300 wali entry delete kar do")
+        eq(r["kind"], "Clarify", "two matches -> pick one")
+        is_true("Xerox" in r["text"] and "Smart Card" in r["text"],
+                "both ₹300 entries are listed")
+        r = s.send("Dusri")
+        eq(r["kind"], "Action")
+        r = s.send("Haan")
+        eq(r["intent"], "deleted")
+        eq(len(s.snap["txs"]), 1)
+        eq(s.snap["txs"][0]["category"], "Xerox",
+           "the second (Smart Card) entry was deleted, Xerox survives")
+
+    @t("u23-delete: non-existent amount is an honest error, nothing deleted")
+    def _():
+        s = _u23_add_aadhaar_600(Session())
+        r = s.send("999 wali entry delete kar do")
+        is_true(r["kind"] in ("Clarify", "Conversational"),
+                "no match -> honest error, never a preview")
+        is_true("nahi mili" in r["text"], "the error says the entry was not found")
+        eq(len(s.snap["txs"]), 1, "the real entry is untouched")
+        eq(len(s.recycle_bin), 0, "nothing went to the Recycle Bin")
+
+    @t("u23-delete: correction still works after the delete fix")
+    def _():
+        s = Session()
+        s.send("Aaj Xerox ke 300 cash hue")
+        s.send("Haan")
+        r = s.send("Xerox 300 wali entry galat hai, 350 karo")
+        eq(r["kind"], "Action")
+        eq(r["action"]["kind"], "CorrectTransaction")
+        eq(r["action"]["new_amount"], 35000)
+        r = s.send("Haan")
+        eq(r["intent"], "corrected")
+        eq(s.snap["txs"][0]["amount"], 35000, "the amount is really ₹350 now")
+        is_true(any(a["action"] == "EDITED" for a in s.audit_log),
+                "the correction has an audit log entry")
+
+    @t("u23-delete: no contradiction after a verified save — facts ground the save")
+    def _():
+        s = _u23_add_aadhaar_600(Session())
+        facts = last_saved_facts(s.ctx)
+        is_true(facts is not None, "the verified save produces facts")
+        is_true("Aadhaar Services" in facts and "600" in facts,
+                "the facts name the saved entry and amount")
+        is_true("Never say it was not saved" in facts,
+                "the facts forbid denying the save")
+        # Nothing the session said denies the save either.
+        said = " ".join(m["text"] for m in s.messages if not m["from_user"])
+        is_true("save hi nahi ki" not in said and "pehle se tha" not in said,
+                "no message contradicts the verified save")
+        # And a later figures question still sees the saved ₹600.
+        r = s.send("Aaj UPI balance kitna hai?")
+        is_true("600" in r["text"], "the saved entry still feeds later answers")
+
+    @t("u23-delete: cloud guard catches fabricated claims, clean replies pass")
+    def _():
+        s = _u23_add_aadhaar_600(Session())
+        saved = s.ctx["last_saved_entry"]
+        guarded = cloud_claim_guard("Theek hai bhai, hata diya.", saved)
+        is_true(guarded is not None, "a fabricated deletion is caught")
+        is_true("koi entry save ya delete nahi ki" in guarded,
+                "the replacement is honest")
+        is_true("Aadhaar Services" in guarded and "600" in guarded,
+                "the replacement grounds the verified save instead of denying it")
+        is_true("save hi nahi ki" not in guarded,
+                "the replacement never repeats the denial")
+        guarded2 = cloud_claim_guard(
+            "Maine koi entry save hi nahi ki thi, ₹600 pehle se tha.", saved)
+        is_true(guarded2 is not None
+                and "abhi bhi saved hai" in guarded2,
+                "the contradiction is caught and the save is defended")
+        is_true(cloud_claim_guard("Entry deleted successfully.", None) is not None,
+                "an English delete claim is caught")
+        is_true(cloud_claim_guard("Aaj ka profit ₹600 hai.", saved) is None,
+                "a clean summary passes unchanged")
+        is_true(cloud_claim_guard("Namaste! Aaj shop ka kaam kaisa chal raha hai?", None) is None,
+                "a greeting passes unchanged")
+        is_true(last_saved_facts({}) is None,
+                "no verified save -> no facts, never a claimed save")
+
+    @t("u23-delete: parser-level — pronoun resolves, bare asks, amount resolves")
+    def _():
+        ctx = {"day": TODAY, "last_saved_entry": {
+            "id": 7, "label": "Aadhaar Services ₹600 (UPI)",
+            "service_label": "Aadhaar Services", "amount": 60000, "mode": "UPI"}}
+        kind, a = parse("Isko remove kardo", ctx)
+        eq(kind, "Action")
+        eq(a["kind"], "DeleteTransaction")
+        eq(a["transaction_id"], 7)
+        kind, a = parse("Hatana hai", {})
+        eq(kind, "Clarify")
+        eq(a["missing"], ["delete target"])
+        kind, a = parse("Aadhaar 600 wali entry delete kar do", {})
+        eq(kind, "Clarify")
+        eq(a["missing"], ["exact entry"])
+        is_true(_is_delete_intent("entry hata do")
+                and _is_delete_intent("ye wali entry mita do")
+                and _is_delete_intent("delete kar do")
+                and not _is_delete_intent("Xerox ke 300 cash hue"),
+                "delete word forms recognised, a save is not a delete")
+        is_true(_is_pronoun_ref("isko remove kardo")
+                and _is_pronoun_ref("ye wali entry hata do")
+                and _is_pronoun_ref("is entry ko delete kar do")
+                and not _is_pronoun_ref("600 wali entry delete kar do"),
+                "pronoun references recognised, an amount delete has none")
+        m = understand("Hatana hai", {}, "hinglish")
+        eq(m["intent"], "BUSINESS_ACTION",
+           "a bare delete is a financial action, never a statement")
+        m = understand("Isko remove kardo", {}, "hinglish")
+        eq(m["intent"], "BUSINESS_ACTION",
+           "a pronoun delete is a financial action, never unknown")
+
     passed = 0
     failures = []
     lang_totals = {}
@@ -8199,6 +8774,7 @@ def main():
                           ("u21-followups", "UPDATE 21 follow-up understanding"),
                           ("u21-multiturn-long", "UPDATE 21 long arcs (10-15 msgs)"),
                           ("u22-appchange", "UPDATE 22 app-change requests"),
+                          ("u23-delete", "UPDATE 23 context-aware delete"),
                           ("u20-ambiguous-fail", "UPDATE 20 ambiguous / failed / unavailable"),
                           ("regression-", "Classifier regression traces")):
         names = [n for n in outcomes if n.startswith(prefix)]

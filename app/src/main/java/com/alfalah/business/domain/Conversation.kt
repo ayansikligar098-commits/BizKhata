@@ -345,6 +345,19 @@ object MeaningParser {
         //     understood" — the UPDATE 21 complaint.
         resolveFollowUp(rawText, q, context, lang, timeRef)?.let { return it }
 
+        // 2c. UPDATE 23 — delete intent ("Isko remove kardo",
+        //     "Hatana hai", "Aadhaar 600 wali entry delete kar do").
+        //     A financial ACTION, classified BEFORE casual / statement
+        //     / plan: "Hatana hai" would otherwise be a STATEMENT
+        //     ("hai" is a common word) and "Isko remove kardo" an
+        //     UNKNOWN — both used to fall through to the cloud model,
+        //     which fabricated the deletion (2026-11-27 16:02–16:04
+        //     IST). The "checklist" guard: "checklist delete kar do"
+        //     is a checklist edit, not a ledger delete.
+        if (!q.contains("checklist") && AiAssistantParser.isDeleteIntent(q)) {
+            return Meaning(ConversationIntent.BUSINESS_ACTION, detectTopic(q, context), timeRef, service, amount, rawText, q, lang)
+        }
+
         // 3. Checklist — "Kal ke kaam ki checklist banao". The topic
         //    prefers an explicit service, then the remembered plan
         //    ("kal PAN Card banane hai" → PAN checklist), then the words.
