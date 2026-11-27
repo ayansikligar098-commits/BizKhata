@@ -11,7 +11,7 @@ import {
   savedEntryFor,
   type ActionDraft,
 } from '@/lib/chatbot';
-import { applyAssistantAction, type AssistantAction, type ExecResult } from '@/lib/assistant';
+import { applyAssistantAction, deleteVerifyNote, verifyAppliedIds, type AssistantAction, type ExecResult } from '@/lib/assistant';
 import { buildSystemPrompt, callConversationAIStream, cloudReplyMatchesLanguage, getAiServiceKey, guardCloudReply, hasAiServiceKey, type AiChatMessage } from '@/lib/conversation-ai';
 import { langName, respondToMessage } from '@/lib/conversation';
 import { STREAM_UNREACHABLE_MSG, Typewriter } from '@/lib/streaming';
@@ -747,19 +747,20 @@ function useChat(onNavigateAway?: () => void) {
     try { window.localStorage.removeItem(chatKey(profileId)); } catch { /* ignore */ }
   }
 
-  /** Verify the backend actually stored the applied records. */
-  function verifySaved(appliedIds: string[]): Promise<boolean> {
+  /** Verify the backend actually stored the applied records.
+   *  Delete-aware: a delete is verified by the target being GONE
+   *  from the live records and present in the Recycle Bin / audit
+   *  log (see verifyAppliedIds in lib/assistant.ts). The deleted
+   *  record's own id can never be found among live ids — and the
+   *  recycle item mints a NEW id — so the old plain presence check
+   *  could never pass for a delete and the card always showed the
+   *  misleading "verification pending" line. Saves are unchanged:
+   *  the record must be present. */
+  function verifySaved(appliedIds: string[], isDelete: boolean): Promise<boolean> {
     return new Promise((resolve) => {
       window.setTimeout(() => {
         try {
-          const s = loadState();
-          const all = [
-            ...s.jobs.map((x) => x.id), ...s.dailyEntries.map((x) => x.id),
-            ...s.expenses.map((x) => x.id), ...s.cashTxns.map((x) => x.id),
-            ...s.mtTransfers.map((x) => x.id), ...s.mtFunds.map((x) => x.id),
-            ...s.customers.map((x) => x.id), ...s.recycle.map((x) => x.id),
-          ];
-          resolve(appliedIds.every((id) => all.includes(id)));
+          resolve(verifyAppliedIds(loadState(), appliedIds, isDelete));
         } catch {
           resolve(false);
         }
@@ -789,8 +790,8 @@ function useChat(onNavigateAway?: () => void) {
       return;
     }
     if (res.ok) {
-      const verified = await verifySaved(res.appliedIds);
       const isDelete = preview.action.kind === 'delete_entry';
+      const verified = await verifySaved(res.appliedIds, isDelete);
       updateMsg(msgId, (m) => ({
         ...m,
         preview: undefined,
@@ -800,11 +801,7 @@ function useChat(onNavigateAway?: () => void) {
           verified,
           link: res.link || undefined,
           title: isDelete ? '✓ Deleted' : '✓ Saved',
-          verifyNote: isDelete
-            ? verified
-              ? '✓ Delete verify ho gaya — entry Recycle Bin mein hai, wahan se restore ho sakti hai.'
-              : 'Delete ho gaya — verification abhi pending hai, Recycle Bin mein check kar lo.'
-            : undefined,
+          verifyNote: isDelete ? deleteVerifyNote(verified) : undefined,
         },
       }));
       // UPDATE 23 — record the verified save in the conversation

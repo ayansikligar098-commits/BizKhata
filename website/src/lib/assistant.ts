@@ -123,6 +123,47 @@ function fail(error: string): ExecResult {
   return { ok: false, summary: error, lines: [], appliedIds: [], link: null, error };
 }
 
+/**
+ * Verify applied records in a state snapshot — the single source of
+ * truth for the chat UI's result card (components/chatbot.tsx
+ * verifySaved) and the UPDATE 23 tests.
+ *
+ * Saves: every appliedId must be PRESENT among the live records.
+ *
+ * Deletes: every appliedId must be ABSENT from the live records AND
+ * present in the Recycle Bin (the recycle item wraps the deleted
+ * record, so match the original id inside its `data` JSON — the
+ * recycle item itself mints a NEW id, so a plain presence check
+ * against live + recycle ids can never pass for a delete) or recorded
+ * in the audit log as a delete. A delete whose target is still live
+ * is NEVER verified, even if a recycle/audit row exists for it.
+ */
+export function verifyAppliedIds(s: AppState, appliedIds: string[], isDelete: boolean): boolean {
+  const live = new Set([
+    ...s.jobs.map((x) => x.id), ...s.dailyEntries.map((x) => x.id),
+    ...s.expenses.map((x) => x.id), ...s.cashTxns.map((x) => x.id),
+    ...s.mtTransfers.map((x) => x.id), ...s.mtFunds.map((x) => x.id),
+    ...s.customers.map((x) => x.id),
+  ]);
+  if (!isDelete) return appliedIds.every((id) => live.has(id));
+  const inRecycle = (id: string): boolean => s.recycle.some((r) => {
+    if (r.id === id) return true;
+    try { return (JSON.parse(r.data) as { id?: string }).id === id; } catch { return false; }
+  });
+  const inAuditAsDelete = (id: string): boolean =>
+    s.audit.some((a) => a.action === 'delete' && a.entityId === id);
+  return appliedIds.every((id) => !live.has(id) && (inRecycle(id) || inAuditAsDelete(id)));
+}
+
+/** Result-card wording for a delete: the exact UPDATE 23 wording
+ *  when verified, the honest pending fallback when verification
+ *  genuinely cannot confirm. */
+export function deleteVerifyNote(verified: boolean): string {
+  return verified
+    ? '✓ Delete verify ho gaya — entry Recycle Bin mein hai, wahan se restore ho sakti hai.'
+    : 'Delete ho gaya — verification abhi pending hai, Recycle Bin mein check kar lo.';
+}
+
 function nowTime(): string {
   return new Date().toTimeString().slice(0, 5);
 }

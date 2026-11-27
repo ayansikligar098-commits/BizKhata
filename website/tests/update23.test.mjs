@@ -141,20 +141,15 @@ class Sim {
     this.pending = null;
     const res = asst.applyAssistantAction(this.state, this.p1.id, p.action, `u23-key-${++keySeq}`);
     if (!res.ok) return { kind: 'text', text: res.summary, exec: res, verified: false };
-    const all = [
-      ...this.state.jobs.map((x) => x.id), ...this.state.dailyEntries.map((x) => x.id),
-      ...this.state.expenses.map((x) => x.id), ...this.state.cashTxns.map((x) => x.id),
-      ...this.state.mtTransfers.map((x) => x.id), ...this.state.mtFunds.map((x) => x.id),
-      ...this.state.customers.map((x) => x.id), ...this.state.recycle.map((x) => x.id),
-    ];
-    // Delete verification: the deleted record must be in the Recycle
-    // Bin (its recycle item wraps the original, so match on the
-    // wrapped id as well as the recycle item id).
-    const verified = res.appliedIds.every((id) => all.includes(id)
-      || this.state.recycle.some((r) => {
-        try { return JSON.parse(r.data).id === id; } catch { return false; }
-      }));
-    if (p.action.kind === 'delete_entry') {
+    // Verification uses the PRODUCTION function (lib/assistant.ts
+    // verifyAppliedIds) — the same one the chat UI's verifySaved
+    // calls — so this suite tests the real card logic, not a mirror.
+    // A delete is verified only when the target is GONE from live
+    // records and in the Recycle Bin / audit log; a save only when
+    // the record is present.
+    const isDelete = p.action.kind === 'delete_entry';
+    const verified = asst.verifyAppliedIds(this.state, res.appliedIds, isDelete);
+    if (isDelete) {
       this.ctx = { ...this.ctx, lastSavedEntry: undefined, lastVerifiedSave: undefined };
     } else if (verified) {
       const saved = chat.savedEntryFor(p.action, res.appliedIds);
@@ -165,7 +160,11 @@ class Sim {
     if (p.action.kind === 'daily_income' && p.action.entries.length > 0) {
       this.ctx = { ...this.ctx, lastService: p.action.entries[0].service };
     }
-    return { kind: 'result', text: res.summary, exec: res, verified, action: p.action, lines: res.lines };
+    return {
+      kind: 'result', text: res.summary, exec: res, verified, action: p.action, lines: res.lines,
+      title: isDelete ? '✓ Deleted' : '✓ Saved',
+      verifyNote: isDelete ? asst.deleteVerifyNote(verified) : undefined,
+    };
   }
 }
 
@@ -184,6 +183,7 @@ C('a-exact-sequence', '16:02 add Aadhaar ₹600 UPI → confirm → 16:03 "Isko 
   if (r2.action.entries[0].service !== 'Aadhaar Services' || r2.action.entries[0].method !== 'upi') return ok(false, `turn2 service/method wrong: ${JSON.stringify(r2.action.entries[0])}`);
   const r3 = sim.send('Ha');
   if (r3.kind !== 'result' || !r3.exec.ok || !r3.verified) return ok(false, `turn3 confirm should save+verify, got kind=${r3.kind} verified=${r3.verified} text=${T(r3.text).slice(0, 120)}`);
+  if (r3.title !== '✓ Saved') return ok(false, `save card title must be "✓ Saved", got ${JSON.stringify(r3.title)}`);
   if (upiToday(sim.state, sim.p1) !== 60000 || sim.state.dailyEntries.length !== 1) return ok(false, 'after save: UPI collection should be ₹600, 1 entry');
   const savedId = sim.state.dailyEntries[0].id;
   if (!sim.ctx.lastSavedEntry || sim.ctx.lastSavedEntry.id !== savedId) return ok(false, 'ctx.lastSavedEntry must be recorded after the verified save');
@@ -194,6 +194,11 @@ C('a-exact-sequence', '16:02 add Aadhaar ₹600 UPI → confirm → 16:03 "Isko 
   if (sim.state.dailyEntries.length !== 1) return ok(false, 'preview must NOT delete anything yet');
   const r5 = sim.send('Ha');
   if (r5.kind !== 'result' || !r5.exec.ok || !r5.verified) return ok(false, `delete confirm should delete+verify, got kind=${r5.kind} verified=${r5.verified}`);
+  // UPDATE 23 wording (live-drive finding): the verified delete card
+  // must say "✓ Delete verify ho gaya" — never the misleading
+  // "verification abhi pending" line.
+  if (r5.title !== '✓ Deleted') return ok(false, `delete card title must be "✓ Deleted", got ${JSON.stringify(r5.title)}`);
+  if (r5.verifyNote !== '✓ Delete verify ho gaya — entry Recycle Bin mein hai, wahan se restore ho sakti hai.') return ok(false, `delete card wording wrong: ${JSON.stringify(r5.verifyNote)}`);
   if (sim.state.dailyEntries.length !== 0 || sim.state.cashTxns.length !== 0) return ok(false, 'entry + linked txn must be gone after delete');
   if (upiToday(sim.state, sim.p1) !== 0) return ok(false, `UPI collection must be back to ₹0, got ${upiToday(sim.state, sim.p1)}`);
   if (!sim.state.recycle.some((r) => r.kind === 'DailyEntry' && /Aadhaar/.test(r.label))) return ok(false, 'deleted entry must be in the Recycle Bin');
@@ -215,6 +220,65 @@ C('a2-double-isko', 'A second "Isko remove kardo" after the delete is an honest 
   if (r.kind === 'action') return ok(false, 'second isko must NOT produce another delete action');
   if (/hata diya|delete kar diya|deleted/i.test(T(r.text))) return ok(false, `must not claim a deletion: ${T(r.text).slice(0, 140)}`);
   if (!/nahi hai|pehle hi|Recycle Bin/i.test(T(r.text))) return ok(false, `must say honestly the entry is already gone: ${T(r.text).slice(0, 140)}`);
+  return ok(true);
+});
+
+// (v1) delete-verification wording end-to-end (live-drive finding):
+// a confirmed delete is verified AND the card says exactly
+// "✓ Delete verify ho gaya" — never "verification abhi pending".
+C('v1-delete-verify-wording', 'Delete flow end-to-end: verified delete → card wording "✓ Delete verify ho gaya"', () => {
+  const sim = new Sim();
+  seedEntry(sim.state, sim.p1, 'Aadhaar Services', 60000, 'upi', 'a600');
+  const r = sim.send('Aadhaar 600 wali entry delete kar do');
+  if (r.kind !== 'action' || r.action.kind !== 'delete_entry') return ok(false, `expected delete preview, got kind=${r.kind}`);
+  const r2 = sim.send('Ha');
+  if (!r2.exec.ok || !r2.verified) return ok(false, `delete must verify, got ok=${r2.exec.ok} verified=${r2.verified}`);
+  if (r2.title !== '✓ Deleted') return ok(false, `title must be "✓ Deleted", got ${JSON.stringify(r2.title)}`);
+  if (r2.verifyNote !== '✓ Delete verify ho gaya — entry Recycle Bin mein hai, wahan se restore ho sakti hai.') return ok(false, `wording must be the UPDATE 23 wording, got ${JSON.stringify(r2.verifyNote)}`);
+  if (/pending/.test(T(r2.verifyNote))) return ok(false, 'verified delete card must never say "pending"');
+  if (upiToday(sim.state, sim.p1) !== 0) return ok(false, 'UPI must be ₹0 after the verified delete');
+  return ok(true);
+});
+
+// (v2) save verification still works: record present → verified;
+// record gone afterwards → NOT verified (never weaken saves).
+C('v2-save-verify-still-works', 'Save flow verification still works: record present → verified, record gone → not verified', () => {
+  const sim = new Sim();
+  sim.send('Aaj Aadhar Card Ka Biometric Ka Customer Aaya 600 Ka Payment Leke');
+  sim.send('Upi');
+  const r = sim.send('Ha');
+  if (r.kind !== 'result' || !r.exec.ok || !r.verified) return ok(false, `save must verify, got kind=${r.kind} verified=${r.verified}`);
+  if (r.title !== '✓ Saved') return ok(false, `save card title must be "✓ Saved", got ${JSON.stringify(r.title)}`);
+  const ids = r.exec.appliedIds;
+  if (!ids.length) return ok(false, 'save must report appliedIds');
+  if (!asst.verifyAppliedIds(sim.state, ids, false)) return ok(false, 'verifyAppliedIds(save, present) must be true');
+  // Simulate the record vanishing after the save: the same ids must
+  // no longer verify.
+  const gone = JSON.parse(JSON.stringify(sim.state));
+  gone.dailyEntries = [];
+  gone.cashTxns = [];
+  if (asst.verifyAppliedIds(gone, ids, false)) return ok(false, 'verifyAppliedIds(save, record gone) must be false');
+  return ok(true);
+});
+
+// (v3) a delete whose target is STILL in the live records is NOT
+// reported verified — even though Recycle Bin + audit rows exist
+// for it (half-applied delete must show the honest pending line).
+C('v3-delete-target-still-live', 'Delete whose target is still in live records is NOT verified (pending fallback wording)', () => {
+  const sim = new Sim();
+  const id = seedEntry(sim.state, sim.p1, 'Aadhaar Services', 60000, 'upi', 'a600');
+  const kept = sim.state.dailyEntries.find((x) => x.id === id);
+  sim.send('Aadhaar 600 wali entry delete kar do');
+  const r = sim.send('Ha');
+  if (!r.exec.ok || !r.verified) return ok(false, 'setup: the real delete must verify first');
+  // Positive control: gone from live + in Recycle Bin + audit → verified.
+  if (!asst.verifyAppliedIds(sim.state, [id], true)) return ok(false, 'control: a fully-applied delete must verify');
+  // Now simulate the removal not sticking: the same record is back
+  // in the live records while its Recycle Bin + audit rows remain.
+  sim.state.dailyEntries.push(kept);
+  if (asst.verifyAppliedIds(sim.state, [id], true)) return ok(false, 'a delete whose target is still live must NOT verify');
+  if (asst.deleteVerifyNote(false) !== 'Delete ho gaya — verification abhi pending hai, Recycle Bin mein check kar lo.') return ok(false, `unverified delete must keep the honest pending fallback, got ${JSON.stringify(asst.deleteVerifyNote(false))}`);
+  if (!/pending/.test(asst.deleteVerifyNote(false))) return ok(false, 'pending fallback must say "pending"');
   return ok(true);
 });
 

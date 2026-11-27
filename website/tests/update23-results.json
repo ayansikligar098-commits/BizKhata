@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-11-27T14:04:03.556Z",
-  "total": 12,
-  "passed": 12,
+  "generatedAt": "2026-11-27T15:25:15.602Z",
+  "total": 15,
+  "passed": 15,
   "rate": 100,
   "cases": [
     {
@@ -13,6 +13,24 @@
     {
       "id": "a2-double-isko",
       "title": "A second \"Isko remove kardo\" after the delete is an honest \"already gone\" — never a second fake success",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "v1-delete-verify-wording",
+      "title": "Delete flow end-to-end: verified delete → card wording \"✓ Delete verify ho gaya\"",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "v2-save-verify-still-works",
+      "title": "Save flow verification still works: record present → verified, record gone → not verified",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "id": "v3-delete-target-still-live",
+      "title": "Delete whose target is still in live records is NOT verified (pending fallback wording)",
       "pass": true,
       "detail": ""
     },
